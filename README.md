@@ -21,7 +21,7 @@ coordinates all of them to validate your code before you merge.
 
 - **Local builds** run directly on your Mac — fast, no network needed
 - **Remote builds** run on your VMs over SSH — real Windows and Linux, not
-  emulated
+  emulated (maybe on a local machine or Proxmox server)
 - **Cloud builds** dispatch to Namespace or GitHub Actions — fallback when
   your VMs are off, or when you need neutral hardware
 
