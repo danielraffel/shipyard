@@ -7,7 +7,10 @@ matrix builds across configured platforms.
 
 from __future__ import annotations
 
-from shipyard.core.config import Config
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from shipyard.core.config import Config
 
 # Platform to runner mapping for each provider
 _RUNNERS: dict[str, dict[str, str]] = {
@@ -98,8 +101,8 @@ def generate_ci_workflow(config: Config) -> str:
     # If no commands configured, add a placeholder
     if not steps_lines:
         steps_lines.append(
-            f"      - name: Build & Test\n"
-            f"        run: echo 'Configure validation commands in .shipyard/config.toml'"
+            "      - name: Build & Test\n"
+            "        run: echo 'Configure validation commands in .shipyard/config.toml'"
         )
 
     steps_block = "\n\n".join(steps_lines)

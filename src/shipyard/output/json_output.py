@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import json
 import sys
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from shipyard.output.schema import OutputEnvelope
+if TYPE_CHECKING:
+    from shipyard.output.schema import OutputEnvelope
 
 
 def render_json(envelope: OutputEnvelope) -> None:

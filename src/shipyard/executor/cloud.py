@@ -16,7 +16,6 @@ from typing import Any
 
 from shipyard.core.job import TargetResult, TargetStatus
 
-
 # How long to wait between poll attempts (seconds)
 _POLL_INTERVAL = 15
 # Maximum time to wait for a workflow run to appear in the list

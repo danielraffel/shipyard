@@ -169,10 +169,10 @@ def _run_gh(cmd: list[str]) -> str:
             msg = result.stderr.strip() or result.stdout.strip() or "gh command failed"
             raise GhError(msg, result.returncode)
         return result.stdout
-    except FileNotFoundError:
-        raise GhError("gh CLI not installed. Install from https://cli.github.com/")
-    except subprocess.TimeoutExpired:
-        raise GhError("gh command timed out after 60 seconds")
+    except FileNotFoundError as err:
+        raise GhError("gh CLI not installed. Install from https://cli.github.com/") from err
+    except subprocess.TimeoutExpired as err:
+        raise GhError("gh command timed out after 60 seconds") from err
 
 
 def _run_git(cmd: list[str]) -> str:
@@ -188,5 +188,5 @@ def _run_git(cmd: list[str]) -> str:
             msg = result.stderr.strip() or "git command failed"
             raise GhError(msg, result.returncode)
         return result.stdout
-    except FileNotFoundError:
-        raise GhError("git not found")
+    except FileNotFoundError as err:
+        raise GhError("git not found") from err

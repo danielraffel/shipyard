@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import subprocess
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from shipyard.core.config import Config
-from shipyard.core.evidence import EvidenceStore
-from shipyard.core.queue import Queue
 from shipyard.ship.pr import GhError, PrInfo, create_pr, find_pr_for_branch, merge_pr
+
+if TYPE_CHECKING:
+    from shipyard.core.config import Config
+    from shipyard.core.evidence import EvidenceStore
+    from shipyard.core.queue import Queue
 
 
 @dataclass(frozen=True)

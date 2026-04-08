@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import subprocess
 import time
-from typing import Any
 
 from shipyard.vm.base import VM
 
@@ -105,9 +104,8 @@ class UTMProvider:
             True if the VM booted and SSH became reachable within the timeout.
         """
         # Start the VM if not already running
-        if not self.is_running(vm_name):
-            if not self.start(vm_name):
-                return False
+        if not self.is_running(vm_name) and not self.start(vm_name):
+            return False
 
         # Poll SSH until reachable or timeout
         deadline = time.monotonic() + timeout_secs

@@ -6,11 +6,9 @@ detection into a single ProjectInfo result.
 
 from __future__ import annotations
 
-import os
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from shipyard.detect.ci_existing import CISystem, detect_existing_ci
 from shipyard.detect.ecosystem import EcosystemDetector, detect_all
@@ -47,26 +45,15 @@ def _infer_platforms(ecosystems: list[EcosystemDetector], path: Path) -> list[st
     """Infer target platforms from detected ecosystems and build files."""
     platforms: list[str] = []
     families = {e.family for e in ecosystems}
-    names = {e.name for e in ecosystems}
 
     # Apple-only ecosystems
     if "apple" in families and families <= {"apple"}:
         return ["macos"]
 
     # Cross-platform by default for most ecosystems
-    if "cpp" in families or "rust" in families or "go" in families:
+    cross_platform = {"cpp", "rust", "go", "node", "python", "jvm", "dotnet", "dart", "deno"}
+    if families & cross_platform:
         platforms = ["macos", "linux", "windows"]
-    elif "node" in families or "python" in families:
-        platforms = ["macos", "linux", "windows"]
-    elif "jvm" in families:
-        platforms = ["macos", "linux", "windows"]
-    elif "dotnet" in families:
-        platforms = ["macos", "linux", "windows"]
-    elif "dart" in families:
-        if "flutter" in names:
-            platforms = ["macos", "linux", "windows"]
-        else:
-            platforms = ["macos", "linux", "windows"]
     elif "apple" in families:
         platforms = ["macos"]
     elif "ruby" in families or "elixir" in families or "php" in families:

@@ -9,11 +9,10 @@ from __future__ import annotations
 from typing import Any
 
 from rich.console import Console
-from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from shipyard.core.job import Job, JobStatus, TargetResult, TargetStatus
+from shipyard.core.job import Job, JobStatus
 
 console = Console()
 
@@ -66,10 +65,7 @@ def render_job(job: Job) -> None:
 
     overall = ""
     if job.status == JobStatus.COMPLETED:
-        if job.passed:
-            overall = "[bold green]All green.[/]"
-        else:
-            overall = "[bold red]Failed.[/]"
+        overall = "[bold green]All green.[/]" if job.passed else "[bold red]Failed.[/]"
     elif job.status == JobStatus.RUNNING:
         overall = "[yellow]Running...[/]"
     elif job.status == JobStatus.CANCELLED:

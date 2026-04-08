@@ -6,7 +6,6 @@ then generates a .shipyard/config.toml with sensible defaults.
 
 from __future__ import annotations
 
-import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -239,14 +238,14 @@ def run_init(
         if click.confirm("Configure SSH targets?", default=False):
             for platform in ["ubuntu", "windows"]:
                 if platform == "ubuntu" and "linux" in platforms:
-                    host = click.prompt(f"  SSH host for Linux", default="ubuntu")
+                    host = click.prompt("  SSH host for Linux", default="ubuntu")
                     if _probe_ssh_host(host):
                         click.echo(f"    {host}: reachable")
                         ssh_hosts["ubuntu"] = host
                     else:
                         click.echo(f"    {host}: not reachable (skipping)")
                 elif platform == "windows" and "windows" in platforms:
-                    host = click.prompt(f"  SSH host for Windows", default="win")
+                    host = click.prompt("  SSH host for Windows", default="win")
                     if _probe_ssh_host(host):
                         click.echo(f"    {host}: reachable")
                         ssh_hosts["windows"] = host
@@ -268,7 +267,7 @@ def run_init(
 
     if not non_interactive:
         click.echo()
-        click.echo(f"Created .shipyard/config.toml")
+        click.echo("Created .shipyard/config.toml")
         click.echo("Run 'shipyard run' to validate.")
 
     return config

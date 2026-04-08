@@ -7,14 +7,17 @@ Jobs are ordered by priority (high first) then FIFO.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from shipyard.core.job import Job, JobStatus, Priority, ValidationMode
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 KEEP_COMPLETED = 25
 
@@ -186,10 +189,8 @@ class _DrainLock:
         if self._fd is not None:
             if sys.platform == "win32":
                 import msvcrt
-                try:
+                with contextlib.suppress(OSError):
                     msvcrt.locking(self._fd, msvcrt.LK_UNLCK, 1)
-                except OSError:
-                    pass
             else:
                 import fcntl
                 fcntl.flock(self._fd, fcntl.LOCK_UN)

@@ -7,9 +7,10 @@ executor, test the queue logic independently.
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
-from shipyard.core.job import TargetResult
+if TYPE_CHECKING:
+    from shipyard.core.job import TargetResult
 
 
 class Executor(Protocol):

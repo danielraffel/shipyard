@@ -6,19 +6,17 @@ output is the default.
 
 from __future__ import annotations
 
-import json
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
 import click
-from rich.console import Console
 
 from shipyard import __version__
 from shipyard.core.config import Config
 from shipyard.core.evidence import EvidenceStore
-from shipyard.core.job import Job, JobStatus, Priority, ValidationMode
+from shipyard.core.job import Job, ValidationMode
 from shipyard.core.queue import Queue
 from shipyard.executor.local import LocalExecutor
 from shipyard.output.human import (
