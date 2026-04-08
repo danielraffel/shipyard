@@ -20,8 +20,7 @@ Maybe you have cloud runner accounts on Namespace or GitHub. Shipyard
 coordinates all of them to validate your code before you merge.
 
 - **Local builds** run directly on your Mac — fast, no network needed
-- **Remote builds** run on your VMs over SSH — real Windows and Linux, not
-  emulated (maybe on a local machine or Proxmox server)
+- **Remote builds** run on your VMs over SSH — real Windows and Linux or maybe on a Proxmox server
 - **Cloud builds** dispatch to Namespace or GitHub Actions — fallback when
   your VMs are off, or when you need neutral hardware
 
