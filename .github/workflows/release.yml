@@ -29,18 +29,18 @@ jobs:
     steps:
       - id: resolve
         run: |
-          PROVIDER="${{ inputs.runner_provider || 'namespace' }}"
+          PROVIDER="${{ inputs.runner_provider || 'github-hosted' }}"
           if [ "$PROVIDER" = "namespace" ]; then
             echo "linux=\"namespace-profile-generouscorp\"" >> "$GITHUB_OUTPUT"
             echo "linux_arm=\"namespace-profile-generouscorp\"" >> "$GITHUB_OUTPUT"
             echo "macos_arm=\"namespace-profile-generouscorp-macos\"" >> "$GITHUB_OUTPUT"
-            echo "macos_x64=\"macos-13\"" >> "$GITHUB_OUTPUT"
+            echo "macos_x64=\"macos-15\"" >> "$GITHUB_OUTPUT"
             echo "windows=\"namespace-profile-generouscorp-windows\"" >> "$GITHUB_OUTPUT"
           else
             echo "linux=\"ubuntu-latest\"" >> "$GITHUB_OUTPUT"
             echo "linux_arm=\"ubuntu-24.04-arm\"" >> "$GITHUB_OUTPUT"
             echo "macos_arm=\"macos-15\"" >> "$GITHUB_OUTPUT"
-            echo "macos_x64=\"macos-13\"" >> "$GITHUB_OUTPUT"
+            echo "macos_x64=\"macos-15\"" >> "$GITHUB_OUTPUT"
             echo "windows=\"windows-latest\"" >> "$GITHUB_OUTPUT"
           fi
 

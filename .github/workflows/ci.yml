@@ -26,7 +26,7 @@ jobs:
     steps:
       - id: resolve
         run: |
-          PROVIDER="${{ inputs.runner_provider || 'namespace' }}"
+          PROVIDER="${{ inputs.runner_provider || 'github-hosted' }}"
           if [ "$PROVIDER" = "namespace" ]; then
             echo "linux=\"namespace-profile-generouscorp\"" >> "$GITHUB_OUTPUT"
             echo "macos=\"macos-15\"" >> "$GITHUB_OUTPUT"
