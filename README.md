@@ -125,9 +125,9 @@ $ shipyard run
 
 ---
 
-### Scenario 3: You're building a macOS desktop app with agents running in lots of worktrees
+### Scenario 3: You're building a macOS desktop app with agents running in parallel in multiple worktrees
 
-Single platform, single machine. You still get Shipyard's queue (so parallel
+Single platform, single machine. You still get Shipyard's queue (so agents running in parallel in multiple
 worktrees don't collide), evidence tracking (so you know what SHA last
 passed), and one-command merge:
 
