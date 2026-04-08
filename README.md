@@ -156,7 +156,7 @@ $ shipyard targets add ubuntu
 
 ---
 
-### You're building a cross-platform Tauri app
+### Scenario 4: You're building a cross-platform Tauri app
 
 Tauri apps ship native Rust binaries on macOS, Windows, and Linux. Shipyard
 validates all three in parallel:
