@@ -41,7 +41,7 @@ platform?
 
 ## Examples
 
-### You're building a macOS and iOS app
+### Scenario 1: You're building a macOS and iOS app
 
 You have an Xcode project. You want to make sure it builds and tests pass
 on your Mac before merging. Both targets run locally — no VMs or cloud needed.
@@ -74,7 +74,7 @@ no VMs, no cloud accounts needed. This is the simplest Shipyard setup.
 
 ---
 
-### You're building a cross-platform audio plugin
+### Scenario 2: You're building a cross-platform audio plugin
 
 You're using JUCE, Pulp, or another C++ framework. Your plugin needs to
 compile and pass tests on macOS, Windows, and Linux — because DAW users are
@@ -125,7 +125,7 @@ $ shipyard run
 
 ---
 
-### You're building a macOS desktop app
+### Scenario 3: You're building a macOS desktop app
 
 Single platform, single machine. You still get Shipyard's queue (so parallel
 worktrees don't collide), evidence tracking (so you know what SHA last
