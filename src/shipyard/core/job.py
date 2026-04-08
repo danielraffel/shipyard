@@ -212,6 +212,22 @@ class Job:
             results=dict(self.results),
         )
 
+    def with_priority(self, priority: Priority) -> Job:
+        """Return a new job with a different priority."""
+        return Job(
+            id=self.id,
+            sha=self.sha,
+            branch=self.branch,
+            mode=self.mode,
+            target_names=self.target_names,
+            priority=priority,
+            status=self.status,
+            created_at=self.created_at,
+            started_at=self.started_at,
+            completed_at=self.completed_at,
+            results=dict(self.results),
+        )
+
     def with_result(self, result: TargetResult) -> Job:
         """Return a new job with an updated target result."""
         new_results = dict(self.results)

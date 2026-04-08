@@ -16,7 +16,7 @@ import click
 from shipyard import __version__
 from shipyard.core.config import Config
 from shipyard.core.evidence import EvidenceStore
-from shipyard.core.job import Job, ValidationMode
+from shipyard.core.job import Job, JobStatus, ValidationMode
 from shipyard.core.queue import Queue
 from shipyard.executor.local import LocalExecutor
 from shipyard.output.human import (
@@ -283,6 +283,74 @@ def cancel(ctx: Context, job_id: str) -> None:
 
 
 @main.command()
+@click.argument("job_id")
+@click.argument("priority", type=click.Choice(["low", "normal", "high"]))
+@click.pass_obj
+def bump(ctx: Context, job_id: str, priority: str) -> None:
+    """Change the priority of a pending job."""
+    from shipyard.core.job import Priority
+
+    job = ctx.queue.get(job_id)
+    if not job:
+        render_error(f"Job {job_id} not found")
+        sys.exit(1)
+
+    if job.status != JobStatus.PENDING:
+        render_error(f"Can only bump pending jobs (current: {job.status.value})")
+        sys.exit(1)
+
+    new_priority = Priority[priority.upper()]
+    updated = job.with_priority(new_priority)
+    ctx.queue.update(updated)
+
+    if ctx.json_mode:
+        ctx.output("bump", {"job": updated.to_dict()})
+    else:
+        render_message(f"Bumped {job_id} to {priority}")
+
+
+@main.command(name="queue")
+@click.pass_obj
+def queue_cmd(ctx: Context) -> None:
+    """Show all jobs in the queue."""
+    queue = ctx.queue
+    active = queue.get_active()
+    pending = [j for j in queue._jobs if j.status == JobStatus.PENDING]
+    queue._ensure_loaded()
+    pending.sort(key=lambda j: (-j.priority.value, j.created_at))
+    recent = queue.get_recent(limit=5)
+
+    if ctx.json_mode:
+        ctx.output("queue", {
+            "active": active.to_dict() if active else None,
+            "pending": [j.to_dict() for j in pending],
+            "recent": [j.to_dict() for j in recent],
+        })
+    else:
+        console.print()
+        console.print("[bold]Queue[/]")
+
+        if active:
+            console.print("\n  [bold yellow]Running:[/]")
+            console.print(f"    {active.id}  {active.branch} @ {active.sha[:8]}  [{active.priority.name.lower()}]")
+
+        if pending:
+            console.print(f"\n  [bold]Pending ({len(pending)}):[/]")
+            for j in pending:
+                console.print(f"    {j.id}  {j.branch} @ {j.sha[:8]}  [{j.priority.name.lower()}]")
+        else:
+            console.print("\n  [dim]No pending jobs[/]")
+
+        if recent:
+            console.print(f"\n  [bold]Recent ({len(recent)}):[/]")
+            for j in recent:
+                status = "[green]pass[/]" if j.passed else "[red]fail[/]"
+                console.print(f"    {j.id}  {j.branch} @ {j.sha[:8]}  {status}")
+
+        console.print()
+
+
+@main.command()
 @click.pass_obj
 def doctor(ctx: Context) -> None:
     """Check environment, dependencies, and targets."""
@@ -351,15 +419,15 @@ def ship(ctx: Context, base: str) -> None:
     # Find or create PR
     existing = find_pr_for_branch(branch)
     if existing:
-        pr_number = existing
+        pr_info = existing
         if not ctx.json_mode:
-            render_message(f"Found existing PR #{pr_number}")
+            render_message(f"Found existing PR #{pr_info.number}")
     else:
-        pr_number = create_pr(branch, base, f"Ship {branch}", "Automated by Shipyard")
+        pr_info = create_pr(branch, base, f"Ship {branch}", "Automated by Shipyard")
         if not ctx.json_mode:
-            render_message(f"Created PR #{pr_number}")
+            render_message(f"Created PR #{pr_info.number}")
 
-    if not pr_number:
+    if not pr_info:
         render_error("Failed to create or find PR")
         sys.exit(1)
 
@@ -410,19 +478,19 @@ def ship(ctx: Context, base: str) -> None:
             ))
 
     if job.passed:
-        merged = merge_pr(pr_number)
+        merged = merge_pr(pr_info.number)
         if ctx.json_mode:
-            ctx.output("ship", {"pr": pr_number, "merged": merged, "run": job.to_dict()})
+            ctx.output("ship", {"pr": pr_info.number, "merged": merged, "run": job.to_dict()})
         else:
             if merged:
-                render_message(f"PR #{pr_number} merged. All green.", style="bold green")
+                render_message(f"PR #{pr_info.number} merged. All green.", style="bold green")
             else:
-                render_message(f"All green but merge failed for PR #{pr_number}", style="bold yellow")
+                render_message(f"All green but merge failed for PR #{pr_info.number}", style="bold yellow")
     else:
         if ctx.json_mode:
-            ctx.output("ship", {"pr": pr_number, "merged": False, "run": job.to_dict()})
+            ctx.output("ship", {"pr": pr_info.number, "merged": False, "run": job.to_dict()})
         else:
-            render_message(f"Validation failed. PR #{pr_number} not merged.", style="bold red")
+            render_message(f"Validation failed. PR #{pr_info.number} not merged.", style="bold red")
             sys.exit(1)
 
 
@@ -438,16 +506,16 @@ def cleanup(ctx: Context, dry_run: bool, apply: bool) -> None:
     if apply:
         dry_run = False
 
-    items = do_cleanup(state_dir, dry_run=dry_run)
+    result = do_cleanup(state_dir, dry_run=dry_run)
     if ctx.json_mode:
-        ctx.output("cleanup", {"dry_run": dry_run, "items": items})
+        ctx.output("cleanup", result.to_dict())
     else:
-        if not items:
+        if not result.items:
             render_message("Nothing to clean up.", style="dim")
         else:
-            for item in items:
+            for item in result.items:
                 action = "would delete" if dry_run else "deleted"
-                render_message(f"  {action}: {item['path']} ({item.get('size', '?')})")
+                render_message(f"  {action}: {item.path} ({item.size_bytes} bytes)")
             if dry_run:
                 render_message("\nRun with --apply to delete.", style="dim")
 
