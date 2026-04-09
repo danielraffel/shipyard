@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from shipyard.core.config import Config
 from shipyard.executor.dispatch import ExecutorDispatcher
 from shipyard.preflight import run_submission_preflight
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _config(tmp_path: Path, targets: dict) -> Config:
@@ -80,3 +83,80 @@ def test_unreachable_target_rejected_without_override(tmp_path, monkeypatch) -> 
             dispatcher=dispatcher,
             cwd=tmp_path,
         )
+
+
+def test_auto_cloud_failover_rescues_unreachable_ssh(tmp_path, monkeypatch) -> None:
+    """When [failover.cloud_auto] is on, SSH→cloud failover rescues the run."""
+    config = _config(
+        tmp_path,
+        {"ubuntu": {"backend": "ssh", "platform": "linux-x64", "host": "ubuntu"}},
+    )
+    config.data["failover"] = {
+        "cloud_auto": {
+            "enabled": True,
+            "provider": "namespace",
+            "workflow": "ci.yml",
+        }
+    }
+    dispatcher = ExecutorDispatcher()
+    monkeypatch.setattr("shipyard.preflight._git_root_for", lambda _: tmp_path)
+    # SSH probe fails; cloud probe succeeds. The preflight should
+    # inject the cloud fallback, then find it reachable, and accept.
+    monkeypatch.setattr(
+        dispatcher,
+        "probe",
+        lambda target_config: str(
+            target_config.get("type") or target_config.get("backend")
+        ) == "cloud",
+    )
+
+    result = run_submission_preflight(
+        config,
+        target_names=["ubuntu"],
+        dispatcher=dispatcher,
+        cwd=tmp_path,
+    )
+
+    assert result.targets["ubuntu"].reachable is True
+    assert result.targets["ubuntu"].selected_backend == "cloud"
+    assert any("auto-cloud-failover injected" in w for w in result.warnings)
+    # And the injection was applied to the config in place
+    assert config.data["targets"]["ubuntu"]["fallback"][0]["type"] == "cloud"
+
+
+def test_auto_cloud_failover_respects_explicit_fallback(tmp_path, monkeypatch) -> None:
+    """When a user already declared a fallback chain, the auto path is a no-op."""
+    explicit = [{"type": "vm", "vm_name": "Ubuntu 24.04"}]
+    config = _config(
+        tmp_path,
+        {
+            "ubuntu": {
+                "backend": "ssh",
+                "platform": "linux-x64",
+                "host": "ubuntu",
+                "fallback": explicit,
+            }
+        },
+    )
+    config.data["failover"] = {
+        "cloud_auto": {"enabled": True, "provider": "namespace"},
+    }
+    dispatcher = ExecutorDispatcher()
+    monkeypatch.setattr("shipyard.preflight._git_root_for", lambda _: tmp_path)
+    monkeypatch.setattr(
+        dispatcher,
+        "probe",
+        lambda target_config: str(
+            target_config.get("type") or target_config.get("backend")
+        ) == "vm",
+    )
+
+    run_submission_preflight(
+        config,
+        target_names=["ubuntu"],
+        dispatcher=dispatcher,
+        cwd=tmp_path,
+    )
+
+    # The user's VM fallback was preserved, no cloud appended.
+    assert config.data["targets"]["ubuntu"]["fallback"] == explicit

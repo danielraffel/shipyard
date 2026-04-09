@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from shipyard.failover.auto import apply_auto_cloud_fallback
+
 if TYPE_CHECKING:
     from shipyard.core.config import Config
     from shipyard.executor.dispatch import ExecutorDispatcher
@@ -73,6 +75,18 @@ def run_submission_preflight(
             warnings.append(message)
         else:
             raise ValueError(message)
+
+    # Inject an implicit cloud fallback on SSH targets when the
+    # project opts into [failover.cloud_auto]. Targets that already
+    # declare their own `fallback = [...]` are left alone. This
+    # matches Pulp's local_ci.py namespace_auto behavior — a solo
+    # developer can leave their Windows VM shut down and Shipyard
+    # will route the run through the cloud instead of erroring.
+    injected = apply_auto_cloud_fallback(config)
+    if injected:
+        warnings.append(
+            "auto-cloud-failover injected for: " + ", ".join(injected),
+        )
 
     target_states: dict[str, TargetPreflight] = {}
     for target_name in target_names:
