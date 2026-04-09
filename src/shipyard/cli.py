@@ -394,9 +394,13 @@ def doctor(ctx: Context) -> None:
     if governance_section:
         checks["Governance"] = governance_section
 
-    ready = all(
-        info.get("ok", False)
-        for info in core.values()
+    # Ready = core tools healthy AND (no governance section declared
+    # OR every governance check is ok). Informational entries (the
+    # immutable-releases line) set `ok=True` specifically because
+    # they can't lie — they report what the API exposes and nothing
+    # more — so they're allowed to contribute to the ready rollup.
+    ready = all(info.get("ok", False) for info in core.values()) and all(
+        info.get("ok", False) for info in (governance_section or {}).values()
     )
 
     if ctx.json_mode:
@@ -449,8 +453,16 @@ def _check_governance_drift(config: Config) -> dict[str, Any] | None:
             "detail": f"could not fetch live state: {exc}",
         }}
 
-    # Profile / drift summary line
-    if status.has_drift:
+    # Fetch errors from build_status must NOT be swallowed into a
+    # false-green. If gh is unauthenticated or a branch returned
+    # a 5xx, has_drift can be False even though we never actually
+    # read the live state. Treat any error as a not-aligned result.
+    if status.has_errors:
+        section["main"] = {
+            "ok": False,
+            "detail": f"could not read live state — {'; '.join(status.errors)[:200]}",
+        }
+    elif status.has_drift:
         drifted_fields = [
             f"{r.branch}:{e.field_name}"
             for r in status.reports
@@ -697,6 +709,18 @@ def governance_diff(ctx: Context, branch: tuple[str, ...]) -> None:
     if any_drift:
         render_message("")
         render_message("Run: shipyard governance apply")
+
+    # If any branch fetch failed, surface the error and exit
+    # non-zero so automation does not treat a clean diff produced
+    # from incomplete reads as "nothing to apply".
+    if status.has_errors:
+        render_message("")
+        render_error(
+            "governance diff: live state could not be read for one or more branches"
+        )
+        for err in status.errors:
+            render_message(f"  ! {err}")
+        sys.exit(1)
 
 
 @main.group()
@@ -1110,13 +1134,30 @@ def _check_command(name: str, *args: str) -> dict[str, Any]:
 
 
 def _resolve_validation(config: Config, mode: ValidationMode) -> dict[str, Any]:
-    """Get validation config for the given mode."""
+    """Get validation config for the given mode.
+
+    `[validation.contract]` and `[validation.prepared_state]` are
+    declared alongside `[validation.default]`/`[validation.smoke]`,
+    not inside them, so they live at the top of the `validation`
+    subtable. Merge them into the returned mode-specific dict so
+    downstream executors see a single unified view and don't have
+    to know about the split.
+    """
     validation = config.validation
     if mode == ValidationMode.SMOKE and "smoke" in validation:
-        return validation["smoke"]
-    if "default" in validation:
-        return validation["default"]
-    return validation
+        result = dict(validation["smoke"])
+    elif "default" in validation:
+        result = dict(validation["default"])
+    else:
+        result = dict(validation)
+
+    # Lift top-level peers into the resolved dict. Mode-specific
+    # overrides (if present inside `default`/`smoke`) still win.
+    for peer_key in ("contract", "prepared_state"):
+        if peer_key in validation and peer_key not in result:
+            result[peer_key] = validation[peer_key]
+
+    return result
 
 
 def _resolve_target_validation(

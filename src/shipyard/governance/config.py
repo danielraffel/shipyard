@@ -158,19 +158,55 @@ def _resolve_overrides_for(
     """Walk the branch_overrides dict, apply extends, merge matching globs.
 
     A later matching glob wins over an earlier one.
+
+    `extends` is resolved recursively so chains like
+    `release/** → develop/** → main` fully inherit from every
+    ancestor, not just the direct parent. A cycle detector breaks
+    out on self-reference or on any extend that's already been
+    visited in the current chain.
     """
     merged: dict[str, Any] = {}
-    for glob, overrides in branch_overrides.items():
+    for glob in branch_overrides:
         if not fnmatch.fnmatchcase(branch_name, glob):
             continue
-        # Apply parent's overrides first if `extends` is set
-        parent_name = overrides.get("extends")
-        if parent_name and parent_name in branch_overrides:
-            parent = branch_overrides[parent_name]
-            for k, v in parent.items():
-                if k != "extends":
-                    merged[k] = v
-        for k, v in overrides.items():
-            if k != "extends":
-                merged[k] = v
+        inherited = _flatten_extends_chain(glob, branch_overrides)
+        for k, v in inherited.items():
+            merged[k] = v
+    return merged
+
+
+def _flatten_extends_chain(
+    glob: str,
+    branch_overrides: dict[str, dict[str, Any]],
+    *,
+    _visited: frozenset[str] | None = None,
+) -> dict[str, Any]:
+    """Recursively flatten a glob's own fields plus every `extends` ancestor.
+
+    Fields from ancestors are applied first, so the glob's own
+    fields win on conflict — matching the planning doc's
+    "overrides are cumulative, with the child overriding the parent"
+    contract.
+    """
+    if _visited is None:
+        _visited = frozenset()
+    if glob in _visited:
+        return {}  # cycle guard
+    overrides = branch_overrides.get(glob)
+    if not overrides:
+        return {}
+
+    merged: dict[str, Any] = {}
+    parent_name = overrides.get("extends")
+    if isinstance(parent_name, str) and parent_name:
+        ancestor = _flatten_extends_chain(
+            parent_name,
+            branch_overrides,
+            _visited=_visited | {glob},
+        )
+        merged.update(ancestor)
+
+    for k, v in overrides.items():
+        if k != "extends":
+            merged[k] = v
     return merged

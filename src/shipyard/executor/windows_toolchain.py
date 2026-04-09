@@ -115,7 +115,12 @@ function Resolve-VisualStudioInstance {
         return ''
     }
     try {
-        $raw = (& $vswhere -latest -products * -format json) -join "`n"
+        # Do NOT pass -latest here — vswhere -latest returns only the
+        # single newest install, which defeats the "prefer non-
+        # BuildTools" filter below when Build Tools happens to be the
+        # most recently installed product. Enumerate every install and
+        # let the Where-Object filter pick a real IDE first.
+        $raw = (& $vswhere -products * -format json) -join "`n"
         if (-not $raw) {
             return ''
         }
@@ -123,6 +128,10 @@ function Resolve-VisualStudioInstance {
         if ($instances -isnot [System.Array]) {
             $instances = @($instances)
         }
+        # Sort by installDate descending so "prefer newest" still
+        # applies within each category — Where-Object only filters,
+        # Sort-Object imposes the tiebreak.
+        $instances = $instances | Sort-Object -Property installDate -Descending
         # Prefer a full VS install over BuildTools when both exist.
         $preferred = $instances | Where-Object {
             $_.productId -and $_.productId -ne 'Microsoft.VisualStudio.Product.BuildTools'
