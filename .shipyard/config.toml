@@ -1,25 +1,14 @@
+# Shipyard validates itself.
+# This config is what runs when you do `shipyard run` in this repo.
+
 [project]
 name = "shipyard"
-platforms = [
-    "macos",
-    "linux",
-    "windows",
-]
-type = "python-uv"
+type = "python"
+platforms = ["macos", "linux", "windows"]
 
 [validation.default]
-install = "uv sync"
-build = "uv run python -m build"
-test = "uv run pytest"
+command = "pip install -e '.[dev]' && pytest && ruff check src/"
 
 [targets.mac]
 backend = "local"
 platform = "macos-arm64"
-
-[targets.ubuntu]
-platform = "linux-x64"
-backend = "cloud"
-
-[targets.windows]
-platform = "windows-x64"
-backend = "cloud"

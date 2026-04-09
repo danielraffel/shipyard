@@ -634,3 +634,41 @@ fallback = [
 
 This keeps things predictable. You always know exactly what Shipyard will
 do because you configured it.
+
+---
+
+## This Repo Uses Shipyard
+
+Shipyard validates and ships itself. The config is at
+[`.shipyard/config.toml`](.shipyard/config.toml):
+
+```toml
+[project]
+name = "shipyard"
+type = "python"
+platforms = ["macos", "linux", "windows"]
+
+[validation.default]
+command = "pip install -e '.[dev]' && pytest && ruff check src/"
+
+[targets.mac]
+backend = "local"
+platform = "macos-arm64"
+```
+
+The CI workflow at [`.github/workflows/ci.yml`](.github/workflows/ci.yml)
+runs tests on macOS, Linux, and Windows on every push. The release workflow
+at [`.github/workflows/release.yml`](.github/workflows/release.yml) builds
+binaries on 5 platforms when a version is tagged.
+
+```bash
+# How we validate
+shipyard run                    # runs pytest + ruff on local Mac
+
+# How we release
+git tag v0.1.0
+git push origin v0.1.0          # triggers binary builds on 5 platforms
+                                # → GitHub Release with binaries + checksums
+```
+
+218 tests. 0.3 seconds. The release builds itself.
