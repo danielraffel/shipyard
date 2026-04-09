@@ -489,7 +489,7 @@ You don't need everything — just what matches your setup:
 | [git](https://github.com/git-guides/install-git) | Yes | Version control | Pre-installed on macOS |
 | [gh](https://github.com/cli/cli) | Yes (for PRs) | GitHub integration | `brew install gh` |
 | `ssh` | For remote targets | Connect to VMs | Pre-installed on macOS not on [Ubuntu / etc](https://ubuntu.com/server/docs/how-to/security/openssh-server/) / [Windows](https://learn.microsoft.com/en-us/windows-server/administration/openssh/openssh_install_firstuse?tabs=gui&pivots=windows-11) |
-| [nsc](https://namespace.so/docs/reference/cli/installation) | For Namespace | Cloud runners | `brew install namespace-cli` |
+| [nsc](https://namespace.so/docs/reference/cli/installation) | For [Namespace](https://namespace.so) | Cloud runners | `brew install namespace-cli` |
 | [UTM](https://mac.getutm.app) / [Parallels](https://www.parallels.com/products/desktop/) | For VM fallback | Auto-boot VMs | `brew install --cask utm` |
 
 `shipyard doctor` checks all of this and tells you what's missing.
