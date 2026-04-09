@@ -15,19 +15,13 @@ shipyard run         # validates on every platform you configured
 
 ## Who This Is For
 
-You have AI agents writing code across parallel worktrees.
-When they finish, you want them to validate builds, run tests,
-open a PR, and merge automatically — only when everything passes.
+You have AI agents writing code across parallel worktrees. When they finish, you want them to validate builds, run tests, open a PR, and merge automatically — only when everything passes.
 
-If something fails, the agent should read the logs, fix the issue,
-and retry. No babysitting.
+If something fails, the agent should read the logs, fix the issue, and retry. No babysitting.
 
-Shipyard makes this reliable. Agents commit; Shipyard coordinates
-validation across platforms; code lands on main (or other branch)
-only when all targets are green.
+Shipyard makes this reliable. Agents commit; Shipyard coordinates validation across platforms; code lands on main  only when all targets are green.
 
-It also handles cross-platform validation across local VMs and
-cloud runners, without requiring you to maintain CI infrastructure.
+It also handles cross-platform validation across local VMs and cloud runners, without requiring you to maintain CI infrastructure.
 
 ## How It Works
 
@@ -42,7 +36,7 @@ to cloud. Or it just reports unreachable and stops. You choose.
 
 `shipyard ship` validates and then creates a PR and merges it.
 
-Shipyard is not a CI service, not a build system, not a workflow engine.
+Shipyard is not a [CI service](https://en.wikipedia.org/wiki/Continuous_integration), not a [build system](https://en.wikipedia.org/wiki/Build_automation), not a [workflow engine](https://en.wikipedia.org/wiki/Workflow_engine).
 It calls your build commands and cares about one thing: did they pass?
 
 ---
