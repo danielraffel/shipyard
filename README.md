@@ -45,75 +45,78 @@ It calls your build commands and cares about one thing: did they pass?
 
 ## What Makes It Different
 
-**Exact-SHA validation.** Every target validates the specific commit you
-queued, not whatever happens to be checked out. Code is delivered to remote
-machines via git bundles — no git credentials needed on the target. Evidence
-records bind proof to the exact SHA, so stale results from a prior commit
-can't satisfy a merge gate.
+Most of what Shipyard does — exact-SHA validation, fallback chains,
+stage-aware resume, ecosystem auto-detection, JSON output — is
+table-stakes for a modern CI tool. None of those are the reason to
+adopt Shipyard. The actual differentiators are four things most
+indie developers can't easily wire up themselves:
 
-**Smart queue for parallel agents.** Multiple agents working in different
-worktrees share one machine-global queue. Jobs are prioritized (high/normal/low)
-and scheduled FIFO within priority. When you push a new commit to the same
-branch, the pending job for the old SHA is automatically replaced — but
-narrower reruns (just one failing target) and different validation modes
-(smoke vs full) coexist without interfering.
+**Safe, real cross-platform CI for AI agents.** Shipyard is designed
+for the case where an agent — Claude Code, Codex, or something
+scripted on top — opens a PR on your machine and needs real
+cross-platform proof before merging. The one-command setup for
+agents (Claude Code plugin, Codex installer) means you don't hand
+your agents the keys to your DAW, your notarization identity, or
+your publishing account. The agent runs `shipyard ship`; Shipyard
+handles the bundle delivery, the remote validation, the merge
+gate, and the audit trail. There's no equivalent off-the-shelf tool
+for an indie dev who wants to give agents real cross-platform CI
+access without rolling their own orchestration.
 
-**Fail-fast across targets.** If Mac fails, Shipyard stops immediately —
-it doesn't waste time running Windows and Linux when you already know
-you need to fix something. Remaining targets are marked as skipped. When
-you want to run everything regardless (to see the full picture), use
-`--continue`.
+**Declarative security & governance.** Pick a profile — `solo` or
+`multi` — and `shipyard governance apply` sets branch protection,
+tag protection, default workflow token permissions, and (via
+follow-ups) deployment approval + sigstore release attestations to
+match. Drift is surfaced by `shipyard governance status` and in
+`shipyard doctor`. All of the hardening practices Astral
+[documents for open-source projects](https://astral.sh/blog/open-source-security-at-astral)
+are packaged as one TOML line and one CLI command. Without this, an
+indie dev has to click through six GitHub settings pages, remember
+every knob, and hope they got it right.
 
-**Targeted re-runs.** If Windows fails but Mac and Linux passed, re-run just
-Windows. Shipyard keeps the evidence from the earlier run. When the re-run
-passes, all three platforms now have green evidence for this SHA — you don't
-re-validate what already passed.
+**Evidence-based merge gate.** `shipyard ship` refuses to merge
+unless every required platform has passing evidence **for the exact
+HEAD SHA** — not the most-recent run, not the branch tip, the SHA.
+Evidence records are bound to a commit, so a stale green from a
+prior commit cannot satisfy the gate. Standard CI plugins on GitHub
+only track the latest run per workflow; proving the *specific
+commit* is green requires wiring up something custom.
 
-**Stage-aware resume.** If your build succeeded but tests failed, you don't
-need to rebuild from scratch. Use `--resume-from test` to skip configure and
-build, running only the test stage. This works because Shipyard runs
-validation in stages (configure → build → test) and tracks which stage
-failed — so both you and your agent know exactly what broke and where to
-pick up.
+**Parallel-agent-aware queue.** Multiple agents in multiple
+worktrees share one machine-global queue. Jobs are prioritized,
+scheduled FIFO within priority, and automatically deduplicated
+when a new commit supersedes a pending job on the same branch —
+without cancelling narrower reruns (single target) or different
+validation modes (smoke vs full). This is the thing that actually
+makes parallel-agent workflows safe on a single dev machine; GitHub
+Actions doesn't know anything about your local worktrees.
 
-**Failover that knows the difference.** If a target is unreachable, Shipyard
-walks your fallback chain (boot VM → try cloud → try GitHub-hosted). But if
-your code genuinely fails a test, there's no fallback — a real test failure
-is authoritative. The result always records exactly which backend produced it,
-so you know whether proof came from your local Mac or a Namespace runner.
+### Features
 
-**Transient failure retry.** SSH connections drop. Shipyard recognizes 9
-transient SSH error patterns (connection reset, timeout, kex failure) and
-retries with exponential backoff before triggering fallback. Permanent errors
-like `Permission denied` fail immediately — no wasted retries.
+The rest of what Shipyard ships is the normal set of conveniences
+you'd want for day-to-day use:
 
-**22 ecosystem detectors.** `shipyard init` recognizes CMake, Swift, Xcode,
-Rust, Go, Node.js (pnpm > bun > yarn > npm), Python (uv > poetry > pip),
-Gradle, Maven, .NET, Flutter, Dart, Deno, Ruby, Elixir, PHP — and infers
-the right build and test commands. For polyglot repos, it detects all
-ecosystems with family deduplication (one Node detector, not four).
-
-**Structured JSON on every command.** Every command supports `--json` with a
-versioned schema (`schema_version: 1`). Agents parse the output directly —
-no screen-scraping, no fragile regex. The schema version increments when the
-format changes, so agents can check compatibility.
-
-**Target profiles for instant switching.** Define `local`, `normal`, and
-`full` profiles once. Switch with `shipyard config use local` — no config
-editing. Each profile activates a different set of targets. Global profiles
-work across all projects; project profiles override for specific needs.
-(See *Security & Governance Profiles* below for the separate set of
-profiles that control branch protection, release flow, and reviewer
-requirements.)
-
-**Merge only when proven.** `shipyard ship` refuses to merge unless every
-required platform has passing evidence for the exact HEAD SHA. It checks
-per-platform, so one missing or failing platform blocks the merge with a
-clear breakdown of what's passing, missing, and failing.
-
-**Operational cleanup.** Logs, bundles, and results don't grow forever.
-`shipyard cleanup` shows what can be reclaimed (dry-run by default). The
-queue automatically trims to the 25 most recent completed jobs.
+- **Exact-SHA remote delivery** via git bundles — no git
+  credentials on target machines.
+- **Fail-fast across targets** (with `--continue` to run everything
+  anyway).
+- **Targeted re-runs** — re-validate one platform and keep the
+  existing evidence for the others.
+- **Stage-aware resume** — `--resume-from test` skips configure
+  and build when only the test stage failed.
+- **Failover chains** with real-vs-transient error distinction
+  (9 transient SSH error patterns retry before fallback;
+  `Permission denied` fails immediately).
+- **Target profiles** for instant environment switching
+  (`shipyard config use local`).
+- **22 ecosystem detectors** — `shipyard init` recognises CMake,
+  Swift, Xcode, Rust, Go, Node (pnpm / bun / yarn / npm), Python
+  (uv / poetry / pip), Gradle, Maven, .NET, Flutter, Dart, Deno,
+  Ruby, Elixir, PHP.
+- **Structured JSON on every command** (`--json`) with a versioned
+  schema so agents parse output directly.
+- **Operational cleanup** (`shipyard cleanup`) plus automatic
+  queue trimming to the 25 most recent completed jobs.
 
 ---
 

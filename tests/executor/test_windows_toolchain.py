@@ -108,6 +108,34 @@ def test_env_exports_escapes_single_quotes_in_path() -> None:
     assert "'C:/it''s/weird/vs'" in snippet
 
 
+# ── vswhere script sanity ──────────────────────────────────────────────
+
+
+def test_vswhere_script_does_not_pass_latest_flag() -> None:
+    """Regression for Codex finding on PR #5.
+
+    `-latest` returns only one install, which would defeat the
+    "prefer non-BuildTools" Where-Object filter when Build Tools is
+    the most-recently installed product. The script must enumerate
+    every install and let the filter pick.
+
+    Check the actual vswhere invocation line, not the surrounding
+    comment which is allowed to mention the flag for context.
+    """
+    from shipyard.executor.windows_toolchain import _VS_DETECT_SCRIPT
+    # Extract the actual vswhere invocation line
+    vswhere_lines = [
+        line for line in _VS_DETECT_SCRIPT.splitlines()
+        if "& $vswhere" in line
+    ]
+    assert len(vswhere_lines) == 1, f"expected one vswhere call, got: {vswhere_lines}"
+    assert "-latest" not in vswhere_lines[0]
+    assert "-products" in vswhere_lines[0]
+    assert "-format json" in vswhere_lines[0]
+    assert "vswhere.exe" in _VS_DETECT_SCRIPT
+    assert "Microsoft.VisualStudio.Product.BuildTools" in _VS_DETECT_SCRIPT
+
+
 # ── detect_vs_toolchain ─────────────────────────────────────────────────
 
 

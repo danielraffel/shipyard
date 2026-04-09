@@ -30,10 +30,17 @@ class SSHWindowsExecutor:
     """Execute validation commands on a remote Windows host via SSH + PowerShell."""
 
     def __init__(self) -> None:
-        # Cache of detected VS toolchains keyed by host. Detection
-        # shells out to vswhere, which is slow enough (~1s) that we
-        # only want to do it once per Shipyard invocation per host.
-        self._vs_toolchain_cache: dict[str, VsToolchain | None] = {}
+        # Cache of detected VS toolchains keyed by (host, ssh_options
+        # tuple). Detection shells out to vswhere, which is slow
+        # enough (~1s) that we want to reuse it within a single
+        # Shipyard invocation — but two targets with the same
+        # hostname and different ssh options (e.g. different users,
+        # ports, or bastion jump hosts) can land on completely
+        # different machines, so the cache key must include the
+        # full connection identity, not just the host string.
+        self._vs_toolchain_cache: dict[
+            tuple[str, tuple[str, ...]], VsToolchain | None
+        ] = {}
 
     def validate(
         self,
@@ -204,13 +211,20 @@ class SSHWindowsExecutor:
         Respects `windows_vs_detect = false` in the target config to
         opt out entirely. Detection failures are cached as None so a
         missing vswhere doesn't re-probe on every run.
+
+        The cache key is `(host, tuple(ssh_options))` so two targets
+        that share a hostname but connect with different SSH options
+        (different ports, users, bastions) get independent cache
+        entries. Using only the hostname would let the first probe
+        pollute subsequent runs against a completely different box.
         """
         if target_config.get("windows_vs_detect", True) is False:
             return None
-        if host in self._vs_toolchain_cache:
-            return self._vs_toolchain_cache[host]
+        cache_key = (host, tuple(ssh_options))
+        if cache_key in self._vs_toolchain_cache:
+            return self._vs_toolchain_cache[cache_key]
         toolchain = detect_vs_toolchain(host, ssh_options)
-        self._vs_toolchain_cache[host] = toolchain
+        self._vs_toolchain_cache[cache_key] = toolchain
         return toolchain
 
     def probe(self, target_config: dict[str, Any]) -> bool:
