@@ -128,6 +128,7 @@ class SSHExecutor:
                 bundle_path=remote_bundle,
                 repo_path=remote_repo,
                 ssh_options=ssh_options,
+                timeout=int(target_config.get("bundle_apply_timeout_secs", 1800)),
             )
             if not apply_result.success:
                 return _error_result(
@@ -245,6 +246,8 @@ def _build_remote_command(
     validation_config: dict[str, Any],
 ) -> str | None:
     """Build the remote shell command: checkout + validate."""
+    import shlex
+
     if "command" in validation_config:
         validate_cmd = validation_config["command"]
     else:
@@ -257,7 +260,14 @@ def _build_remote_command(
             return None
         validate_cmd = " && ".join(parts)
 
-    return f"cd {remote_repo} && git checkout --force {sha} && {validate_cmd}"
+    # Quote the repo path in case it contains spaces or shell
+    # metacharacters. sha is validated upstream to be a git hash so
+    # it's shell-safe, but we quote it anyway for consistency.
+    return (
+        f"cd {shlex.quote(remote_repo)} && "
+        f"git checkout --force {shlex.quote(sha)} && "
+        f"{validate_cmd}"
+    )
 
 
 def _error_result(

@@ -117,6 +117,7 @@ class SSHWindowsExecutor:
                 bundle_path=remote_bundle,
                 repo_path=remote_repo,
                 ssh_options=ssh_options,
+                timeout=int(target_config.get("bundle_apply_timeout_secs", 1800)),
             )
             if not apply_result.success:
                 return _error_result(
@@ -293,11 +294,22 @@ def _is_windows_absolute_path(path: str) -> bool:
     return len(path) >= 2 and path[1] == ":" and path[0].isalpha()
 
 
+def _ps_single_quote(value: str) -> str:
+    """Escape a string for safe use inside a PowerShell single-quoted literal.
+
+    PowerShell doubles an embedded single quote: `'it''s'`. This
+    keeps path-like target config values from breaking the
+    `$Bundle = '...'` / `cd '...'` assignments below.
+    """
+    return value.replace("'", "''")
+
+
 def _apply_bundle_windows(
     host: str,
     bundle_path: str,
     repo_path: str,
     ssh_options: list[str],
+    timeout: int = 1800,
 ) -> _ApplyResult:
     """Apply a git bundle on a remote Windows host via PowerShell.
 
@@ -313,20 +325,27 @@ def _apply_bundle_windows(
     `shipyard.bundle` lands in the SSH user's home directory (where
     scp wrote it) regardless of the working directory PowerShell
     uses after the `cd` below.
+
+    The apply timeout defaults to 30 minutes (matching
+    upload_bundle) so `git bundle verify` + `git fetch` on a large
+    repo doesn't get killed on slow Windows disks. The previous
+    120s was too tight for anything with real history.
     """
     # Expand a relative bundle path against $HOME inside PowerShell.
     # Detecting "relative" on the Windows side is simpler than on
     # the Python side because we can just check for a drive letter
     # or backslash prefix.
+    safe_bundle = _ps_single_quote(bundle_path)
+    safe_repo = _ps_single_quote(repo_path)
     resolved = (
-        f"'{bundle_path}'"
+        f"'{safe_bundle}'"
         if _is_windows_absolute_path(bundle_path)
-        else f"(Join-Path $HOME '{bundle_path}')"
+        else f"(Join-Path $HOME '{safe_bundle}')"
     )
 
     ps_cmd = (
         f"$Bundle = {resolved}; "
-        f"cd '{repo_path}'; "
+        f"cd '{safe_repo}'; "
         f"git bundle verify $Bundle; "
         f"if ($LASTEXITCODE -ne 0) {{ exit 1 }}; "
         f"git fetch $Bundle "
@@ -342,7 +361,7 @@ def _apply_bundle_windows(
             cmd,
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=timeout,
         )
         if result.returncode != 0:
             return _ApplyResult(
@@ -393,10 +412,14 @@ def _build_remote_command(
         # Chain with PowerShell error checking
         validate_cmd = "; if ($LASTEXITCODE -ne 0) { exit 1 }; ".join(parts)
 
+    # Escape single quotes in the repo path so a pathological
+    # target_config value can't break out of the PS literal.
+    safe_repo = _ps_single_quote(remote_repo)
+    safe_sha = _ps_single_quote(sha)
     return (
         f"{toolchain_env_exports(toolchain)}; "
-        f"cd '{remote_repo}'; "
-        f"git checkout --force {sha}; "
+        f"cd '{safe_repo}'; "
+        f"git checkout --force '{safe_sha}'; "
         f"if ($LASTEXITCODE -ne 0) {{ exit 1 }}; "
         f"{validate_cmd}"
     )

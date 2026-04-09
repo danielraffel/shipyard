@@ -60,12 +60,16 @@ class ExecutorDispatcher:
     ) -> TargetResult:
         executor = self.executor_for(target_config)
         if isinstance(executor, FallbackChain):
+            # Forward the same kwargs the direct path gets
+            # (progress_callback, resume_from, mode, etc.) so
+            # fallback targets don't silently lose them.
             return executor.execute(
                 job_sha=sha,
                 job_branch=branch,
                 target_config=target_config,
                 validation_config=validation_config,
                 log_path=log_path,
+                **kwargs,
             )
         return executor.validate(
             sha=sha,
