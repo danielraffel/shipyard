@@ -14,8 +14,9 @@ shipyard run         # validates on every platform you configured
 
 ## Who This Is For
 
-**You’re running agents in parallel across worktrees — sometimes multi-platform, sometimes local, sometimes cloud.**
-You want builds you can trust, without heavyweight CI.
+**You’re running agents in parallel across worktrees.**
+Sometimes you’re building for multiple platforms. Sometimes you validate locally, sometimes in the cloud.
+You want builds you can trust — without heavyweight CI.
 
 ## How It Works
 
