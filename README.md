@@ -1,8 +1,6 @@
 # Shipyard
 
-Cross-platform CI for projects that build and test. Validate your app,
-plugin, or library on local VMs, SSH hosts, and cloud runners — with one
-config, automatic failover, and structured output for AI agents.
+Shipyard is a cross-platform CI orchestration layer for projects that already build and test. It validates the exact commit across local machines, VMs, SSH hosts, and cloud runners, then gives AI agents structured results they can use to fix failures, retry, and merge only when everything is green.
 
 ```bash
 curl -fsSL https://generouscorp.com/Shipyard/install.sh | sh
