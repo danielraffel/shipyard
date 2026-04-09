@@ -14,27 +14,14 @@ shipyard run         # validates on every platform you configured
 
 ## Who This Is For
 
-**You're running AI agents across worktrees and want automated validation
-and merging.** Your agent finishes work, Shipyard validates it on every
-platform, and merges the PR — without you babysitting the process.
-
-**You're building something that needs to work on more than one platform**
-and you don't want to maintain heavyweight CI infrastructure. You have a Mac.
-Maybe a VM or two. Maybe a Namespace account. You just want to know if your
-code builds everywhere before you merge, and you want that to be a single
-command.
-
-**You want to switch between local-only and cloud validation depending on
-the day.** Some days you want fast local-only checks. Other days you need
-the full cross-platform proof. Shipyard lets you switch between setups
-without editing config files.
+**You’re running agents in parallel across worktrees — sometimes multi-platform, sometimes local, sometimes cloud.**
+You want builds you can trust, without heavyweight CI.
 
 ## How It Works
 
-- **Local builds** run directly on your Mac — fast, no network
-- **Remote builds** run on your VMs over SSH — real Windows, real Linux
-- **Cloud builds** dispatch to Namespace or GitHub Actions — for when VMs
-  are off or you need neutral hardware
+- **Local builds** run directly on your host machine — fast, no network
+- **Remote builds** run in separate environments you control — VMs, containers, or machines over SSH (local or on your network; physical location doesn’t matter)
+- **Cloud builds** run on managed infrastructure — Namespace, GitHub Actions, etc., for neutral or on-demand capacity
 
 `shipyard run` delivers the exact commit to each machine, runs your build
 and test commands, and reports what passed. If a machine is unreachable,
