@@ -15,6 +15,7 @@ from typing import Any
 
 from shipyard.bundle.git_bundle import create_bundle, upload_bundle
 from shipyard.core.job import TargetResult, TargetStatus
+from shipyard.executor.contract import evaluate_contract, required_markers
 from shipyard.executor.streaming import ProgressCallback, run_streaming_command
 
 
@@ -99,12 +100,15 @@ class SSHWindowsExecutor:
             ["ssh"] + list(ssh_options) + [host, "powershell", "-Command", command]
         )
 
+        contract_config = validation_config.get("contract") if validation_config else None
+
         try:
             result = run_streaming_command(
                 ssh_cmd,
                 log_path=str(log_file),
                 timeout=target_config.get("timeout_secs", 1800),
                 progress_callback=progress_callback,
+                required_contract_markers=required_markers(contract_config),
             )
 
             status = TargetStatus.PASS if result.returncode == 0 else TargetStatus.FAIL
@@ -112,6 +116,11 @@ class SSHWindowsExecutor:
             if result.returncode == 255:
                 status = TargetStatus.ERROR
                 error_message = _extract_ssh_error(result.output) or "SSH transport failed"
+
+            evaluation = evaluate_contract(contract_config, result.contract_markers_seen)
+            if evaluation.should_force_fail and status == TargetStatus.PASS:
+                status = TargetStatus.FAIL
+                error_message = evaluation.message
 
             return TargetResult(
                 target_name=target_name,
@@ -125,6 +134,9 @@ class SSHWindowsExecutor:
                 phase=result.phase,
                 last_output_at=result.last_output_at,
                 error_message=error_message,
+                contract_markers_seen=evaluation.seen,
+                contract_markers_missing=evaluation.missing,
+                contract_violation=evaluation.message,
             )
 
         except subprocess.TimeoutExpired:
