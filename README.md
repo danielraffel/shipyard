@@ -167,22 +167,31 @@ exist to coordinate multiple humans).
 ### Commands
 
 ```bash
-shipyard governance status         # show current matrix vs profile vs live GitHub state
-shipyard governance use solo       # switch profile + apply
-shipyard governance use multi      # switch profile + apply
-shipyard governance diff           # what `apply` would change
-shipyard governance apply          # bring live GitHub state in line with config
-shipyard governance apply --create develop/foo
-                                   # create branch + apply matching protection in one command
+shipyard governance status     # show declared vs live drift per branch
+shipyard governance diff       # what `apply` would change (dry run)
+shipyard governance apply      # bring live GitHub state in line with config
 ```
 
 `status` is the rollup view that shows where things stand without
-clicking through six GitHub settings pages. `use` is the one-command
-profile switch. `diff` is the dry-run before any mutation. `apply` is
-the idempotent apply. `apply --create <branch>` is the new-branch
-flow that creates the branch from `main` and applies the matching
-governance rules in one shot — branches never exist in an unprotected
-state.
+clicking through six GitHub settings pages. `diff` is the dry-run
+before any mutation. `apply` is the idempotent apply — re-running
+it on an aligned repo issues zero API writes.
+
+`shipyard doctor` grows a "Governance" section that folds main-branch
+drift into the same health check as git, ssh, and cloud auth, so CI
+scripts and agents get a single pass/fail answer about whether the
+repo is in the expected state.
+
+Shipyard's profile table is the governance **target**. Branch
+protection is enforced via the GitHub REST API today; tag protection,
+rulesets, deployment environments, sigstore attestations, and the
+immutable-releases row are partly API-manageable and partly
+UI-only — the planning repo tracks which pieces land in which
+release. Shipyard never claims a state it cannot verify: the
+immutable-releases row in `doctor` and `governance status` prints
+an informational line pointing at the settings URL rather than a
+check or cross, because GitHub does not expose the repo-level
+toggle via API on personal repos.
 
 ### Inspired by Astral
 
@@ -200,32 +209,9 @@ switch so you don't have to figure it out from first principles.
 Pulp ([github.com/danielraffel/pulp](https://github.com/danielraffel/pulp))
 is the first project to adopt Shipyard's governance profile system.
 Pulp runs on the `solo` profile because it has a single maintainer
-today; the same `.shipyard/config.toml` would gain a `[project] profile
-= "multi"` line and a `shipyard governance use multi` invocation if it
-ever grew co-maintainers, with no other config changes.
-
-### What ships in which Shipyard release
-
-| Feature | Status |
-|---|---|
-| Multi-backend executor dispatch (local / SSH / Windows-SSH / cloud) | ✅ v0.1.2 |
-| Submission preflight + reachability probe | ✅ v0.1.2 |
-| Cloud commands (`workflows`, `defaults`, `run`, `status`) | ✅ v0.1.2 |
-| Streaming progress + heartbeats + phase markers | ✅ v0.1.2 |
-| Validation contract markers (configurable, enforced) | 🚧 Phase 5 (v0.1.3) |
-| Prepared-state reuse on warm validation | 🚧 Phase 5 (v0.1.3) |
-| Windows host mutex + VS instance auto-detection | 🚧 Phase 5 (v0.1.3) |
-| SSH unreachable → Namespace cloud auto-failover | 🚧 Phase 5 (v0.1.3) |
-| `shipyard governance status / use / diff / apply` | 🚧 Phase 6 (v0.1.4) |
-| `shipyard governance apply --create <branch>` | 🚧 Phase 6 (v0.1.4) |
-| Awaiting-approval surface in `shipyard ship --watch` | 🚧 Phase 6 (v0.1.4) |
-| Sigstore attestations on Shipyard's own releases | 🚧 Planned |
-| zizmor in Shipyard's own CI | 🚧 Planned |
-
-The currently-shipped feature set is enough to dogfood Shipyard against
-a real project today. The Phase 5 / Phase 6 work closes the remaining
-capability gaps with feature-complete `local_ci.py` and adds the
-governance profile system.
+today; switching to `multi` would be a single-line edit to
+`[project].profile` in `.shipyard/config.toml` plus a `shipyard
+governance apply`, with no other config changes.
 
 ---
 
