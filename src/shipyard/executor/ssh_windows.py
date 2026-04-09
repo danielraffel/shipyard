@@ -74,8 +74,15 @@ class SSHWindowsExecutor:
         # Step 1: Create and deliver git bundle
         with tempfile.TemporaryDirectory() as tmpdir:
             bundle_path = Path(tmpdir) / "shipyard.bundle"
+            # Use a home-relative path by default rather than
+            # `C:\Temp\shipyard.bundle`, which doesn't exist on a
+            # stock Windows install and caused
+            # `scp: dest open "C:\\Temp\\shipyard.bundle": No such
+            # file or directory` on the first Stage 1 Windows
+            # dogfood run. A bare filename lands in the SSH user's
+            # home directory, which always exists.
             remote_bundle = target_config.get(
-                "remote_bundle_path", "C:\\Temp\\shipyard.bundle"
+                "remote_bundle_path", "shipyard.bundle"
             )
 
             bundle_result = create_bundle(
@@ -269,6 +276,22 @@ class _ApplyResult:
         self.message = message
 
 
+def _is_windows_absolute_path(path: str) -> bool:
+    """True if `path` starts with a drive letter or a leading separator.
+
+    Treats `C:\\...`, `C:/...`, `\\\\server\\share\\...`, and `\\foo`
+    as absolute; bare names like `shipyard.bundle` or relative
+    paths like `Temp\\foo.bundle` as not absolute.
+    """
+    if not path:
+        return False
+    if path.startswith("\\\\"):  # UNC
+        return True
+    if path.startswith("\\") or path.startswith("/"):
+        return True
+    return len(path) >= 2 and path[1] == ":" and path[0].isalpha()
+
+
 def _apply_bundle_windows(
     host: str,
     bundle_path: str,
@@ -283,12 +306,29 @@ def _apply_bundle_windows(
     whenever the remote worktree happens to have the bundled
     branch checked out. The namespaced destination is never a
     checked-out ref, so git accepts the fetch unconditionally.
+
+    The bundle path is resolved via PowerShell's Join-Path with
+    $HOME when it's a relative path, so the default
+    `shipyard.bundle` lands in the SSH user's home directory (where
+    scp wrote it) regardless of the working directory PowerShell
+    uses after the `cd` below.
     """
+    # Expand a relative bundle path against $HOME inside PowerShell.
+    # Detecting "relative" on the Windows side is simpler than on
+    # the Python side because we can just check for a drive letter
+    # or backslash prefix.
+    resolved = (
+        f"'{bundle_path}'"
+        if _is_windows_absolute_path(bundle_path)
+        else f"(Join-Path $HOME '{bundle_path}')"
+    )
+
     ps_cmd = (
+        f"$Bundle = {resolved}; "
         f"cd '{repo_path}'; "
-        f"git bundle verify '{bundle_path}'; "
+        f"git bundle verify $Bundle; "
         f"if ($LASTEXITCODE -ne 0) {{ exit 1 }}; "
-        f"git fetch '{bundle_path}' "
+        f"git fetch $Bundle "
         f"'+refs/heads/*:refs/shipyard-bundles/heads/*' "
         f"'+refs/tags/*:refs/shipyard-bundles/tags/*'; "
         f"if ($LASTEXITCODE -ne 0) {{ exit 1 }}"
