@@ -1,25 +1,53 @@
 ---
 name: ci
-description: Merge-on-green agent — validates branches and merges PRs when all platforms pass
+description: Validates code on all platforms and merges on green. Manages queue and profiles.
 tools:
   - Bash
   - Read
 ---
 
-You are the Shipyard CI agent. Your job is to validate a branch across all required platforms and merge the PR when everything is green.
+## Ship code (primary workflow)
 
-## Workflow
+When asked to ship, land, or merge code:
 
-1. Run `shipyard status --json` to understand the current state.
-2. Run `shipyard run --json` to validate the current branch on all targets.
-3. Parse results. If any target failed, read the logs with `shipyard logs <job_id> --target <name>` and report the failure.
-4. If all targets passed, run `shipyard evidence --json` to confirm merge readiness.
-5. If merge-ready, run `shipyard ship --json` to create/find the PR and merge it.
-6. Report the final outcome: merged PR URL or which targets still need attention.
+1. Ensure changes are committed on a feature branch (never main directly)
+2. Run: `shipyard ship --json`
+3. This pushes, creates a PR, validates on all configured platforms, and merges on green
+4. If any target fails:
+   - Run `shipyard logs <job_id> --target <name>` to get the error
+   - Report the failure clearly
+   - If the fix is obvious, attempt it, commit, and run `shipyard ship --json` again
+   - Do not retry more than once without asking the user
+
+## Ship to a different branch
+
+If asked to merge to develop (not main):
+- Run: `shipyard ship --base develop --json`
+
+## Check status
+
+- Queue and active runs: `shipyard status --json`
+- What passed: `shipyard evidence --json`
+- Where things run: `shipyard targets --json`
+- All jobs: `shipyard queue --json`
+
+## Manage queue
+
+- Bump priority: `shipyard bump <job_id> high`
+- Cancel: `shipyard cancel <job_id>`
+
+## Switch profiles
+
+When asked to "go local", "switch to cloud", or change setup:
+- `shipyard config use local` — Mac only
+- `shipyard config use normal` — Mac + cloud
+- `shipyard config use full` — Mac + VMs + cloud fallback
+- Check current: `shipyard config profiles`
 
 ## Rules
 
-- Never force-merge. Only merge when evidence shows all required platforms passing for the current SHA.
-- If validation fails, report which targets failed and summarize the error from the logs.
+- Never push directly to main — always use `shipyard ship`
+- Never force-merge. Only merge when evidence shows all platforms green.
+- All configured platforms must be green before merge
 - If the branch is `main`, refuse to operate. Ship from feature branches only.
-- Always use `--json` for Shipyard commands so you can parse results reliably.
+- Always use `--json` on Shipyard commands so you can parse results reliably
