@@ -135,6 +135,7 @@ def apply_bundle(
     bundle_path: str,
     repo_path: str,
     ssh_options: Sequence[str] = (),
+    timeout: int = 1800,
 ) -> BundleResult:
     """Apply a git bundle on a remote host via SSH.
 
@@ -156,14 +157,26 @@ def apply_bundle(
         bundle_path: Path to the .bundle file on the remote host.
         repo_path: Path to the git repo on the remote host.
         ssh_options: Additional SSH options.
+        timeout: Apply timeout in seconds. Defaults to 30 minutes
+            so `git bundle verify` + `git fetch` of a large repo
+            doesn't get killed on slow Windows disks. The previous
+            120s default was fine for small repos but too tight
+            for anything with real history; raising it matched the
+            upload_bundle default.
 
     Returns:
         BundleResult indicating success or failure.
     """
+    # Quote path-like arguments that get interpolated into a shell
+    # command. `repo_path` and `bundle_path` can come from target
+    # config and may contain spaces, quotes, or shell metacharacters.
+    import shlex
+    quoted_repo = shlex.quote(repo_path)
+    quoted_bundle = shlex.quote(bundle_path)
     remote_cmd = (
-        f"cd {repo_path} && "
-        f"git bundle verify {bundle_path} && "
-        f"git fetch {bundle_path} "
+        f"cd {quoted_repo} && "
+        f"git bundle verify {quoted_bundle} && "
+        f"git fetch {quoted_bundle} "
         f"'+refs/heads/*:refs/shipyard-bundles/heads/*' "
         f"'+refs/tags/*:refs/shipyard-bundles/tags/*'"
     )
@@ -178,7 +191,7 @@ def apply_bundle(
             cmd,
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=timeout,
         )
         if result.returncode != 0:
             return BundleResult(

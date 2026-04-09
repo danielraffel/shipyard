@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import collections
 import queue
 import re
 import subprocess
@@ -93,7 +94,15 @@ def run_streaming_command(
     )
     reader.start()
 
-    output_parts: list[str] = []
+    # Bounded tail buffer. A long build log (Pulp tests produce
+    # 100k+ lines) would otherwise keep every byte resident in
+    # addition to the on-disk log, for no executor-layer benefit —
+    # the only consumers of `output` are tail extraction for error
+    # messages and marker scanning, both of which work on the last
+    # few thousand lines. Cap at ~1 MB of tail and rotate by line.
+    output_tail_bytes_cap = 1_048_576  # 1 MB
+    output_parts: collections.deque[str] = collections.deque()
+    output_parts_bytes = 0
     last_output_at: datetime | None = None
     last_output_monotonic = start_time
     current_phase = phase
@@ -133,8 +142,15 @@ def run_streaming_command(
                 if chunk is None:
                     break
 
-                decoded = chunk.decode("utf-8", errors="replace")
+                decoded = chunk.decode("utf-8-sig", errors="replace")
                 output_parts.append(decoded)
+                output_parts_bytes += len(decoded)
+                # Rotate the tail buffer — pop oldest fragments
+                # until we're under the cap. Keeps memory bounded
+                # regardless of build log length; the on-disk log
+                # below still captures everything.
+                while output_parts_bytes > output_tail_bytes_cap and len(output_parts) > 1:
+                    output_parts_bytes -= len(output_parts.popleft())
                 if log:
                     log.write(decoded)
                     log.flush()
