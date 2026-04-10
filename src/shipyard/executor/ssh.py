@@ -92,49 +92,57 @@ class SSHExecutor:
         log_file = Path(log_path)
         log_file.parent.mkdir(parents=True, exist_ok=True)
 
-        # Step 1: Create and deliver git bundle
-        with tempfile.TemporaryDirectory() as tmpdir:
-            bundle_path = Path(tmpdir) / "shipyard.bundle"
-            remote_bundle = target_config.get(
-                "remote_bundle_path", "/tmp/shipyard.bundle"
-            )
-
-            bundle_result = create_bundle(
-                sha=sha,
-                output_path=bundle_path,
-                repo_dir=target_config.get("local_repo_dir"),
-            )
-            if not bundle_result.success:
-                return _error_result(
-                    target_name, platform, started_at, start_time,
-                    str(log_file), f"Bundle creation failed: {bundle_result.message}",
+        # Step 1: Deliver code to the remote host.
+        # First check if the remote already has the SHA (from a prior
+        # run or a `git fetch origin`). If it does, skip the expensive
+        # bundle create → scp upload → apply pipeline entirely. For
+        # Pulp's 370 MB repo the bundle is ~443 MB; skipping it saves
+        # 10–30 minutes on Windows and ~30 seconds on Linux.
+        if _remote_has_sha(host, remote_repo, sha, ssh_options):
+            pass  # remote is ready, skip bundle delivery
+        else:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                bundle_path = Path(tmpdir) / "shipyard.bundle"
+                remote_bundle = target_config.get(
+                    "remote_bundle_path", "/tmp/shipyard.bundle"
                 )
 
-            upload_result = upload_bundle(
-                bundle_path=bundle_path,
-                host=host,
-                remote_path=remote_bundle,
-                ssh_options=ssh_options,
-                timeout=int(target_config.get("bundle_upload_timeout_secs", 1800)),
-            )
-            if not upload_result.success:
-                return _error_result(
-                    target_name, platform, started_at, start_time,
-                    str(log_file), f"Bundle upload failed: {upload_result.message}",
+                bundle_result = create_bundle(
+                    sha=sha,
+                    output_path=bundle_path,
+                    repo_dir=target_config.get("local_repo_dir"),
                 )
+                if not bundle_result.success:
+                    return _error_result(
+                        target_name, platform, started_at, start_time,
+                        str(log_file), f"Bundle creation failed: {bundle_result.message}",
+                    )
 
-            apply_result = apply_bundle(
-                host=host,
-                bundle_path=remote_bundle,
-                repo_path=remote_repo,
-                ssh_options=ssh_options,
-                timeout=int(target_config.get("bundle_apply_timeout_secs", 1800)),
-            )
-            if not apply_result.success:
-                return _error_result(
-                    target_name, platform, started_at, start_time,
-                    str(log_file), f"Bundle apply failed: {apply_result.message}",
+                upload_result = upload_bundle(
+                    bundle_path=bundle_path,
+                    host=host,
+                    remote_path=remote_bundle,
+                    ssh_options=ssh_options,
+                    timeout=int(target_config.get("bundle_upload_timeout_secs", 1800)),
                 )
+                if not upload_result.success:
+                    return _error_result(
+                        target_name, platform, started_at, start_time,
+                        str(log_file), f"Bundle upload failed: {upload_result.message}",
+                    )
+
+                apply_result = apply_bundle(
+                    host=host,
+                    bundle_path=remote_bundle,
+                    repo_path=remote_repo,
+                    ssh_options=ssh_options,
+                    timeout=int(target_config.get("bundle_apply_timeout_secs", 1800)),
+                )
+                if not apply_result.success:
+                    return _error_result(
+                        target_name, platform, started_at, start_time,
+                        str(log_file), f"Bundle apply failed: {apply_result.message}",
+                    )
 
         # Step 2: Checkout the SHA and run validation
         command = _build_remote_command(sha, remote_repo, validation_config)
@@ -228,6 +236,43 @@ class SSHExecutor:
             return result.returncode == 0
         except (subprocess.TimeoutExpired, OSError):
             return False
+
+
+def _remote_has_sha(
+    host: str,
+    repo_path: str,
+    sha: str,
+    ssh_options: list[str],
+    *,
+    timeout: int = 15,
+) -> bool:
+    """Check whether the remote repo already contains the given SHA.
+
+    Runs `git cat-file -e <sha>` on the remote via SSH. If the object
+    exists, the bundle create → scp upload → apply pipeline can be
+    skipped entirely — saving 10–30 minutes on large repos where the
+    full bundle is hundreds of megabytes. This is the most impactful
+    single optimisation for repeat runs against the same host: the
+    first run still needs the bundle, but every subsequent run on the
+    same or nearby SHA is effectively free.
+
+    Returns False on any error (SSH unreachable, timeout, bad path) so
+    the caller falls through to the bundle path as a safe default.
+    """
+    cmd = [
+        "ssh",
+        *ssh_options,
+        "-o", "ConnectTimeout=5",
+        host,
+        f"cd {repo_path} && git cat-file -e {sha}",
+    ]
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout,
+        )
+        return result.returncode == 0
+    except (subprocess.SubprocessError, OSError):
+        return False
 
 
 def _ssh_options(target_config: dict[str, Any]) -> list[str]:

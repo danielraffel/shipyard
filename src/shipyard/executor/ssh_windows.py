@@ -83,60 +83,70 @@ class SSHWindowsExecutor:
         log_file = Path(log_path)
         log_file.parent.mkdir(parents=True, exist_ok=True)
 
-        # Step 1: Create and deliver git bundle
-        with tempfile.TemporaryDirectory() as tmpdir:
-            bundle_path = Path(tmpdir) / "shipyard.bundle"
-            # Use a home-relative path by default rather than
-            # `C:\Temp\shipyard.bundle`, which doesn't exist on a
-            # stock Windows install and caused
-            # `scp: dest open "C:\\Temp\\shipyard.bundle": No such
-            # file or directory` on the first Stage 1 Windows
-            # dogfood run. A bare filename lands in the SSH user's
-            # home directory, which always exists.
-            remote_bundle = target_config.get(
-                "remote_bundle_path", "shipyard.bundle"
-            )
-
-            bundle_result = create_bundle(
-                sha=sha,
-                output_path=bundle_path,
-                repo_dir=target_config.get("local_repo_dir"),
-            )
-            if not bundle_result.success:
-                return _error_result(
-                    target_name, platform, started_at, start_time,
-                    str(log_file),
-                    f"Bundle creation failed: {bundle_result.message}",
+        # Step 1: Deliver code to the remote host.
+        # First check if the remote already has the SHA (from a prior
+        # run or a `git fetch origin`). If it does, skip the expensive
+        # bundle create → scp upload → apply pipeline entirely. For
+        # Pulp's 370 MB repo the bundle is ~443 MB and scp to Windows
+        # takes 10–30 min with a recurring SFTP-close hang; skipping
+        # the bundle when possible is the single highest-impact
+        # optimisation for Windows iteration speed.
+        if _remote_has_sha_windows(host, remote_repo, sha, ssh_options):
+            pass  # remote is ready, skip bundle delivery
+        else:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                bundle_path = Path(tmpdir) / "shipyard.bundle"
+                # Use a home-relative path by default rather than
+                # `C:\Temp\shipyard.bundle`, which doesn't exist on a
+                # stock Windows install and caused
+                # `scp: dest open "C:\\Temp\\shipyard.bundle": No such
+                # file or directory` on the first Stage 1 Windows
+                # dogfood run. A bare filename lands in the SSH user's
+                # home directory, which always exists.
+                remote_bundle = target_config.get(
+                    "remote_bundle_path", "shipyard.bundle"
                 )
 
-            upload_result = upload_bundle(
-                bundle_path=bundle_path,
-                host=host,
-                remote_path=remote_bundle,
-                ssh_options=ssh_options,
-                timeout=int(target_config.get("bundle_upload_timeout_secs", 1800)),
-            )
-            if not upload_result.success:
-                return _error_result(
-                    target_name, platform, started_at, start_time,
-                    str(log_file),
-                    f"Bundle upload failed: {upload_result.message}",
+                bundle_result = create_bundle(
+                    sha=sha,
+                    output_path=bundle_path,
+                    repo_dir=target_config.get("local_repo_dir"),
                 )
+                if not bundle_result.success:
+                    return _error_result(
+                        target_name, platform, started_at, start_time,
+                        str(log_file),
+                        f"Bundle creation failed: {bundle_result.message}",
+                    )
 
-            # Apply bundle via PowerShell on the remote
-            apply_result = _apply_bundle_windows(
-                host=host,
-                bundle_path=remote_bundle,
-                repo_path=remote_repo,
-                ssh_options=ssh_options,
-                timeout=int(target_config.get("bundle_apply_timeout_secs", 1800)),
-            )
-            if not apply_result.success:
-                return _error_result(
-                    target_name, platform, started_at, start_time,
-                    str(log_file),
-                    f"Bundle apply failed: {apply_result.message}",
+                upload_result = upload_bundle(
+                    bundle_path=bundle_path,
+                    host=host,
+                    remote_path=remote_bundle,
+                    ssh_options=ssh_options,
+                    timeout=int(target_config.get("bundle_upload_timeout_secs", 1800)),
                 )
+                if not upload_result.success:
+                    return _error_result(
+                        target_name, platform, started_at, start_time,
+                        str(log_file),
+                        f"Bundle upload failed: {upload_result.message}",
+                    )
+
+                # Apply bundle via PowerShell on the remote
+                apply_result = _apply_bundle_windows(
+                    host=host,
+                    bundle_path=remote_bundle,
+                    repo_path=remote_repo,
+                    ssh_options=ssh_options,
+                    timeout=int(target_config.get("bundle_apply_timeout_secs", 1800)),
+                )
+                if not apply_result.success:
+                    return _error_result(
+                        target_name, platform, started_at, start_time,
+                        str(log_file),
+                        f"Bundle apply failed: {apply_result.message}",
+                    )
 
         # Step 2: Resolve the Visual Studio toolchain (once per host,
         # cached) so stages can reference $env:SHIPYARD_CMAKE_PLATFORM
@@ -385,6 +395,38 @@ def _powershell_encoded_argv(host: str, script: str) -> list[str]:
         "-EncodedCommand",
         _encode_powershell_command(script),
     ]
+
+
+def _remote_has_sha_windows(
+    host: str,
+    repo_path: str,
+    sha: str,
+    ssh_options: list[str],
+    *,
+    timeout: int = 15,
+) -> bool:
+    """Check whether the remote Windows repo already contains the SHA.
+
+    Uses `git cat-file -e` via the EncodedCommand transport (same as
+    all other Windows SSH calls). If the object exists, the caller
+    skips the bundle create → scp upload → apply pipeline — saving
+    10–30 minutes on large repos where scp + SFTP close hangs are
+    the dominant cost.
+
+    Returns False on any error so the caller falls through to the
+    bundle path as a safe default.
+    """
+    safe_repo = _ps_single_quote(repo_path)
+    safe_sha = _ps_single_quote(sha)
+    script = f"cd '{safe_repo}'; git cat-file -e '{safe_sha}'; exit $LASTEXITCODE"
+    cmd = ["ssh"] + list(ssh_options) + _powershell_encoded_argv(host, script)
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout,
+        )
+        return result.returncode == 0
+    except (subprocess.SubprocessError, OSError):
+        return False
 
 
 def _apply_bundle_windows(
