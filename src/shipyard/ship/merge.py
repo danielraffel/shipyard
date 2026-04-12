@@ -114,6 +114,16 @@ def ship(
 ) -> ShipResult:
     """Full ship flow: push, PR, validate, merge on green.
 
+    .. note::
+       This function is **not** the implementation behind the
+       ``shipyard ship`` CLI command. ``cli.py:ship`` is the
+       authoritative ship orchestrator and supports more options
+       (``--base``, ``--allow-root-mismatch``, ``--auto-create-base``,
+       ``--resume-from``, JSON output, etc.). This function is kept
+       as a programmatic API surface for callers that import
+       ``shipyard.ship.merge`` directly; it intentionally does the
+       same logical thing in a simpler shape.
+
     Steps:
     1. Get current branch and SHA
     2. Push to remote

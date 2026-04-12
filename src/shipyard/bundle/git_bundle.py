@@ -29,6 +29,7 @@ def create_bundle(
     sha: str,
     output_path: str | Path,
     repo_dir: str | Path | None = None,
+    basis_shas: Sequence[str] = (),
 ) -> BundleResult:
     """Create a git bundle containing the given SHA and its ancestors.
 
@@ -36,6 +37,10 @@ def create_bundle(
         sha: The commit SHA to include (up to and including this commit).
         output_path: Local filesystem path for the generated .bundle file.
         repo_dir: Working directory for git commands. Defaults to cwd.
+        basis_shas: SHAs the remote already has. Each is passed as
+            ``^<sha>`` to ``git bundle create``, producing an incremental
+            bundle that excludes objects reachable from those commits.
+            When empty, ``--all`` is used to create a full bundle.
 
     Returns:
         BundleResult indicating success or failure.
@@ -45,9 +50,16 @@ def create_bundle(
 
     cwd = str(repo_dir) if repo_dir else None
 
+    cmd = ["git", "bundle", "create", str(output_path), sha]
+    if basis_shas:
+        for basis in basis_shas:
+            cmd.append(f"^{basis}")
+    else:
+        cmd.append("--all")
+
     try:
         result = subprocess.run(
-            ["git", "bundle", "create", str(output_path), sha, "--all"],
+            cmd,
             cwd=cwd,
             capture_output=True,
             text=True,
