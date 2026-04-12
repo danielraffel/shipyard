@@ -334,9 +334,7 @@ def queue_cmd(ctx: Context) -> None:
     """Show all jobs in the queue."""
     queue = ctx.queue
     active = queue.get_active()
-    pending = [j for j in queue._jobs if j.status == JobStatus.PENDING]
-    queue._ensure_loaded()
-    pending.sort(key=lambda j: (-j.priority.value, j.created_at))
+    pending = queue.get_pending()
     recent = queue.get_recent(limit=5)
 
     if ctx.json_mode:
@@ -1899,6 +1897,303 @@ def _wait_for_cloud_completion(repository: str | None, run_id: str) -> dict[str,
         import time
 
         time.sleep(5)
+
+
+# ── targets commands ──────────────────────────────────────────────────
+
+
+@main.group(invoke_without_command=True)
+@click.pass_context
+def targets(ctx: click.Context) -> None:
+    """List, add, remove, and test validation targets.
+
+    With no subcommand, lists all configured targets and their
+    reachability — equivalent to `shipyard targets list`.
+    """
+    if ctx.invoked_subcommand is None:
+        ctx.invoke(targets_list)
+
+
+@targets.command("list")
+@click.pass_obj
+def targets_list(ctx: Context) -> None:
+    """List configured targets with reachability status."""
+    config = ctx.config
+    if not config.targets:
+        if ctx.json_mode:
+            ctx.output("targets.list", {"targets": []})
+        else:
+            render_message("No targets configured. Run `shipyard init`.")
+        return
+
+    dispatcher = _make_dispatcher(config)
+    rows: list[dict[str, Any]] = []
+    for name, tconfig in config.targets.items():
+        target_config = dict(tconfig)
+        target_config["name"] = name
+        reachable, selected_backend = _probe_target(target_config, dispatcher)
+        rows.append({
+            "name": name,
+            "backend": dispatcher.backend_name(target_config),
+            "platform": tconfig.get("platform", "unknown"),
+            "reachable": reachable,
+            "active_backend": selected_backend,
+        })
+
+    if ctx.json_mode:
+        ctx.output("targets.list", {"targets": rows})
+    else:
+        console.print()
+        console.print("[bold]Targets[/]")
+        for row in rows:
+            status = "[green]reachable[/]" if row["reachable"] else "[red]unreachable[/]"
+            console.print(
+                f"  {row['name']:<16} {row['backend']:<12} "
+                f"{row['platform']:<16} {status}"
+            )
+        console.print()
+
+
+@targets.command("test")
+@click.argument("name")
+@click.pass_obj
+def targets_test(ctx: Context, name: str) -> None:
+    """Probe a single target and report reachability."""
+    config = ctx.config
+    if name not in config.targets:
+        render_error(f"Target '{name}' not configured")
+        sys.exit(1)
+    dispatcher = _make_dispatcher(config)
+    target_config = dict(config.targets[name])
+    target_config["name"] = name
+    reachable, selected_backend = _probe_target(target_config, dispatcher)
+    if ctx.json_mode:
+        ctx.output("targets.test", {
+            "name": name,
+            "reachable": reachable,
+            "active_backend": selected_backend,
+        })
+    else:
+        if reachable:
+            render_message(f"{name}: reachable via {selected_backend}", style="green")
+        else:
+            render_message(f"{name}: unreachable", style="red")
+            sys.exit(1)
+
+
+@targets.command("add")
+@click.argument("name")
+@click.option(
+    "--backend",
+    type=click.Choice(["local", "ssh", "ssh-windows", "cloud"]),
+    required=True,
+    help="Backend type for this target",
+)
+@click.option("--platform", help="Platform identifier (e.g. linux-x64)")
+@click.option("--host", help="SSH host (alias or user@host) — required for ssh/ssh-windows")
+@click.option("--repo-path", help="Remote repo path (ssh/ssh-windows)")
+@click.pass_obj
+def targets_add(
+    ctx: Context,
+    name: str,
+    backend: str,
+    platform: str | None,
+    host: str | None,
+    repo_path: str | None,
+) -> None:
+    """Add a new target to the project config.
+
+    Writes a new ``[targets.<name>]`` section to
+    ``.shipyard/config.toml``. For SSH backends, probes the host
+    before writing so the user gets immediate feedback.
+    """
+    if ctx.config.project_dir is None:
+        render_error("No .shipyard/config.toml found. Run `shipyard init` first.")
+        sys.exit(1)
+    if name in ctx.config.targets:
+        render_error(f"Target '{name}' already exists. Remove it first or pick another name.")
+        sys.exit(1)
+    if backend in ("ssh", "ssh-windows") and not host:
+        render_error(f"--host is required for backend={backend}")
+        sys.exit(1)
+
+    new_target: dict[str, Any] = {"backend": backend}
+    if platform:
+        new_target["platform"] = platform
+    if host:
+        new_target["host"] = host
+    if repo_path:
+        new_target["repo_path"] = repo_path
+
+    # Probe before writing so the user knows whether the new target
+    # is actually usable.
+    if backend in ("ssh", "ssh-windows"):
+        from shipyard.executor.ssh import SSHExecutor
+        from shipyard.executor.ssh_windows import SSHWindowsExecutor
+        executor = SSHExecutor() if backend == "ssh" else SSHWindowsExecutor()
+        probe_target = {**new_target, "name": name}
+        reachable = executor.probe(probe_target)
+        if not reachable and not ctx.json_mode:
+            render_message(
+                f"warning: {host} is not reachable right now. Adding anyway.",
+                style="bold yellow",
+            )
+
+    config_path = ctx.config.project_dir / "config.toml"
+    _append_target_section(config_path, name, new_target)
+
+    if ctx.json_mode:
+        ctx.output("targets.add", {"name": name, "config": new_target})
+    else:
+        render_message(f"Added target '{name}' to {config_path}", style="green")
+
+
+@targets.command("remove")
+@click.argument("name")
+@click.pass_obj
+def targets_remove(ctx: Context, name: str) -> None:
+    """Remove a target from the project config."""
+    if ctx.config.project_dir is None:
+        render_error("No .shipyard/config.toml found.")
+        sys.exit(1)
+    if name not in ctx.config.targets:
+        render_error(f"Target '{name}' not found")
+        sys.exit(1)
+    config_path = ctx.config.project_dir / "config.toml"
+    _remove_target_section(config_path, name)
+    if ctx.json_mode:
+        ctx.output("targets.remove", {"name": name})
+    else:
+        render_message(f"Removed target '{name}' from {config_path}", style="green")
+
+
+def _append_target_section(
+    config_path: Path, name: str, target_config: dict[str, Any],
+) -> None:
+    """Append a new ``[targets.<name>]`` section to a TOML config file.
+
+    Uses raw text append so existing comments and ordering are
+    preserved. Each value is rendered with `tomli_w` to ensure
+    correct escaping.
+    """
+    import tomli_w
+    section = tomli_w.dumps({"targets": {name: target_config}})
+    text = config_path.read_text()
+    if not text.endswith("\n"):
+        text += "\n"
+    if not text.endswith("\n\n"):
+        text += "\n"
+    config_path.write_text(text + section)
+
+
+def _remove_target_section(config_path: Path, name: str) -> None:
+    """Remove the ``[targets.<name>]`` section from a TOML config file.
+
+    Line-level edit so unrelated comments and ordering are preserved.
+    """
+    text = config_path.read_text()
+    lines = text.splitlines(keepends=True)
+    out: list[str] = []
+    skipping = False
+    section_marker = f"[targets.{name}]"
+    for line in lines:
+        stripped = line.strip()
+        if stripped == section_marker:
+            skipping = True
+            continue
+        if skipping and stripped.startswith("[") and stripped.endswith("]"):
+            skipping = False
+            out.append(line)
+            continue
+        if not skipping:
+            out.append(line)
+    config_path.write_text("".join(out))
+
+
+# ── config commands ──────────────────────────────────────────────────
+
+
+@main.group(invoke_without_command=True, name="config")
+@click.pass_context
+def config_cmd(ctx: click.Context) -> None:
+    """Inspect and switch project profiles and configuration.
+
+    With no subcommand, prints the effective merged config.
+    """
+    if ctx.invoked_subcommand is None:
+        ctx.invoke(config_show)
+
+
+@config_cmd.command("show")
+@click.pass_obj
+def config_show(ctx: Context) -> None:
+    """Print the effective merged configuration as JSON."""
+    import json as _json
+    if ctx.json_mode:
+        ctx.output("config.show", {"config": ctx.config.to_dict()})
+    else:
+        render_message(_json.dumps(ctx.config.to_dict(), indent=2))
+
+
+@config_cmd.command("profiles")
+@click.pass_obj
+def config_profiles(ctx: Context) -> None:
+    """List defined profiles and which one is active."""
+    profiles = ctx.config.get("profiles", {}) or {}
+    active = str(ctx.config.get("project.profile", "")) or None
+    rows: list[dict[str, Any]] = []
+    for name, body in profiles.items():
+        rows.append({
+            "name": name,
+            "active": name == active,
+            "targets": list((body or {}).get("targets", [])),
+        })
+    if ctx.json_mode:
+        ctx.output("config.profiles", {"profiles": rows, "active": active})
+    else:
+        if not rows:
+            render_message("No profiles defined. See docs/profiles.md.")
+            return
+        console.print()
+        console.print("[bold]Profiles[/]")
+        for row in rows:
+            marker = "  [green]← active[/]" if row["active"] else ""
+            console.print(
+                f"  {row['name']:<10} {', '.join(row['targets'])}{marker}"
+            )
+        console.print()
+
+
+@config_cmd.command("use")
+@click.argument("profile_name")
+@click.pass_obj
+def config_use(ctx: Context, profile_name: str) -> None:
+    """Switch the active profile.
+
+    This is a project-config-only operation — it edits
+    ``[project].profile`` in ``.shipyard/config.toml``. To switch the
+    *governance* profile (and apply branch protection at the same
+    time), use ``shipyard governance use``.
+    """
+    if ctx.config.project_dir is None:
+        render_error("No .shipyard/config.toml found. Run `shipyard init` first.")
+        sys.exit(1)
+    profiles = ctx.config.get("profiles", {}) or {}
+    if profile_name not in profiles:
+        render_error(
+            f"Profile '{profile_name}' is not defined. "
+            f"Known profiles: {', '.join(profiles.keys()) or '(none)'}"
+        )
+        sys.exit(1)
+    config_path = ctx.config.project_dir / "config.toml"
+    _rewrite_profile_in_config(config_path, profile_name)
+    if ctx.json_mode:
+        ctx.output("config.use", {"profile": profile_name})
+    else:
+        render_message(
+            f"Switched to profile '{profile_name}' in {config_path}",
+            style="green",
+        )
 
 
 if __name__ == "__main__":

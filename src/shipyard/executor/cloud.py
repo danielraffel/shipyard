@@ -23,6 +23,13 @@ if TYPE_CHECKING:
 _POLL_INTERVAL = 15
 # Maximum time to wait for a workflow run to appear in the list
 _DISPATCH_SETTLE_SECS = 30
+# Maximum time to wait for a workflow run to complete. After this
+# the run is reported as ERROR (timeout). Without this bound a
+# hanging GitHub Actions workflow would block the drain lock
+# indefinitely, blocking every other queued job on the machine.
+# Defaults to 60 minutes, which covers the long tail of real-world
+# cross-platform builds while still cutting losses on stuck runs.
+_MAX_POLL_SECS = 3600
 
 
 class CloudExecutor:
@@ -34,11 +41,13 @@ class CloudExecutor:
         repo: str | None = None,
         poll_interval: float = _POLL_INTERVAL,
         dispatch_settle_secs: float = _DISPATCH_SETTLE_SECS,
+        max_poll_secs: float = _MAX_POLL_SECS,
     ) -> None:
         self.workflow = workflow
         self.repo = repo
         self.poll_interval = poll_interval
         self.dispatch_settle_secs = dispatch_settle_secs
+        self.max_poll_secs = max_poll_secs
 
     def validate(
         self,
@@ -115,9 +124,20 @@ class CloudExecutor:
                 runner_profile=runner_profile,
             )
 
-        # Poll for completion
+        # Poll for completion. Per-target override allows long-running
+        # workflows (e.g. heavy cross-compile) to extend the cap; the
+        # 60-minute default protects the queue from indefinite hangs.
+        per_target_max = target_config.get("cloud_max_poll_secs")
+        max_poll_secs = (
+            float(per_target_max) if per_target_max is not None
+            else self.max_poll_secs
+        )
         try:
-            conclusion = self._poll_run(run_id, progress_callback=progress_callback)
+            conclusion = self._poll_run(
+                run_id,
+                progress_callback=progress_callback,
+                max_poll_secs=max_poll_secs,
+            )
         except subprocess.CalledProcessError as exc:
             return TargetResult(
                 target_name=target_name,
@@ -128,6 +148,19 @@ class CloudExecutor:
                 completed_at=datetime.now(timezone.utc),
                 duration_secs=time.monotonic() - start_time,
                 error_message=f"Failed to poll workflow run: {exc}",
+                provider=runner_provider,
+                runner_profile=runner_profile,
+            )
+        except TimeoutError as exc:
+            return TargetResult(
+                target_name=target_name,
+                platform=platform,
+                status=TargetStatus.ERROR,
+                backend="cloud",
+                started_at=started_at,
+                completed_at=datetime.now(timezone.utc),
+                duration_secs=time.monotonic() - start_time,
+                error_message=str(exc),
                 provider=runner_provider,
                 runner_profile=runner_profile,
             )
@@ -209,8 +242,18 @@ class CloudExecutor:
         run_id: str,
         *,
         progress_callback: ProgressCallback | None = None,
+        max_poll_secs: float | None = None,
     ) -> str:
-        """Poll a workflow run until it completes. Returns the conclusion."""
+        """Poll a workflow run until it completes. Returns the conclusion.
+
+        Raises TimeoutError if the run does not complete within
+        ``max_poll_secs``. None means use ``self.max_poll_secs``.
+        Pass ``float('inf')`` to disable the bound (e.g. in tests
+        that mock a fast completion).
+        """
+        if max_poll_secs is None:
+            max_poll_secs = self.max_poll_secs
+        deadline = time.monotonic() + max_poll_secs
         while True:
             cmd: list[str] = [
                 "gh", "run", "view", run_id,
@@ -228,6 +271,11 @@ class CloudExecutor:
             if data.get("status") == "completed":
                 return data.get("conclusion", "failure")
 
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"Cloud workflow run {run_id} did not complete within "
+                    f"{int(max_poll_secs)}s"
+                )
             time.sleep(self.poll_interval)
 
 

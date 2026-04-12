@@ -196,6 +196,13 @@ class Queue:
         completed.sort(key=lambda j: j.completed_at or j.created_at, reverse=True)
         return completed[:limit]
 
+    def get_pending(self) -> list[Job]:
+        """Return pending jobs, sorted by priority (high first) then FIFO."""
+        self._ensure_loaded()
+        pending = [j for j in self._jobs if j.status == JobStatus.PENDING]
+        pending.sort(key=lambda j: (-j.priority.value, j.created_at))
+        return pending
+
     @property
     def pending_count(self) -> int:
         self._ensure_loaded()

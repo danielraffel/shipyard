@@ -242,3 +242,107 @@ class TestCloudExecutorValidate:
                 payload = json.loads(cmd[i + 1].split("=", 1)[1])
                 assert payload["linux-x64"] == "nscloud-ubuntu-22.04-amd64-4x16"
         assert found_override, "runner_overrides input not found in dispatch command"
+
+
+class TestCloudPollTimeout:
+    """Tests for the max_poll_secs deadline that prevents indefinite hangs."""
+
+    def test_poll_run_raises_timeout_when_never_completes(self) -> None:
+        """A run that stays in_progress past the deadline raises TimeoutError."""
+        executor = CloudExecutor(
+            workflow="build.yml",
+            repo="owner/repo",
+            poll_interval=0.01,
+            max_poll_secs=0.05,  # 50ms deadline
+        )
+
+        # Always return in_progress — never completes
+        in_progress = MagicMock(
+            returncode=0,
+            stdout=json.dumps({"status": "in_progress", "conclusion": None}),
+        )
+        with patch("subprocess.run", return_value=in_progress):
+            with pytest.raises(TimeoutError, match="did not complete within"):
+                executor._poll_run("12345")
+
+    def test_poll_run_completes_before_deadline(self) -> None:
+        """A run that completes before the deadline returns the conclusion."""
+        executor = CloudExecutor(
+            workflow="build.yml",
+            repo="owner/repo",
+            poll_interval=0.01,
+            max_poll_secs=10,  # generous
+        )
+        completed = MagicMock(
+            returncode=0,
+            stdout=json.dumps({"status": "completed", "conclusion": "success"}),
+        )
+        with patch("subprocess.run", return_value=completed):
+            assert executor._poll_run("12345") == "success"
+
+    def test_validate_returns_error_on_timeout(
+        self, target_config: dict, validation_config: dict, tmp_path,
+    ) -> None:
+        """When _poll_run times out, validate() returns ERROR with the timeout message."""
+        executor = CloudExecutor(
+            workflow="build.yml",
+            repo="owner/repo",
+            poll_interval=0.01,
+            dispatch_settle_secs=0.5,
+            max_poll_secs=0.05,
+        )
+        log_path = str(tmp_path / "log.txt")
+
+        # Patch dispatch + run lookup to succeed, then make _poll_run hang
+        with patch.object(
+            executor, "_dispatch_workflow", return_value=None,
+        ), patch.object(
+            executor, "_wait_for_run", return_value="12345",
+        ), patch.object(
+            executor, "_poll_run",
+            side_effect=TimeoutError("Cloud workflow run 12345 did not complete within 60s"),
+        ):
+            result = executor.validate(
+                sha="abc123",
+                branch="main",
+                target_config=target_config,
+                validation_config=validation_config,
+                log_path=log_path,
+            )
+
+        assert result.status == TargetStatus.ERROR
+        assert "did not complete" in (result.error_message or "")
+
+    def test_per_target_max_poll_overrides_executor_default(
+        self, target_config: dict, validation_config: dict, tmp_path,
+    ) -> None:
+        """target_config['cloud_max_poll_secs'] overrides the executor default."""
+        executor = CloudExecutor(
+            workflow="build.yml",
+            repo="owner/repo",
+            poll_interval=0.01,
+            max_poll_secs=10,  # default
+        )
+        log_path = str(tmp_path / "log.txt")
+        target = {**target_config, "cloud_max_poll_secs": 999}
+
+        captured = {}
+
+        def fake_poll(run_id, *, progress_callback=None, max_poll_secs=None):
+            captured["max_poll_secs"] = max_poll_secs
+            return "success"
+
+        with patch.object(
+            executor, "_dispatch_workflow", return_value=None,
+        ), patch.object(
+            executor, "_wait_for_run", return_value="12345",
+        ), patch.object(executor, "_poll_run", side_effect=fake_poll):
+            executor.validate(
+                sha="abc123",
+                branch="main",
+                target_config=target,
+                validation_config=validation_config,
+                log_path=log_path,
+            )
+
+        assert captured["max_poll_secs"] == 999.0

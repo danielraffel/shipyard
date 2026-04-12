@@ -272,6 +272,276 @@ class TestSSHExecutorValidate:
             assert "make test" in remote_cmd
 
 
+class TestSSHRemoteHeadSha:
+    """Tests for _remote_head_sha used in incremental bundle negotiation."""
+
+    def test_returns_sha_on_success(self) -> None:
+        from shipyard.executor.ssh import _remote_head_sha
+        mock_result = MagicMock(returncode=0, stdout="abc123def456\n", stderr="")
+        with patch("subprocess.run", return_value=mock_result):
+            sha = _remote_head_sha("ubuntu", "~/repo", [])
+        assert sha == "abc123def456"
+
+    def test_returns_none_on_failure(self) -> None:
+        from shipyard.executor.ssh import _remote_head_sha
+        mock_result = MagicMock(returncode=128, stdout="", stderr="not a repo")
+        with patch("subprocess.run", return_value=mock_result):
+            sha = _remote_head_sha("ubuntu", "~/repo", [])
+        assert sha is None
+
+    def test_returns_none_on_timeout(self) -> None:
+        from shipyard.executor.ssh import _remote_head_sha
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("ssh", 15)):
+            sha = _remote_head_sha("ubuntu", "~/repo", [])
+        assert sha is None
+
+    def test_returns_none_on_non_hex_output(self) -> None:
+        from shipyard.executor.ssh import _remote_head_sha
+        mock_result = MagicMock(returncode=0, stdout="not-a-sha\n", stderr="")
+        with patch("subprocess.run", return_value=mock_result):
+            sha = _remote_head_sha("ubuntu", "~/repo", [])
+        assert sha is None
+
+    def test_returns_none_on_empty_output(self) -> None:
+        from shipyard.executor.ssh import _remote_head_sha
+        mock_result = MagicMock(returncode=0, stdout="", stderr="")
+        with patch("subprocess.run", return_value=mock_result):
+            sha = _remote_head_sha("ubuntu", "~/repo", [])
+        assert sha is None
+
+
+class TestSSHIncrementalBundle:
+    """Tests for incremental bundle negotiation in SSH executor."""
+
+    def test_uses_basis_sha_when_remote_has_head(self, tmp_path) -> None:
+        from shipyard.bundle.git_bundle import BundleResult
+
+        executor = SSHExecutor()
+        log_path = str(tmp_path / "log.txt")
+
+        with patch(
+            "shipyard.executor.ssh._remote_has_sha", return_value=False,
+        ), patch(
+            "shipyard.executor.ssh._remote_head_sha", return_value="aabbcc",
+        ), patch(
+            "shipyard.executor.ssh.create_bundle",
+            return_value=BundleResult(success=True, message="ok", path="/tmp/b"),
+        ) as mock_create, patch(
+            "shipyard.executor.ssh.upload_bundle",
+            return_value=BundleResult(success=True, message="ok", path="/tmp/b"),
+        ), patch(
+            "shipyard.executor.ssh.apply_bundle",
+            return_value=BundleResult(success=True, message="ok", path="/tmp/b"),
+        ), patch(
+            "shipyard.executor.ssh.run_streaming_command",
+            return_value=_streaming_result(0, "ok"),
+        ):
+            executor.validate(
+                sha="abc123", branch="main",
+                target_config=_target_config(),
+                validation_config=_validation_config(),
+                log_path=log_path,
+            )
+
+        # First call should use basis_shas
+        first_call = mock_create.call_args_list[0]
+        assert first_call[1].get("basis_shas") == ["aabbcc"]
+
+    def test_falls_back_to_full_bundle_on_incremental_failure(self, tmp_path) -> None:
+        from shipyard.bundle.git_bundle import BundleResult
+
+        executor = SSHExecutor()
+        log_path = str(tmp_path / "log.txt")
+
+        create_results = [
+            BundleResult(success=False, message="bad basis"),  # incremental fails
+            BundleResult(success=True, message="ok", path="/tmp/b"),  # full succeeds
+        ]
+
+        with patch(
+            "shipyard.executor.ssh._remote_has_sha", return_value=False,
+        ), patch(
+            "shipyard.executor.ssh._remote_head_sha", return_value="aabbcc",
+        ), patch(
+            "shipyard.executor.ssh.create_bundle",
+            side_effect=create_results,
+        ) as mock_create, patch(
+            "shipyard.executor.ssh.upload_bundle",
+            return_value=BundleResult(success=True, message="ok", path="/tmp/b"),
+        ), patch(
+            "shipyard.executor.ssh.apply_bundle",
+            return_value=BundleResult(success=True, message="ok", path="/tmp/b"),
+        ), patch(
+            "shipyard.executor.ssh.run_streaming_command",
+            return_value=_streaming_result(0, "ok"),
+        ):
+            result = executor.validate(
+                sha="abc123", branch="main",
+                target_config=_target_config(),
+                validation_config=_validation_config(),
+                log_path=log_path,
+            )
+
+        assert result.status == TargetStatus.PASS
+        assert mock_create.call_count == 2
+        # Second call should NOT have basis_shas (full bundle)
+        second_call = mock_create.call_args_list[1]
+        assert not second_call[1].get("basis_shas")
+
+    def test_skips_negotiation_when_remote_head_unknown(self, tmp_path) -> None:
+        from shipyard.bundle.git_bundle import BundleResult
+
+        executor = SSHExecutor()
+        log_path = str(tmp_path / "log.txt")
+
+        with patch(
+            "shipyard.executor.ssh._remote_has_sha", return_value=False,
+        ), patch(
+            "shipyard.executor.ssh._remote_head_sha", return_value=None,
+        ), patch(
+            "shipyard.executor.ssh.create_bundle",
+            return_value=BundleResult(success=True, message="ok", path="/tmp/b"),
+        ) as mock_create, patch(
+            "shipyard.executor.ssh.upload_bundle",
+            return_value=BundleResult(success=True, message="ok", path="/tmp/b"),
+        ), patch(
+            "shipyard.executor.ssh.apply_bundle",
+            return_value=BundleResult(success=True, message="ok", path="/tmp/b"),
+        ), patch(
+            "shipyard.executor.ssh.run_streaming_command",
+            return_value=_streaming_result(0, "ok"),
+        ):
+            executor.validate(
+                sha="abc123", branch="main",
+                target_config=_target_config(),
+                validation_config=_validation_config(),
+                log_path=log_path,
+            )
+
+        # Should create a full bundle (no basis)
+        assert mock_create.call_count == 1
+        first_call = mock_create.call_args_list[0]
+        assert not first_call[1].get("basis_shas")
+
+
+class TestSSHResumeFrom:
+    """Tests for --resume-from support in SSH executor."""
+
+    def _stage_validation_config(self) -> dict:
+        return {
+            "setup": "echo setup",
+            "configure": "cmake .",
+            "build": "cmake --build .",
+            "test": "ctest",
+        }
+
+    def test_build_command_includes_markers_per_stage(self) -> None:
+        from shipyard.executor.ssh import _build_remote_command
+        cfg = self._stage_validation_config()
+        cmd = _build_remote_command("abc123def456", "/repo", cfg)
+        assert cmd is not None
+        # Each stage should write its own marker
+        assert ".shipyard-stage-setup-abc123def456" in cmd
+        assert ".shipyard-stage-configure-abc123def456" in cmd
+        assert ".shipyard-stage-build-abc123def456" in cmd
+        assert ".shipyard-stage-test-abc123def456" in cmd
+
+    def test_build_command_respects_resume_from(self) -> None:
+        from shipyard.executor.ssh import _build_remote_command
+        cfg = self._stage_validation_config()
+        cmd = _build_remote_command(
+            "abc123def456", "/repo", cfg, resume_from="test",
+        )
+        assert cmd is not None
+        # Earlier stages should be skipped
+        assert "echo setup" not in cmd
+        assert "cmake ." not in cmd
+        assert "cmake --build" not in cmd
+        # test stage and its marker should be present
+        assert "ctest" in cmd
+        assert ".shipyard-stage-test-" in cmd
+
+    def test_resume_from_honored_when_marker_exists(self, tmp_path) -> None:
+        from shipyard.executor.ssh import _resolve_resume_from
+        log = tmp_path / "log.txt"
+        with patch(
+            "shipyard.executor.ssh._remote_marker_exists", return_value=True,
+        ):
+            result = _resolve_resume_from(
+                host="ubuntu", remote_repo="/repo", sha="abc123",
+                ssh_options=[], requested="test",
+                validation_config=self._stage_validation_config(),
+                log_file=log,
+            )
+        assert result == "test"
+
+    def test_resume_from_falls_back_when_marker_missing(self, tmp_path) -> None:
+        from shipyard.executor.ssh import _resolve_resume_from
+        log = tmp_path / "log.txt"
+        with patch(
+            "shipyard.executor.ssh._remote_marker_exists", return_value=False,
+        ):
+            result = _resolve_resume_from(
+                host="ubuntu", remote_repo="/repo", sha="abc123",
+                ssh_options=[], requested="test",
+                validation_config=self._stage_validation_config(),
+                log_file=log,
+            )
+        assert result is None
+        assert "marker for previous stage" in log.read_text()
+
+    def test_resume_from_ignored_for_single_command(self, tmp_path) -> None:
+        from shipyard.executor.ssh import _resolve_resume_from
+        log = tmp_path / "log.txt"
+        result = _resolve_resume_from(
+            host="ubuntu", remote_repo="/repo", sha="abc123",
+            ssh_options=[], requested="test",
+            validation_config={"command": "make test"},
+            log_file=log,
+        )
+        assert result is None
+        assert "single command" in log.read_text()
+
+    def test_resume_from_none_returns_none(self, tmp_path) -> None:
+        from shipyard.executor.ssh import _resolve_resume_from
+        log = tmp_path / "log.txt"
+        result = _resolve_resume_from(
+            host="ubuntu", remote_repo="/repo", sha="abc123",
+            ssh_options=[], requested=None,
+            validation_config=self._stage_validation_config(),
+            log_file=log,
+        )
+        assert result is None
+
+    def test_validate_passes_resume_from_through(self, tmp_path) -> None:
+        from shipyard.bundle.git_bundle import BundleResult
+
+        executor = SSHExecutor()
+        log_path = str(tmp_path / "log.txt")
+        cfg = self._stage_validation_config()
+
+        with patch(
+            "shipyard.executor.ssh._remote_has_sha", return_value=True,
+        ), patch(
+            "shipyard.executor.ssh._remote_marker_exists", return_value=True,
+        ), patch(
+            "shipyard.executor.ssh.run_streaming_command",
+            return_value=_streaming_result(0, "ok"),
+        ) as mock_run:
+            executor.validate(
+                sha="abc123def456", branch="main",
+                target_config=_target_config(),
+                validation_config=cfg,
+                log_path=log_path,
+                resume_from="test",
+            )
+
+        ssh_cmd = mock_run.call_args[0][0]
+        remote_cmd = ssh_cmd[-1]
+        assert "ctest" in remote_cmd
+        assert "echo setup" not in remote_cmd
+
+
 # ---------------------------------------------------------------------------
 # SSHWindowsExecutor tests
 # ---------------------------------------------------------------------------

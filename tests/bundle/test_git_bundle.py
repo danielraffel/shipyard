@@ -74,6 +74,45 @@ class TestCreateBundle:
         assert result.success
         assert (tmp_path / "deep" / "nested").is_dir()
 
+    def test_create_incremental_with_basis(self, tmp_path: Path) -> None:
+        output = tmp_path / "test.bundle"
+        mock_result = MagicMock(returncode=0, stderr="")
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
+            result = create_bundle(
+                sha="abc123", output_path=output, basis_shas=["def456"],
+            )
+
+        assert result.success
+        cmd = mock_run.call_args[0][0]
+        assert "abc123" in cmd
+        assert "^def456" in cmd
+        assert "--all" not in cmd
+
+    def test_create_incremental_multiple_bases(self, tmp_path: Path) -> None:
+        output = tmp_path / "test.bundle"
+        mock_result = MagicMock(returncode=0, stderr="")
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
+            result = create_bundle(
+                sha="abc123", output_path=output,
+                basis_shas=["def456", "789aaa"],
+            )
+
+        assert result.success
+        cmd = mock_run.call_args[0][0]
+        assert "^def456" in cmd
+        assert "^789aaa" in cmd
+        assert "--all" not in cmd
+
+    def test_create_full_bundle_when_no_basis(self, tmp_path: Path) -> None:
+        output = tmp_path / "test.bundle"
+        mock_result = MagicMock(returncode=0, stderr="")
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
+            result = create_bundle(sha="abc123", output_path=output)
+
+        assert result.success
+        cmd = mock_run.call_args[0][0]
+        assert "--all" in cmd
+
 
 class TestUploadBundle:
     def test_upload_success(self, tmp_path: Path) -> None:

@@ -62,16 +62,16 @@ class SSHWindowsExecutor:
         validation_config: dict[str, Any],
         log_path: str,
         progress_callback: ProgressCallback | None = None,
-        resume_from: str | None = None,  # accepted for API symmetry
-        mode: str = "default",            # accepted for API symmetry
+        resume_from: str | None = None,
+        mode: str = "default",  # accepted for API symmetry
     ) -> TargetResult:
-        # `resume_from` and `mode` are accepted for API symmetry
-        # with LocalExecutor but not yet implemented here — the
-        # Windows SSH executor builds the remote command in one
-        # pass. Dropping them silently avoids a TypeError from the
-        # CLI dispatch path, which passes the same kwargs to every
-        # backend.
-        del resume_from, mode
+        # `resume_from` is honored: when set, the executor probes the
+        # remote for a marker file written by the previous stage's
+        # successful run on this SHA. If the marker exists, earlier
+        # stages are skipped on the remote.
+        # `mode` is accepted but not yet implemented (prepared-state
+        # mode tagging is local-only).
+        del mode
         target_name = target_config.get("name", "windows")
         platform = target_config.get("platform", "windows-x64")
         host = target_config["host"]
@@ -107,11 +107,31 @@ class SSHWindowsExecutor:
                     "remote_bundle_path", "shipyard.bundle"
                 )
 
+                # Try an incremental bundle first: query the remote
+                # for its HEAD SHA and use it as a basis so only the
+                # delta is bundled. Falls back to a full bundle if
+                # the remote HEAD is unknown or the incremental
+                # bundle fails (e.g. no common ancestor).
+                basis_shas: list[str] = []
+                remote_head = _remote_head_sha_windows(host, remote_repo, sha, ssh_options)
+                if remote_head:
+                    basis_shas.append(remote_head)
+
                 bundle_result = create_bundle(
                     sha=sha,
                     output_path=bundle_path,
                     repo_dir=target_config.get("local_repo_dir"),
+                    basis_shas=basis_shas,
                 )
+
+                # If incremental bundle failed and we had a basis,
+                # fall back to a full bundle.
+                if not bundle_result.success and basis_shas:
+                    bundle_result = create_bundle(
+                        sha=sha,
+                        output_path=bundle_path,
+                        repo_dir=target_config.get("local_repo_dir"),
+                    )
                 if not bundle_result.success:
                     return _error_result(
                         target_name, platform, started_at, start_time,
@@ -157,12 +177,27 @@ class SSHWindowsExecutor:
         # a None result just means CMake falls back to its defaults.
         toolchain = self._get_vs_toolchain(host, ssh_options, target_config)
 
+        # Step 2.5: Resolve resume_from. If the caller asked to skip
+        # earlier stages, probe the remote for a marker file written
+        # by the previous successful run on this SHA.
+        effective_resume = _resolve_resume_from_windows(
+            host=host,
+            remote_repo=remote_repo,
+            sha=sha,
+            ssh_options=ssh_options,
+            requested=resume_from,
+            validation_config=validation_config,
+            log_file=log_file,
+        )
+
         # Step 3: Build the remote PowerShell command: env exports +
         # checkout + validate. If the target opts into a host mutex,
         # wrap the whole thing in a Mutex block so concurrent runs
         # against the same Windows host queue up instead of racing.
         command = _build_remote_command(
-            sha, remote_repo, validation_config, toolchain=toolchain,
+            sha, remote_repo, validation_config,
+            toolchain=toolchain,
+            resume_from=effective_resume,
         )
         if not command:
             return _error_result(
@@ -398,6 +433,40 @@ def _powershell_encoded_argv(host: str, script: str) -> list[str]:
     ]
 
 
+def _remote_head_sha_windows(
+    host: str,
+    repo_path: str,
+    sha: str,
+    ssh_options: list[str],
+    *,
+    timeout: int = 15,
+) -> str | None:
+    """Return the HEAD SHA from the remote Windows repo, or None on error.
+
+    Used to create incremental bundles: if the remote is at commit X
+    and we need to deliver commit Y, the bundle only needs objects
+    reachable from Y but not from X. For a typical 1-2 commit delta
+    this reduces a 443 MB bundle to a few KB.
+
+    Returns None on any error so the caller falls through to a full
+    bundle as a safe default.
+    """
+    safe_repo = _ps_single_quote(repo_path)
+    script = f"cd '{safe_repo}'; git rev-parse HEAD"
+    cmd = ["ssh"] + list(ssh_options) + _powershell_encoded_argv(host, script)
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout,
+        )
+        if result.returncode == 0:
+            head = result.stdout.strip()
+            if head and len(head) >= 7 and all(c in "0123456789abcdef" for c in head):
+                return head
+        return None
+    except (subprocess.SubprocessError, OSError):
+        return None
+
+
 def _remote_has_sha_windows(
     host: str,
     repo_path: str,
@@ -512,27 +581,147 @@ def _ssh_options(target_config: dict[str, Any]) -> list[str]:
     return options
 
 
+STAGE_ORDER = ("setup", "configure", "build", "test")
+
+
+def _stage_marker_name(stage: str, sha: str) -> str:
+    """Marker file written to the remote repo after a stage succeeds."""
+    return f".shipyard-stage-{stage}-{sha[:12]}"
+
+
+def _resolve_resume_from_windows(
+    *,
+    host: str,
+    remote_repo: str,
+    sha: str,
+    ssh_options: list[str],
+    requested: str | None,
+    validation_config: dict[str, Any],
+    log_file: Path,
+) -> str | None:
+    """Decide whether to honor a `--resume-from` request on Windows.
+
+    Mirrors the POSIX behavior: only honor when the previous stage's
+    marker file exists on the remote for this exact SHA.
+    """
+    if requested is None:
+        return None
+    if "command" in validation_config:
+        _append_log(
+            log_file,
+            f"=== resume-from: ignored ({requested!r}) — "
+            f"validation_config uses single command ===\n",
+        )
+        return None
+    if requested not in STAGE_ORDER:
+        _append_log(
+            log_file,
+            f"=== resume-from: ignored — unknown stage {requested!r} ===\n",
+        )
+        return None
+
+    idx = STAGE_ORDER.index(requested)
+    if idx == 0:
+        return requested
+    prev_stage = None
+    for candidate in STAGE_ORDER[:idx][::-1]:
+        if validation_config.get(candidate):
+            prev_stage = candidate
+            break
+    if prev_stage is None:
+        return requested
+
+    marker = _stage_marker_name(prev_stage, sha)
+    if _remote_marker_exists_windows(
+        host, remote_repo, marker, ssh_options,
+    ):
+        _append_log(
+            log_file,
+            f"=== resume-from: honoring {requested!r} — found marker for "
+            f"previous stage {prev_stage!r} on remote ===\n",
+        )
+        return requested
+    _append_log(
+        log_file,
+        f"=== resume-from: requested {requested!r} but marker for "
+        f"previous stage {prev_stage!r} not found on remote — running "
+        f"all stages from the beginning ===\n",
+    )
+    return None
+
+
+def _remote_marker_exists_windows(
+    host: str,
+    repo_path: str,
+    marker: str,
+    ssh_options: list[str],
+    *,
+    timeout: int = 15,
+) -> bool:
+    """Check whether `<repo>\\<marker>` exists on the remote Windows host."""
+    safe_repo = _ps_single_quote(repo_path)
+    safe_marker = _ps_single_quote(marker)
+    script = (
+        f"if (Test-Path (Join-Path '{safe_repo}' '{safe_marker}')) "
+        f"{{ exit 0 }} else {{ exit 1 }}"
+    )
+    cmd = ["ssh"] + list(ssh_options) + _powershell_encoded_argv(host, script)
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout,
+        )
+        return result.returncode == 0
+    except (subprocess.SubprocessError, OSError):
+        return False
+
+
+def _append_log(log_file: Path, text: str) -> None:
+    try:
+        with open(log_file, "a", encoding="utf-8") as fh:
+            fh.write(text)
+    except OSError:
+        pass
+
+
 def _build_remote_command(
     sha: str,
     remote_repo: str,
     validation_config: dict[str, Any],
     *,
     toolchain: VsToolchain | None = None,
+    resume_from: str | None = None,
 ) -> str | None:
     """Build the remote PowerShell command: cd + checkout + validate.
 
     Uses semicolons for PowerShell command chaining with $LASTEXITCODE checks.
     When `toolchain` is provided, the resolved CMake platform and generator
     instance are exported as env vars so stages can reference them.
+
+    When ``resume_from`` is set, stages before the resume point are
+    skipped. After each stage succeeds, a marker file is written so
+    a subsequent resume run can detect the earlier stage's success.
     """
     if "command" in validation_config:
         validate_cmd = validation_config["command"]
     else:
         parts: list[str] = []
-        for step in ("setup", "configure", "build", "test"):
+        skipping = resume_from is not None
+        for step in STAGE_ORDER:
             cmd = validation_config.get(step)
-            if cmd:
-                parts.append(f"Write-Output '__SHIPYARD_PHASE__:{step}'; {cmd}")
+            if not cmd:
+                continue
+            if skipping:
+                if step == resume_from:
+                    skipping = False
+                else:
+                    continue
+            marker = _stage_marker_name(step, sha)
+            safe_marker = _ps_single_quote(marker)
+            parts.append(
+                f"Write-Output '__SHIPYARD_PHASE__:{step}'; {cmd}; "
+                f"if ($LASTEXITCODE -ne 0) {{ exit 1 }}; "
+                f"New-Item -ItemType File -Force -Path '{safe_marker}' | Out-Null"
+            )
         if not parts:
             return None
         # Chain with PowerShell error checking
