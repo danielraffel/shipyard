@@ -60,3 +60,8 @@ addopts = "-ra --strict-markers"
 markers = [
     "integration: marks tests requiring real git repos or SSH",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]

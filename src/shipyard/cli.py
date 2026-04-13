@@ -1641,6 +1641,114 @@ def cleanup(ctx: Context, dry_run: bool, apply: bool) -> None:
 # ---- Helpers ----
 
 
+@main.command(name="pr")
+@click.option(
+    "--base",
+    default="main",
+    help="Base branch to ship into (default: main)",
+)
+@click.option(
+    "--apply-bumps/--no-apply-bumps",
+    default=True,
+    help=(
+        "Run scripts/version_bump_check.py --mode=apply to auto-rewrite "
+        "version files when a surface moved. On by default (mirrors "
+        "pulp's pulp pr). --no-apply-bumps switches to --mode=report so "
+        "missing bumps hard-fail."
+    ),
+)
+@click.option(
+    "--allow-unreachable-targets",
+    is_flag=True,
+    help="Forwarded to `shipyard ship`.",
+)
+@click.pass_context
+def pr(
+    ctx: click.Context,
+    base: str,
+    apply_bumps: bool,
+    allow_unreachable_targets: bool,
+) -> None:
+    """One-shot push-a-PR: skill-sync + version-bump + ship.
+
+    Mirrors pulp's `pulp pr` for parity with the ci skill's natural-
+    language triggers ("push a PR", "ship this"). Internally:
+
+        1. scripts/skill_sync_check.py --mode=report
+        2. scripts/version_bump_check.py --mode=(apply|report)
+        3. git commit of any bumps
+        4. invokes `shipyard ship` for push + PR + validate + merge
+    """
+    import shutil
+
+    repo_root = subprocess.check_output(
+        ["git", "rev-parse", "--show-toplevel"], text=True
+    ).strip()
+    ssc = Path(repo_root) / "scripts" / "skill_sync_check.py"
+    vbc = Path(repo_root) / "scripts" / "version_bump_check.py"
+    cfg = Path(repo_root) / "scripts" / "versioning.json"
+
+    if not ssc.exists() or not vbc.exists() or not cfg.exists():
+        render_error(
+            "shipyard pr requires scripts/skill_sync_check.py, "
+            "scripts/version_bump_check.py, and scripts/versioning.json "
+            "to be present. Install them via the versioning-sync port."
+        )
+        sys.exit(2)
+
+    python = shutil.which("python3") or "python3"
+
+    click.echo("▸ Skill-sync check")
+    rc = subprocess.call(
+        [python, str(ssc), "--base", f"origin/{base}", "--config", str(cfg), "--mode=report"]
+    )
+    if rc != 0:
+        render_error(
+            "skill-sync gate failed. Update the listed SKILL.md(s) or add a "
+            "`Skill-Update: skip skill=<name> reason=\"...\"` trailer on the "
+            "tip commit, then retry."
+        )
+        sys.exit(rc)
+
+    click.echo("▸ Version-bump " + ("apply" if apply_bumps else "report"))
+    mode = "apply" if apply_bumps else "report"
+    rc = subprocess.call(
+        [python, str(vbc), "--base", f"origin/{base}", "--config", str(cfg), f"--mode={mode}"]
+    )
+    if rc != 0:
+        render_error("version-bump gate failed; fix the bump and retry.")
+        sys.exit(rc)
+
+    # If apply staged any version files, commit them.
+    staged = subprocess.run(
+        ["git", "diff", "--cached", "--name-only"],
+        capture_output=True,
+        text=True,
+    )
+    if staged.stdout.strip():
+        click.echo("▸ Committing version bump(s)")
+        subprocess.check_call(
+            [
+                "git",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "chore: bump versions\n\nAutomated by `shipyard pr`.",
+            ]
+        )
+
+    # Delegate to the existing ship command for push/PR/validate/merge.
+    click.echo("▸ Handing off to `shipyard ship`")
+    ctx.invoke(
+        ship,
+        base=base,
+        allow_root_mismatch=False,
+        allow_unreachable_targets=allow_unreachable_targets,
+        auto_create_base=None,
+    )
+
+
 def _git_sha() -> str | None:
     try:
         return subprocess.check_output(
