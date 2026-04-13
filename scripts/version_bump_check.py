@@ -130,12 +130,13 @@ def git_diff_ignore_whitespace_nonempty(base: str, head: str, path: str) -> bool
     return has_real
 
 
-def git_log_subjects_and_bodies(base: str, head: str) -> list[tuple[str, str]]:
+def git_log_subjects_and_bodies(base: str, head: str) -> list[tuple[str, str, str]]:
+    """Return (sha, subject, body) tuples for each commit in base..head."""
     out = subprocess.run(
         ["git", "log", "--format=%H%x00%s%x00%B%x01", f"{base}..{head}"],
         check=True, capture_output=True, text=True,
     )
-    commits: list[tuple[str, str]] = []
+    commits: list[tuple[str, str, str]] = []
     for chunk in out.stdout.split("\x01"):
         chunk = chunk.strip()
         if not chunk:
@@ -143,9 +144,46 @@ def git_log_subjects_and_bodies(base: str, head: str) -> list[tuple[str, str]]:
         parts = chunk.split("\x00", 2)
         if len(parts) < 3:
             continue
-        _sha, subject, body = parts
-        commits.append((subject, body))
+        sha, subject, body = parts
+        commits.append((sha, subject, body))
     return commits
+
+
+def git_commit_files(sha: str) -> list[str]:
+    """Files touched by a single commit. Used to scope conv-commit signals
+    to surfaces whose trigger_paths the commit actually modified."""
+    out = subprocess.run(
+        ["git", "show", "--name-only", "--format=", sha],
+        check=True, capture_output=True, text=True,
+    )
+    return [line for line in out.stdout.splitlines() if line.strip()]
+
+
+def git_range_trailers(base: str, head: str) -> dict[str, list[str]]:
+    """Collect trailers from every commit in base..head (CI checks out
+    a synthetic merge commit as HEAD, so a bypass on the branch tip
+    wouldn't be visible if we only looked at HEAD)."""
+    try:
+        body = subprocess.run(
+            ["git", "log", "--format=%B%x00", f"{base}..{head}"],
+            check=True, capture_output=True, text=True,
+        ).stdout
+    except subprocess.CalledProcessError:
+        return {}
+    result: dict[str, list[str]] = {}
+    for body_chunk in body.split("\x00"):
+        if not body_chunk.strip():
+            continue
+        trailers = subprocess.run(
+            ["git", "interpret-trailers", "--parse"],
+            input=body_chunk, capture_output=True, text=True,
+        )
+        for line in trailers.stdout.splitlines():
+            if ":" not in line:
+                continue
+            key, _, value = line.partition(":")
+            result.setdefault(key.strip().lower(), []).append(value.strip())
+    return result
 
 
 def git_commit_trailers(ref: str) -> dict[str, list[str]]:
@@ -347,25 +385,20 @@ def heuristic_for_surface(
     if not touched:
         return "none"
 
-    # Public-API paths: minor-required if diff has real content (not just
-    # comments/whitespace). Downgrade to patch if the diff is trivial.
-    public_touched = [p for p in touched if _matches_any(p, surface.public_api_paths)]
-    meaningful_public = False
-    for p in public_touched:
-        if git_diff_ignore_whitespace_nonempty(base, head, p):
-            meaningful_public = True
-            break
+    # Filter to touched paths with a meaningful (non-whitespace, non-comment-only)
+    # diff. Paths whose changes are entirely whitespace or comments don't
+    # trigger a version bump — fall through to "none".
+    meaningful = [p for p in touched if git_diff_ignore_whitespace_nonempty(base, head, p)]
+    if not meaningful:
+        return "none"
 
-    if meaningful_public:
+    # Any public-API path with a meaningful diff → minor-required.
+    if any(_matches_any(p, surface.public_api_paths) for p in meaningful):
         return "minor"
 
-    # Only internal paths touched → patch-suggested (warning, not hard fail
-    # at the CI level; we still report it so humans can decide).
-    internal_touched = [p for p in touched if _matches_any(p, surface.internal_only_paths)]
-    if internal_touched or touched:
-        return "patch"
-
-    return "none"
+    # Otherwise internal-only changes → patch-suggested (advisory; report mode
+    # treats this as a warning, never hard fail).
+    return "patch"
 
 
 def surface_trailer_override(
@@ -448,14 +481,16 @@ def assess_surfaces(
     head: str,
     repo: Path,
 ) -> list[Verdict]:
-    trailers = git_commit_trailers(head)
+    trailers = git_range_trailers(base, head)
     verdicts: list[Verdict] = []
     for s in cfg.surfaces:
         heur = heuristic_for_surface(s, changed, base, head)
 
         override = surface_trailer_override(trailers, cfg.trailer_version_bump, s.name)
         final = heur
-        if override == "skip":
+        skip_requested = (override == "skip")
+
+        if skip_requested:
             final = "none"
         elif override in LEVELS:
             # Only raise, never lower. And only if the surface was actually touched.
@@ -469,11 +504,20 @@ def assess_surfaces(
                 final = "none"
 
         # Promote via conventional-commit subjects on commits that touched
-        # this surface — this is a ceiling raise only.
-        if heur != "none":
+        # THIS surface — never from commits that only touched unrelated
+        # paths. A plugin-only `feat:` cannot raise the SDK ceiling. An
+        # explicit `Version-Bump: <surface>=skip` on the tip commit is
+        # authoritative and is NOT raised back up by conv-commit subjects.
+        if heur != "none" and not skip_requested:
             conv_ceiling = "none"
-            for subject, body in git_log_subjects_and_bodies(base, head):
+            for sha, subject, body in git_log_subjects_and_bodies(base, head):
                 if is_revert_commit(subject, {}):
+                    continue
+                # Scope to commits whose files intersect this surface's
+                # trigger_paths — otherwise a feat: on the plugin can raise
+                # the SDK.
+                files = git_commit_files(sha)
+                if not any(_matches_any(f, s.trigger_paths) for f in files):
                     continue
                 conv_ceiling = max_level(conv_ceiling, classify_conventional(subject))
             if LEVELS.index(conv_ceiling) > LEVELS.index(final):
@@ -511,9 +555,23 @@ def render_report(
         if v.final_level == "none":
             lines.append(f"[{v.surface.name}] {v.surface.label}: no bump needed")
             continue
-        # Already bumped since base?
-        bumped = any(already_bumped(base, vf, repo) for vf in v.surface.version_files)
-        tag = "✓ bumped" if bumped else "✗ bump required"
+        # Every version file in the surface must have moved, not just one.
+        # Otherwise surfaces with multiple files (plugin.json + marketplace.json)
+        # could pass with only one bumped, causing split-brain versions.
+        per_file = [(vf, already_bumped(base, vf, repo)) for vf in v.surface.version_files]
+        all_bumped = all(bumped for _, bumped in per_file)
+        any_bumped = any(bumped for _, bumped in per_file)
+
+        if all_bumped:
+            tag = "✓ bumped"
+        elif any_bumped:
+            unbumped = [vf.path for vf, b in per_file if not b]
+            tag = f"✗ partial bump — not moved: {', '.join(unbumped)}"
+        elif v.final_level == "patch":
+            # Advisory only — not a hard fail.
+            tag = "? bump suggested (patch)"
+        else:
+            tag = "✗ bump required"
         lines.append(
             f"[{v.surface.name}] {v.surface.label}: "
             f"heuristic={v.heuristic}"
@@ -522,8 +580,13 @@ def render_report(
             f"current={v.current_version or '?'} "
             f"{tag}"
         )
-        if not bumped:
-            if v.final_level == "patch":
+        if not all_bumped:
+            # Partial-bump is always a hard fail — split-brain versions are
+            # never acceptable. Patch-suggested stays advisory only when
+            # nothing has been bumped at all.
+            if any_bumped:
+                failures += 1
+            elif v.final_level == "patch":
                 warnings += 1
             else:
                 failures += 1
@@ -553,8 +616,11 @@ def apply_bumps(
     for v in verdicts:
         if v.final_level in ("none", "patch"):
             continue
-        bumped = any(already_bumped(base, vf, repo) for vf in v.surface.version_files)
-        if bumped or not v.current_version:
+        # Skip if ALL version files are already at the target; otherwise
+        # apply to every file (keeps plugin.json and marketplace.json in
+        # lockstep after a partial-bump from a prior run).
+        all_bumped = all(already_bumped(base, vf, repo) for vf in v.surface.version_files)
+        if all_bumped or not v.current_version:
             continue
         new_ver = bump_version(v.current_version, v.final_level)
         for vf in v.surface.version_files:

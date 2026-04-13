@@ -1712,6 +1712,18 @@ def pr(
 
     click.echo("▸ Version-bump " + ("apply" if apply_bumps else "report"))
     mode = "apply" if apply_bumps else "report"
+
+    # Record the currently-staged set BEFORE running version_bump_check so we
+    # can isolate the files it stages. Otherwise any unrelated staged changes
+    # the user had in progress would sweep into the "chore: bump" commit
+    # (Codex P1 on PR #36).
+    staged_before = subprocess.run(
+        ["git", "diff", "--cached", "--name-only", "-z"],
+        capture_output=True,
+        text=True,
+    )
+    pre_set = {p for p in staged_before.stdout.split("\x00") if p}
+
     rc = subprocess.call(
         [python, str(vbc), "--base", f"origin/{base}", "--config", str(cfg), f"--mode={mode}"]
     )
@@ -1719,14 +1731,19 @@ def pr(
         render_error("version-bump gate failed; fix the bump and retry.")
         sys.exit(rc)
 
-    # If apply staged any version files, commit them.
-    staged = subprocess.run(
-        ["git", "diff", "--cached", "--name-only"],
+    staged_after = subprocess.run(
+        ["git", "diff", "--cached", "--name-only", "-z"],
         capture_output=True,
         text=True,
     )
-    if staged.stdout.strip():
-        click.echo("▸ Committing version bump(s)")
+    post_set = {p for p in staged_after.stdout.split("\x00") if p}
+    bumped_files = sorted(post_set - pre_set)
+
+    if bumped_files:
+        click.echo(f"▸ Committing version bump(s) — {len(bumped_files)} file(s)")
+        # Commit only the files version_bump_check added. Anything the user
+        # had staged before is left in the index for them to commit (or
+        # reset) separately.
         subprocess.check_call(
             [
                 "git",
@@ -1735,6 +1752,9 @@ def pr(
                 "commit",
                 "-m",
                 "chore: bump versions\n\nAutomated by `shipyard pr`.",
+                "--only",
+                "--",
+                *bumped_files,
             ]
         )
 
