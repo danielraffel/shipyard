@@ -426,9 +426,15 @@ def _check_release_bot_token() -> dict[str, Any] | None:
 
     Returns None when the repo can't be detected or `gh` can't read the
     secret list (no auth, missing scope) — silent skip rather than
-    blocking the rest of doctor. When the secret is present, returns ok=True
-    with a short note. When it's missing, returns ok=False with the exact
-    setup pointer so the user has zero ambiguity about what to do.
+    blocking the rest of doctor. When the secret is present, returns ok=True.
+    When it's missing, returns ok=False with the full setup pointer so the
+    user has zero ambiguity about what to do.
+
+    Uses `--paginate` so repos with many secrets (>30, the default page
+    size) don't produce a false `missing` when RELEASE_BOT_TOKEN is on a
+    later page. The setup recipe lives in `detail` — not `note` — because
+    `render_doctor()` in output/human.py prints detail/version/error but
+    silently drops `note`. Codex P2 on #39.
     """
     repo = detect_repo_from_remote()
     if repo is None:
@@ -437,10 +443,11 @@ def _check_release_bot_token() -> dict[str, Any] | None:
     try:
         result = subprocess.run(
             ["gh", "api", f"repos/{repo.slug}/actions/secrets",
+             "--paginate",
              "--jq", ".secrets[].name"],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=15,
         )
     except (subprocess.SubprocessError, FileNotFoundError):
         return None
@@ -448,6 +455,8 @@ def _check_release_bot_token() -> dict[str, Any] | None:
     if result.returncode != 0:
         # gh missing, not authed, or no actions:read scope. Keep silent;
         # `gh` health is already covered by the Cloud providers section.
+        # A genuinely empty (zero-secret) repo still returns 0 with empty
+        # stdout — that IS the bootstrap case we want to flag, not skip.
         return None
 
     secrets = {line.strip() for line in result.stdout.splitlines() if line.strip()}
@@ -456,28 +465,25 @@ def _check_release_bot_token() -> dict[str, Any] | None:
             "RELEASE_BOT_TOKEN": {
                 "ok": True,
                 "version": "configured",
-                "note": (
+                "detail": (
                     "auto-release.yml will use this for tag pushes; "
                     "downstream release.yml fires on its own."
                 ),
             }
         }
 
-    # Missing — produce a doctor entry whose `note` is the actual fix
-    # recipe so the user doesn't need to context-switch into docs.
     return {
         "RELEASE_BOT_TOKEN": {
             "ok": False,
             "version": "missing",
-            "note": (
-                "Auto-release will fall back to GITHUB_TOKEN; tag pushes "
-                "won't trigger release.yml. Fix: github.com → Settings → "
-                "Developer settings → Personal access tokens → Fine-grained "
-                "tokens → Generate. Repo access: only " + repo.slug
-                + ". Permission: Contents=Read and write. Then "
-                f"github.com/{repo.slug}/settings/secrets/actions → New "
-                "repository secret named RELEASE_BOT_TOKEN. See RELEASING.md "
-                "for the full walkthrough."
+            "detail": (
+                f"Auto-release will fall back to GITHUB_TOKEN; tag pushes won't "
+                f"trigger release.yml. Fix: github.com → Settings → Developer "
+                f"settings → Personal access tokens → Fine-grained tokens → "
+                f"Generate. Repo access: only {repo.slug}. Permission: "
+                f"Contents=Read and write. Then github.com/{repo.slug}/settings/"
+                f"secrets/actions → New repository secret named RELEASE_BOT_TOKEN. "
+                f"See RELEASING.md for the full walkthrough."
             ),
         }
     }
