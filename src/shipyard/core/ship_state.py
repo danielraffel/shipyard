@@ -56,7 +56,7 @@ import json
 import os
 import tempfile
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -204,6 +204,25 @@ class ShipState:
         )
 
 
+@dataclass(frozen=True)
+class PruneReport:
+    """Summary of what `ShipStateStore.prune()` removed."""
+
+    deleted_active: list[int] = field(default_factory=list)
+    deleted_archived: list[str] = field(default_factory=list)
+
+    @property
+    def total(self) -> int:
+        return len(self.deleted_active) + len(self.deleted_archived)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "deleted_active": list(self.deleted_active),
+            "deleted_archived": list(self.deleted_archived),
+            "total": self.total,
+        }
+
+
 @dataclass
 class ShipStateStore:
     """Persists in-flight ship state, one file per PR.
@@ -241,8 +260,14 @@ class ShipStateStore:
             return None
 
     def save(self, state: ShipState) -> None:
-        """Write state atomically. Bumps updated_at as a side effect."""
-        state.touch()
+        """Write state atomically.
+
+        The caller is responsible for updating `state.updated_at`
+        (the mutation helpers `upsert_run`, `update_evidence`, and
+        `touch` do this automatically). save() writes what it is
+        given so tests and audit tools can back-date state files
+        when needed.
+        """
         state_path = self._state_path(state.pr)
         payload = json.dumps(state.to_dict(), indent=2) + "\n"
         # Atomic write: tempfile in the same directory (so rename is
@@ -300,6 +325,55 @@ class ShipStateStore:
         if not self._archive_dir.exists():
             return []
         return sorted(self._archive_dir.glob("*.json"))
+
+    def prune(
+        self,
+        *,
+        active_days: int = 14,
+        archive_days: int = 30,
+        closed_prs: set[int] | None = None,
+        now: datetime | None = None,
+    ) -> PruneReport:
+        """Remove stale active and archived state files.
+
+        Rules:
+        - An **active** state file is deleted if its `updated_at` is
+          older than `active_days` AND (closed_prs is provided and
+          the PR is in it). Without a `closed_prs` set, active files
+          are never auto-deleted — they may still be in flight.
+        - An **archived** file is deleted if its filesystem mtime is
+          older than `archive_days`. Archives are tombstones; once
+          aged out they have no value.
+
+        Returns a PruneReport listing what was deleted.
+        """
+        now = now or datetime.now(timezone.utc)
+        active_cutoff = now - timedelta(days=active_days)
+        archive_cutoff = now - timedelta(days=archive_days)
+
+        deleted_active: list[int] = []
+        deleted_archived: list[str] = []
+
+        if closed_prs is not None:
+            for state in self.list_active():
+                if state.pr not in closed_prs:
+                    continue
+                if state.updated_at <= active_cutoff:
+                    self.delete(state.pr)
+                    deleted_active.append(state.pr)
+
+        for archive_path in self.list_archived():
+            mtime = datetime.fromtimestamp(
+                archive_path.stat().st_mtime, tz=timezone.utc
+            )
+            if mtime <= archive_cutoff:
+                archive_path.unlink()
+                deleted_archived.append(archive_path.name)
+
+        return PruneReport(
+            deleted_active=deleted_active,
+            deleted_archived=deleted_archived,
+        )
 
     def archive_and_replace(
         self, state: ShipState, new_attempt: int | None = None

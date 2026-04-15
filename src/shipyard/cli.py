@@ -22,6 +22,12 @@ from shipyard.core.config import Config
 from shipyard.core.evidence import EvidenceStore
 from shipyard.core.job import Job, JobStatus, TargetResult, TargetStatus, ValidationMode
 from shipyard.core.queue import Queue
+from shipyard.core.ship_state import (
+    DispatchedRun,
+    ShipState,
+    ShipStateStore,
+    compute_policy_signature,
+)
 from shipyard.executor.dispatch import ExecutorDispatcher
 from shipyard.governance.github import detect_repo_from_remote
 from shipyard.output.human import (
@@ -47,6 +53,7 @@ class Context:
         self._queue: Queue | None = None
         self._evidence: EvidenceStore | None = None
         self._cloud_records: CloudRecordStore | None = None
+        self._ship_state: ShipStateStore | None = None
 
     @property
     def config(self) -> Config:
@@ -78,6 +85,12 @@ class Context:
         if self._cloud_records is None:
             self._cloud_records = CloudRecordStore(self.config.state_dir / "cloud")
         return self._cloud_records
+
+    @property
+    def ship_state(self) -> ShipStateStore:
+        if self._ship_state is None:
+            self._ship_state = ShipStateStore(self.config.state_dir / "ship")
+        return self._ship_state
 
 
 pass_context = click.make_pass_decorator(Context, ensure=True)
@@ -1588,6 +1601,17 @@ def cloud_status(ctx: Context, identifier: str | None, limit: int, refresh: bool
         "everything else."
     ),
 )
+@click.option(
+    "--resume/--no-resume",
+    "resume",
+    default=None,
+    help=(
+        "Resume an in-flight ship from a saved state file. On by default "
+        "when a state file exists for the current PR; --no-resume forces a "
+        "fresh dispatch. Refuses to resume on SHA drift or merge-policy "
+        "change since the saved state was written."
+    ),
+)
 @click.pass_obj
 def ship(
     ctx: Context,
@@ -1595,6 +1619,7 @@ def ship(
     allow_root_mismatch: bool,
     allow_unreachable_targets: bool,
     auto_create_base: bool | None,
+    resume: bool | None,
 ) -> None:
     """Branch -> PR -> validate -> merge on green."""
     from shipyard.ship.pr import create_pr, find_pr_for_branch, merge_pr
@@ -1642,6 +1667,54 @@ def ship(
         render_error("No targets configured")
         sys.exit(1)
 
+    # ── Durable ship-state: detect or create ────────────────────
+    # A state file lets a future session resume after this process
+    # dies (laptop closed, OS restart, agent crash). Only one active
+    # state file exists per PR; on policy/SHA drift we refuse to
+    # resume silently and force the user to decide.
+    repo_slug = _detect_repo_slug_or_empty()
+    required_platforms = _required_platforms_for_config(config)
+    policy_sig = compute_policy_signature(
+        required_platforms=required_platforms,
+        target_names=target_names,
+        mode="FULL",
+    )
+    ship_state_store = ctx.ship_state
+    existing_state = ship_state_store.get(pr_info.number)
+    resume_effective = _resolve_resume_mode(resume, existing_state)
+    if existing_state is not None:
+        if resume_effective is False:
+            # Explicit --no-resume: archive the stale state and start fresh.
+            ship_state_store.archive_and_replace(existing_state)
+            existing_state = None
+        else:
+            drift = _detect_ship_state_drift(
+                existing_state, current_sha=sha, current_policy=policy_sig
+            )
+            if drift is not None:
+                render_error(
+                    f"Refusing to resume: {drift}. Re-run with "
+                    f"--no-resume to archive the stale state and dispatch fresh."
+                )
+                sys.exit(1)
+            if not ctx.json_mode:
+                render_message(
+                    f"Resuming ship for PR #{pr_info.number} "
+                    f"(attempt {existing_state.attempt}).",
+                    style="dim",
+                )
+
+    if existing_state is None:
+        existing_state = ShipState(
+            pr=pr_info.number,
+            repo=repo_slug,
+            branch=branch,
+            base_branch=base,
+            head_sha=sha,
+            policy_signature=policy_sig,
+        )
+        ship_state_store.save(existing_state)
+
     dispatcher = _make_dispatcher(config)
     try:
         preflight = run_submission_preflight(
@@ -1669,10 +1742,14 @@ def ship(
         mode=ValidationMode.FULL,
         fail_fast=False,
         resume_from=None,
+        ship_state=existing_state,
     )
 
     if job.passed:
         merged = merge_pr(pr_info.number)
+        # On terminal outcome, archive the state file so future
+        # `list-stale` does not flag it.
+        ship_state_store.archive(pr_info.number)
         if ctx.json_mode:
             ctx.output(
                 "ship",
@@ -1697,9 +1774,18 @@ def ship(
 @main.command()
 @click.option("--dry-run", is_flag=True, default=True, help="Show what would be cleaned up")
 @click.option("--apply", is_flag=True, help="Actually delete files")
+@click.option(
+    "--ship-state",
+    is_flag=True,
+    help=(
+        "Also prune aged ship-state files. Archived entries older than "
+        "30 days are deleted; active entries older than 14 days whose "
+        "PR is closed/merged on GitHub are deleted."
+    ),
+)
 @click.pass_obj
-def cleanup(ctx: Context, dry_run: bool, apply: bool) -> None:
-    """Clean up old logs, results, and bundles."""
+def cleanup(ctx: Context, dry_run: bool, apply: bool, ship_state: bool) -> None:
+    """Clean up old logs, results, bundles, and (opt-in) ship state."""
     from shipyard.cleanup.retention import cleanup as do_cleanup
 
     state_dir = ctx.config.state_dir
@@ -1707,17 +1793,178 @@ def cleanup(ctx: Context, dry_run: bool, apply: bool) -> None:
         dry_run = False
 
     result = do_cleanup(state_dir, dry_run=dry_run)
+    ship_state_report: dict[str, Any] | None = None
+
+    if ship_state:
+        store = ctx.ship_state
+        closed_prs = _gather_closed_prs(store) if not dry_run else None
+        if dry_run:
+            # In dry-run, compute the would-delete set without touching disk
+            # by constructing a parallel in-memory copy of the store logic.
+            ship_state_report = _preview_ship_state_prune(store)
+        else:
+            report = store.prune(
+                active_days=14, archive_days=30, closed_prs=closed_prs
+            )
+            ship_state_report = report.to_dict()
+
     if ctx.json_mode:
-        ctx.output("cleanup", result.to_dict())
+        payload = result.to_dict()
+        if ship_state_report is not None:
+            payload["ship_state"] = ship_state_report
+        ctx.output("cleanup", payload)
     else:
-        if not result.items:
+        if not result.items and not ship_state_report:
             render_message("Nothing to clean up.", style="dim")
         else:
             for item in result.items:
                 action = "would delete" if dry_run else "deleted"
                 render_message(f"  {action}: {item.path} ({item.size_bytes} bytes)")
+            if ship_state_report is not None:
+                for pr in ship_state_report.get("deleted_active", []):
+                    action = "would delete" if dry_run else "deleted"
+                    render_message(f"  {action}: ship state for PR #{pr}")
+                for name in ship_state_report.get("deleted_archived", []):
+                    action = "would delete" if dry_run else "deleted"
+                    render_message(f"  {action}: archived ship state {name}")
             if dry_run:
                 render_message("\nRun with --apply to delete.", style="dim")
+
+
+def _gather_closed_prs(store: ShipStateStore) -> set[int]:
+    """Query `gh` for PR state of every active ship-state file.
+
+    Used during cleanup to decide which state files are safe to prune.
+    A PR whose state cannot be determined (gh missing, network error,
+    auth failure) is treated as *not closed* — we prefer to keep state
+    over delete it.
+    """
+    closed: set[int] = set()
+    for state in store.list_active():
+        closed_status = _pr_is_closed(state.pr)
+        if closed_status:
+            closed.add(state.pr)
+    return closed
+
+
+def _pr_is_closed(pr: int) -> bool:
+    """Return True only if we confirm the PR is merged or closed."""
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "view", str(pr), "--json", "state"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+    if result.returncode != 0:
+        return False
+    import json as _json
+
+    try:
+        data = _json.loads(result.stdout)
+    except _json.JSONDecodeError:
+        return False
+    return data.get("state") in ("MERGED", "CLOSED")
+
+
+def _preview_ship_state_prune(store: ShipStateStore) -> dict[str, Any]:
+    """Dry-run preview of what `store.prune()` would remove."""
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+    now = _dt.now(_tz.utc)
+    archive_cutoff = now - _td(days=30)
+    would_archived: list[str] = []
+    for archive_path in store.list_archived():
+        mtime = _dt.fromtimestamp(archive_path.stat().st_mtime, tz=_tz.utc)
+        if mtime <= archive_cutoff:
+            would_archived.append(archive_path.name)
+    # We don't hit `gh` in dry-run — just show what the age filter
+    # would match if the PR is also closed. The caller is expected
+    # to run --apply for accurate active-file pruning.
+    return {
+        "deleted_active": [],
+        "deleted_archived": would_archived,
+        "total": len(would_archived),
+        "note": "Active-file pruning is only computed during --apply.",
+    }
+
+
+@main.group(name="ship-state")
+def ship_state_group() -> None:
+    """Inspect and manage durable ship-state records."""
+
+
+@ship_state_group.command("list")
+@click.pass_obj
+def ship_state_list(ctx: Context) -> None:
+    """List active in-flight ship states (one per PR)."""
+    states = ctx.ship_state.list_active()
+    if ctx.json_mode:
+        ctx.output(
+            "ship-state:list",
+            {"states": [s.to_dict() for s in states]},
+        )
+        return
+    if not states:
+        render_message("No active ship state.", style="dim")
+        return
+    now = datetime.now(timezone.utc)
+    for s in states:
+        age = now - s.updated_at
+        age_s = f"{int(age.total_seconds() // 60)}m"
+        render_message(
+            f"PR #{s.pr}  sha={s.head_sha[:12]}  attempt={s.attempt}  "
+            f"runs={len(s.dispatched_runs)}  age={age_s}"
+        )
+
+
+@ship_state_group.command("show")
+@click.argument("pr", type=int)
+@click.pass_obj
+def ship_state_show(ctx: Context, pr: int) -> None:
+    """Print the full saved state for PR <pr>."""
+    state = ctx.ship_state.get(pr)
+    if state is None:
+        render_error(f"No ship state for PR #{pr}")
+        sys.exit(1)
+    if ctx.json_mode:
+        ctx.output("ship-state:show", state.to_dict())
+        return
+    render_message(f"PR #{state.pr}  attempt {state.attempt}")
+    render_message(f"  repo:           {state.repo}")
+    render_message(f"  branch:         {state.branch} -> {state.base_branch}")
+    render_message(f"  head_sha:       {state.head_sha}")
+    render_message(f"  policy:         {state.policy_signature}")
+    render_message(f"  evidence:       {state.evidence_snapshot}")
+    render_message(f"  dispatched:     {len(state.dispatched_runs)} run(s)")
+    for run in state.dispatched_runs:
+        render_message(
+            f"    - {run.target} ({run.provider}) "
+            f"run_id={run.run_id} status={run.status}"
+        )
+    render_message(f"  created_at:     {state.created_at.isoformat()}")
+    render_message(f"  updated_at:     {state.updated_at.isoformat()}")
+
+
+@ship_state_group.command("discard")
+@click.argument("pr", type=int)
+@click.pass_obj
+def ship_state_discard(ctx: Context, pr: int) -> None:
+    """Archive the active state for PR <pr> (does not delete; leaves a tombstone)."""
+    state = ctx.ship_state.get(pr)
+    if state is None:
+        render_error(f"No ship state for PR #{pr}")
+        sys.exit(1)
+    archived = ctx.ship_state.archive(pr)
+    if ctx.json_mode:
+        ctx.output(
+            "ship-state:discard",
+            {"pr": pr, "archived_to": str(archived) if archived else None},
+        )
+    else:
+        render_message(f"Archived ship state for PR #{pr}.")
 
 
 # ---- Helpers ----
@@ -2023,6 +2270,7 @@ def _execute_job(
     mode: ValidationMode,
     fail_fast: bool,
     resume_from: str | None,
+    ship_state: ShipState | None = None,
 ) -> Job:
     job = job.start()
     ctx.queue.update(job)
@@ -2101,6 +2349,8 @@ def _execute_job(
     job = job.complete()
     ctx.queue.update(job)
     _record_evidence(ctx, job)
+    if ship_state is not None:
+        _update_ship_state_from_job(ctx, ship_state, job)
     return job
 
 
@@ -2123,6 +2373,80 @@ def _record_evidence(ctx: Context, job: Job) -> None:
                 provider=result.provider,
                 runner_profile=result.runner_profile,
             ))
+
+
+def _update_ship_state_from_job(
+    ctx: Context, ship_state: ShipState, job: Job
+) -> None:
+    """Mirror the job's per-target outcomes into the ship state snapshot.
+
+    Keeps the ship state file in sync with what EvidenceStore just
+    recorded, so `list-stale` and `status --pr` can report the
+    current picture without re-reading the evidence index.
+    """
+    for name, result in job.results.items():
+        if result.is_terminal:
+            ship_state.update_evidence(
+                name, "pass" if result.passed else "fail"
+            )
+    ctx.ship_state.save(ship_state)
+
+
+def _detect_repo_slug_or_empty() -> str:
+    """Best-effort `owner/repo` slug from the git origin; empty string on miss."""
+    slug = detect_repo_from_remote()
+    return slug or ""
+
+
+def _required_platforms_for_config(config: Config) -> list[str]:
+    """Platform names required by the current merge policy.
+
+    Falls back to the set of target platforms when the config does
+    not declare an explicit merge policy.
+    """
+    merge_cfg = getattr(config, "merge", None) or {}
+    required = merge_cfg.get("required_platforms") if isinstance(merge_cfg, dict) else None
+    if required:
+        return list(required)
+    platforms: list[str] = []
+    for target in config.targets.values():
+        platform = target.get("platform")
+        if platform and platform not in platforms:
+            platforms.append(platform)
+    return platforms
+
+
+def _resolve_resume_mode(
+    flag: bool | None, existing_state: ShipState | None
+) -> bool | None:
+    """Translate the CLI flag + state presence into an effective resume mode.
+
+    Returns True for "resume", False for "force fresh", None when
+    there is nothing to resume.
+    """
+    if existing_state is None:
+        return None
+    if flag is None:
+        # Default: auto-resume when a state file exists.
+        return True
+    return flag
+
+
+def _detect_ship_state_drift(
+    state: ShipState, *, current_sha: str, current_policy: str
+) -> str | None:
+    """Return a human-readable reason why `state` must not be resumed, or None."""
+    if state.is_sha_drift(current_sha):
+        return (
+            f"PR head SHA has moved since the saved state was written "
+            f"(was {state.head_sha[:12]}, now {current_sha[:12]})"
+        )
+    if state.policy_signature and state.policy_signature != current_policy:
+        return (
+            "Merge policy (required platforms / targets / mode) has "
+            "changed since the saved state was written"
+        )
+    return None
 
 
 def _wait_for_cloud_completion(repository: str | None, run_id: str) -> dict[str, Any]:

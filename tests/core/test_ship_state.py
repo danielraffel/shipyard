@@ -175,12 +175,16 @@ class TestShipStateStore:
         assert restored.pr == state.pr
         assert len(restored.dispatched_runs) == 1
 
-    def test_save_bumps_updated_at(self, store: ShipStateStore) -> None:
+    def test_save_preserves_updated_at(self, store: ShipStateStore) -> None:
+        # save() writes what it is given; it is the caller's job to
+        # update timestamps before save (which upsert_run/update_evidence
+        # already do).
         state = _make_state()
-        old = state.updated_at - timedelta(hours=1)
-        state.updated_at = old
+        fixed = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        state.updated_at = fixed
         store.save(state)
-        assert state.updated_at > old
+        restored = store.get(state.pr)
+        assert restored is not None and restored.updated_at == fixed
 
     def test_save_is_atomic_no_partial_file_on_corrupt_input(
         self, store: ShipStateStore
@@ -289,6 +293,71 @@ class TestShipStateStore:
         store.save(_make_state(pr=55))
         stray = list(store.path.glob(".*.tmp"))
         assert stray == []
+
+
+class TestPrune:
+    def test_prune_archived_older_than_cutoff(
+        self, store: ShipStateStore
+    ) -> None:
+        store.save(_make_state(pr=1))
+        archived = store.archive(1)
+        assert archived is not None
+        # Backdate the file mtime so it looks old.
+        old = datetime.now(timezone.utc) - timedelta(days=60)
+        os_stat_time = old.timestamp()
+        import os
+
+        os.utime(archived, (os_stat_time, os_stat_time))
+        report = store.prune(archive_days=30)
+        assert archived.name in report.deleted_archived
+        assert not archived.exists()
+
+    def test_prune_does_not_touch_recent_archive(
+        self, store: ShipStateStore
+    ) -> None:
+        store.save(_make_state(pr=2))
+        archived = store.archive(2)
+        assert archived is not None
+        report = store.prune(archive_days=30)
+        assert report.total == 0
+        assert archived.exists()
+
+    def test_prune_active_requires_closed_pr_set(
+        self, store: ShipStateStore
+    ) -> None:
+        state = _make_state(pr=3)
+        state.updated_at = datetime.now(timezone.utc) - timedelta(days=90)
+        store.save(state)
+        # Without a closed_prs set, even very old active states survive —
+        # they might still be in-flight.
+        report = store.prune(active_days=14)
+        assert state.pr not in report.deleted_active
+        assert store.get(3) is not None
+
+    def test_prune_active_deletes_only_closed_and_stale(
+        self, store: ShipStateStore
+    ) -> None:
+        stale_closed = _make_state(pr=10)
+        stale_closed.updated_at = datetime.now(timezone.utc) - timedelta(days=90)
+        fresh_closed = _make_state(pr=11)
+        stale_open = _make_state(pr=12)
+        stale_open.updated_at = datetime.now(timezone.utc) - timedelta(days=90)
+        for s in (stale_closed, fresh_closed, stale_open):
+            store.save(s)
+        report = store.prune(
+            active_days=14, closed_prs={10, 11}
+        )
+        assert 10 in report.deleted_active  # stale + closed → gone
+        assert 11 not in report.deleted_active  # fresh + closed → kept
+        assert 12 not in report.deleted_active  # stale + open → kept
+        assert store.get(10) is None
+        assert store.get(11) is not None
+        assert store.get(12) is not None
+
+    def test_prune_report_total(self, store: ShipStateStore) -> None:
+        report = store.prune()
+        assert report.total == 0
+        assert report.to_dict()["total"] == 0
 
 
 class TestPolicySignature:

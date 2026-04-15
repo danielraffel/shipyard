@@ -105,6 +105,8 @@ It calls your build commands and cares about one thing: did they pass?
   cloud / full setups with one command.
 - [Manual CLI Workflows](docs/workflows.md) — debugging failed runs,
   managing the queue, partial reruns.
+- [Resuming an interrupted ship](docs/ship-resume.md) — how `shipyard ship`
+  recovers across closed laptops and restarted sessions.
 - [CLI Reference](docs/cli-reference.md) — every command and flag.
 - [Install details](docs/install.md) — binaries, build from source,
   optional dependencies.
