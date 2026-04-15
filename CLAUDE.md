@@ -45,6 +45,14 @@ When the user says "push a PR", "ship this", "ship it", "we're done", "merge thi
 
 Never invoke `gh pr create` + release separately. Never run the version-bump or skill-sync scripts by hand.
 
+### Ship resume
+
+`shipyard ship` auto-resumes an interrupted ship when a per-PR state file
+exists under `<state_dir>/ship/<pr>.json`. If a session dies mid-wait, the
+next `shipyard ship` invocation continues from the same dispatched run
+IDs. SHA or merge-policy drift refuses the resume — re-run with
+`--no-resume` to discard. See `docs/ship-resume.md`.
+
 ### Bypass trailers (tip commit, never PR body)
 
 | Gate          | Trailer                                                      |

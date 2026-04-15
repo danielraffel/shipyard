@@ -16,6 +16,10 @@ Shipyard coordinates validation across local, SSH, and cloud targets.
 | Fast smoke check | `shipyard run --smoke --json` |
 | Full ship (PR + validate + merge) | `shipyard ship --json` |
 | Ship to develop instead of main | `shipyard ship --base develop --json` |
+| Resume an interrupted ship | `shipyard ship --resume --json` (auto when state exists) |
+| Force-restart a stale ship | `shipyard ship --no-resume --json` |
+| List in-flight ship states | `shipyard ship-state list --json` |
+| Inspect one PR's ship state | `shipyard ship-state show <pr> --json` |
 | Show queue and status | `shipyard status --json` |
 | Show all queued jobs | `shipyard queue --json` |
 | Show run logs | `shipyard logs <job_id> --json` |
@@ -40,6 +44,16 @@ Shipyard coordinates validation across local, SSH, and cloud targets.
 
 Shipyard refuses to merge unless every required platform has passing evidence
 for the exact HEAD SHA.
+
+### Recovering an interrupted ship
+
+If a ship was interrupted (laptop closed, session ended, OS restart), just
+run `shipyard ship --json` again. Shipyard writes per-PR state to disk on
+every dispatch and evidence event; the second invocation auto-resumes from
+the same run IDs without re-dispatching. On SHA or merge-policy drift the
+resume is refused with a clear message — re-run with `--no-resume` to
+archive the stale state and start fresh. Full details in
+[`docs/ship-resume.md`](../../docs/ship-resume.md).
 
 ## Queue management
 
