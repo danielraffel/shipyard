@@ -15,6 +15,7 @@
         "src/shipyard/**/*.pyi"
       ],
       "public_api_paths": [
+        "src/shipyard/*.py",
         "src/shipyard/cli/**/*.py",
         "src/shipyard/config/**/*.py",
         "src/shipyard/__init__.py"
