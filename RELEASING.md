@@ -10,10 +10,12 @@ Run `shipyard doctor` to check whether the secret is configured. If it shows `RE
 2. **Token name:** `shipyard-release-bot` (or any descriptive name).
 3. **Expiration:** 1 year (mark your calendar to renew).
 4. **Resource owner:** the org or user that owns this repo.
-5. **Repository access:** Only select repositories → this repo only.
-6. **Permissions** (Repository permissions section): **Contents: Read and write**. Leave everything else at the default.
-7. **Generate**, copy the token (starts with `github_pat_…`).
-8. **Add to repo secrets:** github.com/<owner>/<repo>/settings/secrets/actions → New repository secret. Name: `RELEASE_BOT_TOKEN`. Value: paste the token.
+5. **Repository access:** *Only select repositories* → include **every repo** that will use this same token as `RELEASE_BOT_TOKEN`. Fine-grained PATs are strictly scoped to the listed repos — if you later reuse the same PAT as `RELEASE_BOT_TOKEN` on a second repo (e.g. a consumer project that has its own auto-release), `actions/checkout@v5` will fail on that second repo with `fatal: could not read Username` because the token has no permissions there. Safest: list every consumer repo up front, or create a separate PAT per repo.
+6. **Permissions** (Repository permissions section): **Contents: Read and write** is required. **Metadata: Read-only** is auto-added (required baseline). Optional: **Workflows: Read and write** only if you plan to commit changes to `.github/workflows/*` under this token — Shipyard's auto-release only pushes tags, so it's not required.
+7. **Generate**, copy the token (starts with `github_pat_…`). The token is shown once and cannot be retrieved later.
+8. **Add to repo secrets:** github.com/<owner>/<repo>/settings/secrets/actions → New repository secret. Name: `RELEASE_BOT_TOKEN`. Value: paste the token. Repeat on every repo listed in step 5 that should use this token.
+
+**If auto-release was already failing with `could not read Username`,** the PAT is almost certainly a fine-grained one missing that repo in its "Selected repositories" list. Edit the existing token at https://github.com/settings/personal-access-tokens, add the repo, save — no secret rotation needed; the stored token value stays valid.
 
 That's it — no code change needed. The workflow already reads `${{ secrets.RELEASE_BOT_TOKEN || secrets.GITHUB_TOKEN }}`. `shipyard doctor` will then report `RELEASE_BOT_TOKEN: configured`.
 
