@@ -276,6 +276,57 @@ class TestRetargetCli:
         assert captured["cancelled"] == []
         assert captured["dispatched_with"] is None
 
+    def test_dry_run_json_emits_single_envelope(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # #66 P2: JSON mode must emit exactly one envelope.
+        # OutputEnvelope flattens data fields alongside command at
+        # the top level of the rendered JSON.
+        import json as _json
+
+        self._patch_pr_flow(monkeypatch)
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "--json", "cloud", "retarget",
+                "--pr", "10",
+                "--target", "macos",
+                "--provider", "namespace",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        # One concatenated JSON doc parses; two would fail with
+        # "Extra data" — so a clean parse proves single-envelope.
+        parsed = _json.loads(result.output)
+        assert parsed["command"] == "cloud.retarget"
+        assert parsed["event"] == "plan"
+        assert parsed["dry_run"] is True
+
+    def test_apply_json_emits_single_applied_envelope(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # #66 P2: --apply must emit one `applied` envelope, not
+        # a `plan` followed by an `applied`.
+        import json as _json
+
+        self._patch_pr_flow(monkeypatch)
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "--json", "cloud", "retarget",
+                "--pr", "10",
+                "--target", "macos",
+                "--provider", "namespace",
+                "--apply",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        parsed = _json.loads(result.output)
+        assert parsed["event"] == "applied"
+        assert parsed["cancelled_job_ids"] == [777]
+
     def test_apply_cancels_and_dispatches(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -312,3 +363,93 @@ class TestRetargetCli:
         )
         assert result.exit_code == 1
         assert "No jobs matching" in result.output
+
+    def test_cross_repo_uses_dispatch_repo_for_lookups(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # #66 P1: when cloud.repository points at a repo distinct
+        # from the local git origin, PR lookup / run discovery /
+        # job cancellation must all use the dispatch repo, not the
+        # local origin.
+        from types import SimpleNamespace
+
+        lookups: dict[str, list[Any]] = {
+            "pr_fetch": [],
+            "latest_run": [],
+            "find_jobs": [],
+            "cancel": [],
+        }
+
+        monkeypatch.setattr(
+            "shipyard.cli._detect_repo_slug_or_empty",
+            lambda: "local-owner/local-fork",
+        )
+        monkeypatch.setattr(
+            "shipyard.cli.discover_workflows",
+            lambda: {"build": SimpleNamespace(file="build.yml")},
+        )
+        monkeypatch.setattr(
+            "shipyard.cli.default_workflow_key",
+            lambda cfg, workflows: "build",
+        )
+
+        def fake_pr_fetch(repo: str, pr: int) -> dict[str, Any]:
+            lookups["pr_fetch"].append(repo)
+            return {"headRefName": "feat/x"}
+
+        def fake_latest(repo: str, file: str, branch: str) -> dict[str, Any]:
+            lookups["latest_run"].append(repo)
+            return {"databaseId": 555}
+
+        def fake_find(repo: str, run_id: int, target: str) -> list[dict[str, Any]]:
+            lookups["find_jobs"].append(repo)
+            return [{"databaseId": 777, "name": "macOS"}]
+
+        def fake_cancel(repo: str, job_id: int) -> bool:
+            lookups["cancel"].append(repo)
+            return True
+
+        monkeypatch.setattr("shipyard.cli._pr_fetch", fake_pr_fetch)
+        monkeypatch.setattr(
+            "shipyard.cli._latest_workflow_run_for_branch", fake_latest
+        )
+        monkeypatch.setattr("shipyard.cli._find_matching_jobs", fake_find)
+        monkeypatch.setattr("shipyard.cli._cancel_workflow_job", fake_cancel)
+
+        fake_plan = SimpleNamespace(
+            repository="upstream-owner/upstream-repo",  # different!
+            ref="feat/x",
+            workflow=SimpleNamespace(
+                key="build", file="build.yml", name="Build"
+            ),
+            provider="namespace",
+            dispatch_fields={},
+            to_dict=lambda: {},
+        )
+        monkeypatch.setattr(
+            "shipyard.cli.resolve_cloud_dispatch_plan",
+            lambda **kw: fake_plan,
+        )
+        monkeypatch.setattr(
+            "shipyard.cli.workflow_dispatch", lambda **kw: None
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "cloud", "retarget",
+                "--pr", "10",
+                "--target", "macos",
+                "--provider", "namespace",
+                "--apply",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        # Run discovery, find-jobs, and cancel ALL targeted the
+        # dispatch repo (upstream-owner/upstream-repo). The local
+        # fork is only used for the pre-plan hint; actual work
+        # happens in the upstream.
+        assert lookups["latest_run"] == ["upstream-owner/upstream-repo"]
+        assert lookups["find_jobs"] == ["upstream-owner/upstream-repo"]
+        assert lookups["cancel"] == ["upstream-owner/upstream-repo"]
