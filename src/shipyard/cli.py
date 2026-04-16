@@ -1773,35 +1773,69 @@ def cloud_retarget(
         render_error("No workflows discovered")
         sys.exit(1)
 
-    # Resolve the PR's head ref and the dispatch repository.
-    repo_slug = _detect_repo_slug_or_empty()
-    if not repo_slug:
-        render_error("Can't detect owner/repo from git remote.")
+    # Resolve the dispatch plan FIRST so `plan.repository` can drive
+    # every subsequent gh call (PR lookup, run discovery, job
+    # cancellation). The earlier implementation used the local git
+    # origin for lookups and `plan.repository` only for dispatch —
+    # in cross-repo setups (consumer projects whose workflows live
+    # in a sibling repo) that would query/cancel in one repo while
+    # dispatching in another. #66 P1.
+    local_slug = _detect_repo_slug_or_empty()
+    head_ref_hint: str | None = None
+    if local_slug:
+        pr_state = _pr_fetch(local_slug, pr)
+        if pr_state is not None:
+            head_ref_hint = pr_state.get("headRefName")
+
+    try:
+        plan = resolve_cloud_dispatch_plan(
+            config=ctx.config,
+            workflows=workflows,
+            workflow_key=workflow_key,
+            ref=head_ref_hint or _git_branch() or "HEAD",
+            provider_override=provider,
+        )
+    except ValueError as exc:
+        render_error(f"Could not plan dispatch: {exc}")
         sys.exit(1)
 
-    pr_state = _pr_fetch(repo_slug, pr)
+    dispatch_repo = plan.repository or local_slug
+    if not dispatch_repo:
+        render_error(
+            "Couldn't determine dispatch repository. Set cloud.repository "
+            "in .shipyard/config.toml or run from within a git clone."
+        )
+        sys.exit(1)
+
+    # Re-fetch the PR against the dispatch repo to resolve the
+    # correct head ref (covers the case where the caller is running
+    # from a fork whose remote name differs from the dispatch repo).
+    pr_state = _pr_fetch(dispatch_repo, pr)
     if pr_state is None:
-        render_error(f"PR #{pr}: could not fetch state via gh.")
+        render_error(
+            f"PR #{pr}: could not fetch state in {dispatch_repo} via gh."
+        )
         sys.exit(1)
     head_ref = pr_state.get("headRefName")
     if not head_ref:
         render_error(f"PR #{pr}: no headRefName in gh response.")
         sys.exit(1)
 
-    # Find the latest run for this workflow on the PR's branch.
+    # Find the latest run for this workflow on the PR's branch, in
+    # the dispatch repo.
     run_info = _latest_workflow_run_for_branch(
-        repo_slug, workflow_key_to_file(workflows, workflow_key),
+        dispatch_repo, workflow_key_to_file(workflows, workflow_key),
         head_ref,
     )
     if run_info is None:
         render_error(
-            f"No workflow runs found for {workflow_key} on {head_ref}. "
-            "Dispatch first, then retarget."
+            f"No workflow runs found for {workflow_key} on "
+            f"{dispatch_repo}@{head_ref}. Dispatch first, then retarget."
         )
         sys.exit(1)
 
     matching_jobs = _find_matching_jobs(
-        repo_slug, int(run_info["databaseId"]), target
+        dispatch_repo, int(run_info["databaseId"]), target
     )
     if not matching_jobs:
         render_error(
@@ -1810,27 +1844,28 @@ def cloud_retarget(
         )
         sys.exit(1)
 
-    if ctx.json_mode:
-        ctx.output(
-            "cloud.retarget",
-            {
-                "event": "plan",
-                "pr": pr,
-                "head_ref": head_ref,
-                "repo": repo_slug,
-                "workflow_key": workflow_key,
-                "run_id": run_info["databaseId"],
-                "matching_jobs": [
-                    {"id": j["databaseId"], "name": j["name"]}
-                    for j in matching_jobs
-                ],
-                "new_provider": provider,
-                "dry_run": dry_run,
-            },
-        )
-    else:
+    # Single JSON envelope per invocation (#66 P2): accumulate the
+    # data and emit once at the end, either as `plan` (dry-run) or
+    # `applied` (--apply). Previously this emitted `plan` *and*
+    # `applied` back-to-back on --apply, producing two concatenated
+    # JSON documents that json.loads() can't parse.
+    payload: dict[str, Any] = {
+        "pr": pr,
+        "head_ref": head_ref,
+        "repo": dispatch_repo,
+        "workflow_key": workflow_key,
+        "run_id": run_info["databaseId"],
+        "matching_jobs": [
+            {"id": j["databaseId"], "name": j["name"]}
+            for j in matching_jobs
+        ],
+        "new_provider": provider,
+        "dry_run": dry_run,
+    }
+
+    if not ctx.json_mode:
         render_message(
-            f"Retarget plan for PR #{pr} ({repo_slug}):"
+            f"Retarget plan for PR #{pr} ({dispatch_repo}):"
         )
         render_message(f"  workflow:    {workflow_key}")
         render_message(f"  ref:         {head_ref}")
@@ -1844,18 +1879,20 @@ def cloud_retarget(
             render_message(f"    - {j['name']} (job id {j['databaseId']})")
 
     if dry_run:
-        if not ctx.json_mode:
+        if ctx.json_mode:
+            ctx.output("cloud.retarget", {"event": "plan", **payload})
+        else:
             render_message(
                 "\nDry-run. Re-run with --apply to cancel + redispatch.",
                 style="dim",
             )
         return
 
-    # Cancel matching jobs. gh supports `gh api -X POST /repos/:owner/
-    # :repo/actions/jobs/:job_id/cancel` (not all PATs have scope).
+    # Cancel matching jobs in the dispatch repo. gh supports
+    # `gh api -X POST /repos/:owner/:repo/actions/jobs/:job_id/cancel`.
     cancelled: list[int] = []
     for j in matching_jobs:
-        ok = _cancel_workflow_job(repo_slug, int(j["databaseId"]))
+        ok = _cancel_workflow_job(dispatch_repo, int(j["databaseId"]))
         if ok:
             cancelled.append(int(j["databaseId"]))
     if not cancelled:
@@ -1864,19 +1901,6 @@ def cloud_retarget(
             "lack `actions:write` scope. Cancel manually in the UI, "
             "then re-run this with --apply to redispatch."
         )
-        sys.exit(1)
-
-    # Dispatch a new workflow_dispatch with the requested provider.
-    try:
-        plan = resolve_cloud_dispatch_plan(
-            config=ctx.config,
-            workflows=workflows,
-            workflow_key=workflow_key,
-            ref=head_ref,
-            provider_override=provider,
-        )
-    except ValueError as exc:
-        render_error(f"Could not plan dispatch: {exc}")
         sys.exit(1)
 
     try:
@@ -1895,7 +1919,7 @@ def cloud_retarget(
             "cloud.retarget",
             {
                 "event": "applied",
-                "pr": pr,
+                **payload,
                 "cancelled_job_ids": cancelled,
                 "new_dispatch": plan.to_dict(),
             },
