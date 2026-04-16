@@ -1,0 +1,118 @@
+# Mid-flight runner retargeting
+
+`shipyard cloud retarget` switches one target's runner provider on an
+in-flight PR without tearing down the other targets' jobs. Useful mid-
+batch when you discover one provider is faster/cheaper than another
+and want to flip that lane across open PRs without re-running
+everything.
+
+Available since Shipyard v0.8.0.
+
+## The use case
+
+You start a ten-PR drain with the topology:
+
+- `mac` — GitHub-hosted macOS
+- `linux` — Namespace
+- `windows` — Namespace
+
+Ten minutes in, you notice Namespace macOS is two-thirds the runtime
+of GitHub-hosted macOS. You'd like to flip the mac lane *now*, without
+cancelling the Linux and Windows jobs that have already been running
+for eight minutes.
+
+Historically the only options were:
+
+- Accept the slow drain (and the 10× 15-minute macOS builds you're
+  paying for).
+- Push a workflow change + re-dispatch every in-flight PR — tearing
+  down hours of already-spent CI time and restarting from zero.
+
+Neither is great. `shipyard cloud retarget` is the middle ground.
+
+## What it does
+
+```sh
+shipyard cloud retarget --pr 224 --target mac --provider namespace
+```
+
+Dry-run by default. Prints a plan:
+
+```
+Retarget plan for PR #224 (danielraffel/pulp):
+  workflow:    build
+  ref:         feature/foo
+  prior run:   24458654321
+  target:      mac
+  new provider: namespace
+  matching jobs (1):
+    - macOS (ARM64) [github-hosted] (job id 71460714958)
+
+Dry-run. Re-run with --apply to cancel + redispatch.
+```
+
+When the plan looks right:
+
+```sh
+shipyard cloud retarget --pr 224 --target mac --provider namespace --apply
+```
+
+1. Cancels the **one** matching in-progress job (`macOS (ARM64) [github-
+   hosted]`). Other targets on the same run (Linux, Windows) keep
+   running.
+2. Dispatches a fresh workflow_dispatch with `runner_provider=namespace`.
+
+`--target` uses substring + case-insensitive matching against the job
+name, so `--target mac` matches "macOS (ARM64) [github-hosted]".
+
+## Known limitation: step 2 starts a new workflow run
+
+GitHub doesn't natively support per-job re-dispatch with a different
+runner selector. Step 2 therefore kicks off a **new** workflow run,
+which starts *all* that workflow's jobs — including Linux and Windows,
+which you didn't want re-run.
+
+**This is less bad than it looks**, thanks to two things:
+
+1. **Prior statuses persist on the PR's check rollup.** The old run's
+   Linux/Windows jobs already reported SUCCESS to the PR. Those checks
+   stay; the new run just adds another set of entries.
+2. **Workflows with `resolve-provider` matrix steps** (pulp-style) reuse
+   caches per provider, so re-running Linux on Namespace is much cheaper
+   than the original build. In our testing with Pulp, the "collateral"
+   Linux/Windows re-runs finish in ~2 minutes vs. ~15 for the macOS
+   lane that's being retargeted.
+
+**If you truly want full per-target isolation**, add a per-target
+filter input to your workflow (e.g., `inputs.only_target`). When the
+workflow respects it, `shipyard cloud retarget` could forward the
+filter so only one lane re-runs. This isn't built yet; file an issue
+if you need it.
+
+## Multi-PR fleet
+
+For drains: just loop.
+
+```sh
+for pr in $(gh pr list --state open --json number --jq '.[].number'); do
+    shipyard cloud retarget --pr $pr --target mac --provider namespace --apply
+done
+```
+
+Or run in parallel with `xargs -P` for faster propagation.
+
+## Authentication
+
+Cancelling an individual job requires `gh api -X POST
+/repos/:owner/:repo/actions/jobs/:id/cancel`, which needs
+`actions:write` on the PAT `gh` is authenticated with. If your gh
+token lacks that scope, `cloud retarget` reports a clear message and
+exits 1 without attempting the dispatch half.
+
+## JSON mode
+
+`--json` emits a single envelope per invocation — `event: plan` on
+dry-run, `event: applied` on `--apply`. Suitable for piping into
+`jq` or an agent's stdin. Schema includes `matching_jobs`,
+`cancelled_job_ids` (apply only), and the new `dispatch` plan
+summary.
