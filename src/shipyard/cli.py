@@ -2040,6 +2040,32 @@ def _gather_closed_prs(store: ShipStateStore) -> set[int]:
     return closed
 
 
+def _pr_is_merged(pr: int) -> bool:
+    """Return True only if `gh pr view` confirms the PR is MERGED.
+
+    Any other outcome (gh missing, auth failure, timeout, PR open,
+    PR closed-but-not-merged) returns False. Used by auto-merge to
+    preserve idempotent success semantics after a prior tick's
+    merge archived the local state.
+    """
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "view", str(pr), "--json", "state"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+    if result.returncode != 0:
+        return False
+    import json as _json
+
+    try:
+        data = _json.loads(result.stdout)
+    except _json.JSONDecodeError:
+        return False
+    return data.get("state") == "MERGED"
+
+
 def _pr_is_closed(pr: int) -> bool:
     """Return True only if we confirm the PR is merged or closed."""
     try:
@@ -2430,10 +2456,27 @@ def auto_merge(
     the validation, a cron / systemd timer lands the PR when
     green. No need for an always-on conductor to follow every ship.
     """
-    from shipyard.ship.pr import merge_pr
+    from shipyard.ship.pr import GhError, merge_pr
 
     state = ctx.ship_state.get(pr)
     if state is None:
+        # No state file. Two very different cases: (a) typo / never
+        # shipped; (b) we already merged this PR on a prior tick and
+        # archived the state. For cron idempotency we must NOT treat
+        # (b) as failure — probe GitHub for the PR's merged state
+        # and return 0 if it's MERGED (#64 P2).
+        if _pr_is_merged(pr):
+            if ctx.json_mode:
+                ctx.output(
+                    "auto-merge",
+                    {"event": "already-merged", "pr": pr},
+                )
+            else:
+                render_message(
+                    f"PR #{pr}: already merged — idempotent no-op.",
+                    style="dim",
+                )
+            sys.exit(0)
         if ctx.json_mode:
             ctx.output(
                 "auto-merge",
@@ -2490,6 +2533,15 @@ def auto_merge(
         sys.exit(1)
 
     # All green. Attempt the merge.
+    #
+    # merge_pr can raise GhError when the underlying `gh pr merge`
+    # call fails (branch protection, auth, conflicts, transient
+    # network). Cron consumers need a deterministic JSON event + a
+    # non-zero exit — never a traceback (#64 P1). Also catch
+    # TypeError for back-compat with older merge_pr signatures
+    # shipped via pinned tool versions.
+    merge_error: str | None = None
+    merged = None
     try:
         merged = merge_pr(
             pr,
@@ -2498,10 +2550,26 @@ def auto_merge(
             admin=admin,
         )
     except TypeError:
-        # Back-compat: older merge_pr signatures didn't accept the
-        # method/admin/delete_branch kwargs. Fall back to the
-        # default shape rather than crashing.
-        merged = merge_pr(pr)
+        try:
+            merged = merge_pr(pr)
+        except GhError as exc:
+            merge_error = str(exc)
+    except GhError as exc:
+        merge_error = str(exc)
+
+    if merge_error is not None:
+        if ctx.json_mode:
+            ctx.output(
+                "auto-merge",
+                {
+                    "event": "merge-failed",
+                    "pr": pr,
+                    "error": merge_error,
+                },
+            )
+        else:
+            render_error(f"PR #{pr}: merge attempt failed — {merge_error}")
+        sys.exit(1)
 
     if ctx.json_mode:
         ctx.output(
