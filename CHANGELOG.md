@@ -4,6 +4,53 @@ All notable user-facing changes to the Shipyard CLI are recorded here.
 Plugin changes track in `.claude-plugin/plugin.json`; the two surfaces
 are independently versioned.
 
+## [0.8.0] — 2026-04-17
+
+### Added
+
+- **`shipyard release-bot setup | status`** — guided fine-grained PAT
+  provisioning for `RELEASE_BOT_TOKEN` across multi-project setups.
+  Opens a pre-filled PAT creation URL, stores the secret via
+  stdin-piped `gh secret set` (never argv, never logged, never
+  persisted), dispatches a real workflow run to verify
+  `actions/checkout` accepts the token before exiting. Per-project
+  PAT name default (`<repo>-release-bot`); `--shared-name` flag
+  opts into a single PAT across all consumer repos.
+- **`shipyard doctor --release-chain`** — live probe of the release
+  chain via workflow_dispatch. Catches PAT-scope and secret-drift
+  failure modes before a real release attempt hits them.
+- **`shipyard cloud run --require-sha`** — refuses to dispatch
+  unless the remote ref currently points at the specified SHA.
+  Guards against force-push races.
+- **`shipyard pr --skip-bump / --skip-skill-update`** — shorthand
+  trailer flags that auto-append the exact `Version-Bump:` or
+  `Skill-Update:` format to the tip commit.
+- **`shipyard watch`** — live stream of an in-flight ship; reads
+  Phase 1 state; NDJSON events under `--json`; exit 0/1/2/3/130
+  contract for scripts.
+- **`shipyard auto-merge <pr>`** — cron-friendly one-shot merge
+  daemon. Exits 0 merged, 1 fail, 2 not-found, 3 in-flight.
+  Decouples dispatch from merge; obsoletes the always-on
+  conductor pattern and supersedes #41.
+- **`shipyard cloud retarget`** — mid-flight per-target provider
+  switching on an open PR. Cancels the matching in-progress job,
+  dispatches a fresh run with the new provider.
+
+### Fixed / Hardened
+
+- release-bot setup: run-ID correlation (not timestamps) for
+  verification; three-state secret probe (present/missing/unknown).
+- doctor release-chain: exact (key, target) matching for trailer
+  conflict stripping (substring would have stripped
+  `skill=ci-tools` when target was `skill=ci`).
+- trailer shortcuts: refuse to amend when index has staged changes;
+  replace stale per-surface/per-skill trailers rather than stack.
+- auto-merge: catches `GhError` for structured failure output;
+  preserves idempotent success on re-runs after prior merge.
+- cloud retarget: routes all lookups through dispatch plan repo;
+  single JSON envelope per invocation; re-resolves plan with
+  authoritative dispatch-repo head ref.
+
 ## [0.7.0]
 
 ## [0.6.0]
