@@ -7,9 +7,13 @@ merges only when everything is green.
 ```bash
 curl -fsSL https://generouscorp.com/Shipyard/install.sh | sh
 cd my-project
-shipyard init        # detects your project, probes your machines
-shipyard run         # validates on every platform you configured
-shipyard ship        # validate, open PR, merge on green
+shipyard init              # detects your project, probes your machines
+shipyard run               # validates on every platform you configured
+shipyard ship              # validate, open PR, merge on green
+shipyard watch             # live-tail an in-flight ship
+shipyard auto-merge <pr>   # cron-friendly one-shot merge-on-green
+shipyard release-bot setup # guided RELEASE_BOT_TOKEN setup
+shipyard cloud retarget    # switch one target's runner mid-flight
 ```
 
 ## Highlights
@@ -107,6 +111,12 @@ It calls your build commands and cares about one thing: did they pass?
   managing the queue, partial reruns.
 - [Resuming an interrupted ship](docs/ship-resume.md) — how `shipyard ship`
   recovers across closed laptops and restarted sessions.
+- [Release automation](RELEASING.md) — `shipyard release-bot setup`,
+  `doctor --release-chain`, and the PAT + secret setup for the auto-
+  release tag → binaries chain.
+- [Mid-flight runner retargeting](docs/cloud-retarget.md) — switch one
+  target's runner provider on an open PR without tearing down the
+  other targets' jobs.
 - [CLI Reference](docs/cli-reference.md) — every command and flag.
 - [Install details](docs/install.md) — binaries, build from source,
   optional dependencies.
