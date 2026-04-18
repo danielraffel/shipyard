@@ -21,10 +21,12 @@ import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
-from shipyard.core.config import Config
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
+    from shipyard.core.config import Config
 
 # Pulp's three default skip patterns. The shipyard config can override,
 # but these are the safe defaults and match what pulp shipped with.

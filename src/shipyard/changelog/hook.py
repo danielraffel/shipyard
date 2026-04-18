@@ -23,10 +23,12 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
+from typing import TYPE_CHECKING
 
-from shipyard.core.config import Config
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
 
+    from shipyard.core.config import Config
 
 DEFAULT_TRAILERS: tuple[str, ...] = (
     'Version-Bump: sdk=skip reason="docs-only automated regeneration"',
@@ -179,7 +181,7 @@ def run_hook(
     *,
     cwd: Path | None = None,
     env: dict[str, str] | None = None,
-    sleep: "callable[[float], None]" = time.sleep,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> HookResult:
     """Execute the post-tag hook for ``tag``.
 

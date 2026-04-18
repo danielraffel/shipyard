@@ -17,7 +17,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-
 # Pinned so upgrading shipyard doesn't accidentally drift consumers.
 # Bumped in the same PR as the CLI minor that introduces the hook.
 DEFAULT_SHIPYARD_VERSION = "0.9.0"
