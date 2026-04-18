@@ -29,7 +29,11 @@ jobs:
     steps:
       - id: resolve
         run: |
-          PROVIDER="${{ inputs.runner_provider || 'github-hosted' }}"
+          # Tag-push triggers (no inputs context) default to namespace —
+          # GitHub-hosted macOS runners routinely queue 30+ min, namespace
+          # profiles pick up immediately. Override per-run with the
+          # workflow_dispatch `runner_provider` input if needed.
+          PROVIDER="${{ inputs.runner_provider || 'namespace' }}"
           if [ "$PROVIDER" = "namespace" ]; then
             echo "linux=\"namespace-profile-generouscorp\"" >> "$GITHUB_OUTPUT"
             echo "linux_arm=\"namespace-profile-generouscorp\"" >> "$GITHUB_OUTPUT"
