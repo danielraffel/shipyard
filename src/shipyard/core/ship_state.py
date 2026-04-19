@@ -166,6 +166,27 @@ class ShipState:
             return None
         return max(matches, key=lambda r: r.updated_at)
 
+    def has_target(self, target: str) -> bool:
+        """True if any DispatchedRun already tracks `target`.
+
+        Used by mid-flight lane-add (`shipyard cloud add-lane`) to make
+        a second call for the same target a no-op rather than
+        dispatching a duplicate workflow run.
+        """
+        return any(r.target == target for r in self.dispatched_runs)
+
+    def append_run(self, run: DispatchedRun) -> None:
+        """Append a new DispatchedRun.
+
+        Unlike `upsert_run`, this does not deduplicate on
+        (target, run_id) — it assumes the caller has already verified
+        via `has_target()` that the target is new. Intended for
+        mid-flight lane additions where a second entry for the same
+        (target, run_id) would never be legitimate.
+        """
+        self.dispatched_runs.append(run)
+        self.touch()
+
     def update_evidence(self, target: str, status: str) -> None:
         """Record a target's evidence status in the snapshot."""
         self.evidence_snapshot[target] = status

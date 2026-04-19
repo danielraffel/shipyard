@@ -107,6 +107,12 @@ switches one in-flight lane (e.g. macOS local → Namespace) without
 tearing down the other target jobs on the PR. Dry-run by default; add
 `--apply` to execute.
 
+`shipyard cloud add-lane --pr <n> --target <lane> [--provider <prov>]`
+is retarget's sibling: append a *new* lane to an in-flight PR without
+re-dispatching the full matrix. Idempotent (no-op if target already
+tracked); refuses if the ship is past dispatch phase. Dry-run by
+default; add `--apply` to execute.
+
 ### Trailer shortcuts
 
 `shipyard pr --skip-bump <surface> --bump-reason "..."` and

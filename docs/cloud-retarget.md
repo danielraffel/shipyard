@@ -116,3 +116,61 @@ dry-run, `event: applied` on `--apply`. Suitable for piping into
 `jq` or an agent's stdin. Schema includes `matching_jobs`,
 `cancelled_job_ids` (apply only), and the new `dispatch` plan
 summary.
+
+## Adding a lane mid-flight
+
+`shipyard cloud add-lane` is retarget's sibling. Retarget *swaps* an
+existing lane's provider; add-lane *appends* a new lane entirely. The
+use case: you started shipping with `[macos, linux]` and ten minutes in
+you realize you want windows too. Without add-lane the only option is
+to cancel the ship and re-dispatch the full matrix, throwing away the
+macOS and Linux work already done.
+
+```sh
+# Preview (dry-run by default):
+shipyard cloud add-lane --pr 224 --target windows
+
+# Apply — dispatches one workflow and appends it to the PR's ShipState:
+shipyard cloud add-lane --pr 224 --target windows --provider namespace --apply
+```
+
+### Behaviour
+
+1. Loads the PR's `ShipState` from `<state_dir>/ship/<pr>.json`. If no
+   state exists (no `shipyard ship` ever ran for this PR) the command
+   refuses with exit 1 — there's no in-flight ship to add a lane to.
+2. Refuses if the ship is already past dispatch phase. "Past dispatch"
+   means every entry in `evidence_snapshot` has terminated (pass or
+   fail) and the merge decision has been made. Adding a lane after the
+   verdict has been rendered is nonsensical.
+3. **Idempotent.** If the target is already present in
+   `dispatched_runs`, the command reports a `noop` event and does not
+   dispatch anything. Safe to re-run from cron/retry loops.
+4. Dispatches the single workflow for that target/provider using the
+   same `resolve_cloud_dispatch_plan` path that the initial matrix
+   dispatch uses — so `--provider` overrides behave identically to
+   `shipyard cloud run`.
+5. Appends a new `DispatchedRun` entry to the ShipState (atomic write)
+   so `shipyard watch` and `shipyard auto-merge` pick up the new lane
+   on their next poll.
+
+### JSON schema
+
+`--json` emits one of three events:
+
+- `event: plan` — dry-run preview.
+- `event: applied` — lane dispatched and appended.
+- `event: noop` — target already tracked; nothing done.
+
+Keys common to all: `pr`, `target`, `dry_run`. `plan`/`applied`
+additionally expose `branch`, `repo`, `workflow_key`, `provider`, and
+`dispatch_fields`. `applied` carries `run_id` + `run_url`; `noop`
+carries `existing_run` with the already-tracked `DispatchedRun` dump.
+
+### When to reach for add-lane vs. retarget
+
+| Situation | Command |
+|---|---|
+| "This macOS lane is too slow, move it to Namespace" | `retarget` |
+| "I realized I should also validate on windows" | `add-lane` |
+| "My whole matrix is wrong, start over" | Cancel the ship, fix config, re-ship |
