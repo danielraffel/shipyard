@@ -3,9 +3,12 @@
 All notable changes to Shipyard are documented here. Each entry links
 to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
-<a id="v0120"></a>
-## [0.13.0]
+<a id="v0130"></a>
+## [0.13.0] - 2026-04-19
 
+- Incremental git bundles for SSH delivery (#81) ([#91](https://github.com/danielraffel/Shipyard/pull/91))
+
+<a id="v0120"></a>
 ## [0.12.0] - 2026-04-19
 
 - Ship feat/locality-routing ([#89](https://github.com/danielraffel/Shipyard/pull/89))
@@ -166,6 +169,7 @@ to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
 - feat/shipyard phases 1 4 ([#1](https://github.com/danielraffel/Shipyard/pull/1))
 
+[0.13.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.13.0
 [0.12.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.12.0
 [0.11.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.11.0
 [0.10.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.10.0
