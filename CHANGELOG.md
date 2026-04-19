@@ -4,6 +4,8 @@ All notable changes to Shipyard are documented here. Each entry links
 to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
 <a id="v0160"></a>
+## [0.17.0]
+
 ## [0.16.0] - 2026-04-19
 
 - feat/cross pr reuse ([#95](https://github.com/danielraffel/Shipyard/pull/95))
