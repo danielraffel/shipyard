@@ -22,3 +22,18 @@ When summarizing JSON output, report:
 - Workflow key/file/name
 - Resolved provider and dispatch fields
 - Tracked run ID, status, conclusion, and URL when available
+
+## Mid-flight lane edits
+
+```bash
+# Swap one lane on an in-flight PR to a new provider:
+shipyard cloud retarget --pr <n> --target macos --provider namespace [--apply]
+
+# Add a brand-new lane to an in-flight PR without re-dispatching the matrix:
+shipyard cloud add-lane --pr <n> --target windows [--provider namespace] [--apply]
+```
+
+Both are dry-run by default. `add-lane` is idempotent — if the target is
+already tracked in ShipState.dispatched_runs, the command reports a no-op
+and makes no changes. Use when the user says "I realized I should also
+run windows" after a ship is already in flight.

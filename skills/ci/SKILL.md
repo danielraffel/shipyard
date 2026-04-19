@@ -43,6 +43,7 @@ Shipyard coordinates validation across local, SSH, and cloud targets.
 | Dispatch a cloud workflow | `shipyard cloud run build --json` |
 | Dispatch only if remote matches HEAD | `shipyard cloud run build --require-sha HEAD --json` |
 | Retarget one lane on an in-flight PR | `shipyard cloud retarget --pr <n> --target macos --provider namespace` (dry-run; add `--apply`) |
+| Add a new lane to an in-flight PR | `shipyard cloud add-lane --pr <n> --target windows [--provider namespace]` (dry-run; add `--apply`) |
 | Skip a version-bump gate | `shipyard pr --skip-bump sdk --bump-reason "docs only"` |
 | Skip a skill-sync gate | `shipyard pr --skip-skill-update ci --skill-reason "mechanical"` |
 | Inspect tracked cloud runs | `shipyard cloud status --json` |
@@ -67,6 +68,26 @@ What it does:
 3. Dispatches a fresh workflow run with the new provider.
 
 **Known limitation (read before running):** step 3 starts a new workflow run, so targets other than the one you retargeted will also re-run in that new run. Their *prior* pass/fail statuses persist on the PR's check rollup, and pulp-style `resolve-provider` matrix workflows reuse caches — so the net effect is "flip the lane" without losing ground on the other lanes, even though they technically re-execute.
+
+## Mid-flight lane addition
+
+Sibling to retarget. Use when a ship is already in flight and you realize you want to validate against an *additional* platform without cancelling and re-dispatching the whole matrix — e.g., you started with `[macos, linux]` and want to add `windows`:
+
+```sh
+# Preview (dry-run by default):
+shipyard cloud add-lane --pr 224 --target windows
+
+# Apply when the plan looks right:
+shipyard cloud add-lane --pr 224 --target windows --provider namespace --apply
+```
+
+What it does:
+1. Loads the PR's ShipState. Refuses if absent (no in-flight ship) or terminal (merge already issued).
+2. Idempotent: if the target is already in `dispatched_runs`, reports a no-op and does nothing.
+3. Dispatches the single workflow for that target/provider.
+4. Appends a new `DispatchedRun` to the ShipState so the watch loop joins it into the overall verdict.
+
+See `docs/cloud-retarget.md` for full context; add-lane complements retarget.
 
 ## Ship workflow (the main flow)
 

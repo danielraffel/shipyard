@@ -2031,6 +2031,235 @@ def cloud_retarget(
         )
 
 
+@cloud.command("add-lane")
+@click.option("--pr", type=int, required=True, help="PR number")
+@click.option(
+    "--target",
+    required=True,
+    help=(
+        "Target/lane name to add (e.g. 'windows'). Must not already be "
+        "present in the PR's ShipState.dispatched_runs."
+    ),
+)
+@click.option(
+    "--provider",
+    default=None,
+    help=(
+        "Runner provider for the new lane. Defaults to the target's "
+        "configured provider (cloud.workflows.<key>.provider) or "
+        "cloud.provider."
+    ),
+)
+@click.option(
+    "--workflow",
+    default=None,
+    help="Workflow key (default: the same default `cloud run` uses).",
+)
+@click.option(
+    "--dry-run/--apply",
+    "dry_run",
+    default=True,
+    help=(
+        "Dry-run by default. Shows the workflow that would be "
+        "dispatched. --apply executes."
+    ),
+)
+@click.pass_obj
+def cloud_add_lane(
+    ctx: Context,
+    pr: int,
+    target: str,
+    provider: str | None,
+    workflow: str | None,
+    dry_run: bool,
+) -> None:
+    """Add a new lane to an in-flight PR without touching other lanes.
+
+    Sibling to `cloud retarget`. Retarget swaps *existing* lane to a
+    new provider; add-lane appends a *new* lane entirely. Use case:
+    started shipping with [macos, linux], then realized you wanted
+    windows too. Without add-lane, the only option is cancel +
+    re-dispatch the full matrix.
+
+    What this does:
+      1. Loads the PR's ShipState. Refuses if missing.
+      2. Refuses if the ship is already past dispatch phase
+         (evidence_snapshot shows terminal verdict — adding a lane
+         after merge has been issued is nonsensical).
+      3. No-ops with a clear message if the target is already in
+         dispatched_runs (idempotent).
+      4. Dispatches the single workflow for that target/provider.
+      5. Appends a DispatchedRun to ShipState, saves atomically. The
+         watch loop then sees a new in-flight run and joins it into
+         the overall verdict.
+
+    Dry-run by default. --apply executes.
+    """
+
+    # ── Load ShipState — no state means no in-flight ship ───────
+    ship_state = ctx.ship_state.get(pr)
+    if ship_state is None:
+        render_error(
+            f"No in-flight ship state for PR #{pr}. add-lane operates "
+            "on a running ship — dispatch one with `shipyard ship` "
+            "first."
+        )
+        sys.exit(1)
+
+    # ── Refuse if the ship is already terminal ──────────────────
+    # Adding a lane after merge has been issued is meaningless; the
+    # PR is done. _ship_terminal_verdict returns True/False for
+    # terminal, None for still-in-flight.
+    if _ship_terminal_verdict(ship_state) is not None:
+        render_error(
+            f"PR #{pr}: ship is already past dispatch phase "
+            f"(evidence={ship_state.evidence_snapshot}). "
+            "Can't add a lane after merge has been issued."
+        )
+        sys.exit(1)
+
+    # ── Idempotency: target already tracked ─────────────────────
+    if ship_state.has_target(target):
+        existing = ship_state.get_run(target)
+        msg = (
+            f"Target '{target}' is already tracked in PR #{pr}'s "
+            f"dispatched_runs"
+        )
+        if existing is not None:
+            msg += (
+                f" (provider={existing.provider}, "
+                f"run_id={existing.run_id}, status={existing.status})"
+            )
+        msg += ". No-op."
+        payload = {
+            "pr": pr,
+            "target": target,
+            "already_tracked": True,
+            "existing_run": existing.to_dict() if existing else None,
+            "dry_run": dry_run,
+        }
+        if ctx.json_mode:
+            ctx.output(
+                "cloud.add-lane", {"event": "noop", **payload}
+            )
+        else:
+            render_message(msg, style="dim")
+        return
+
+    # ── Resolve workflow + dispatch plan ────────────────────────
+    workflows = discover_workflows()
+    workflow_key = workflow or default_workflow_key(ctx.config, workflows)
+    if not workflow_key:
+        render_error("No workflows discovered")
+        sys.exit(1)
+
+    try:
+        plan = resolve_cloud_dispatch_plan(
+            config=ctx.config,
+            workflows=workflows,
+            workflow_key=workflow_key,
+            ref=ship_state.branch,
+            provider_override=provider,
+        )
+    except ValueError as exc:
+        render_error(f"Could not plan dispatch: {exc}")
+        sys.exit(1)
+
+    dispatch_repo = plan.repository or ship_state.repo
+    resolved_provider = plan.provider
+
+    payload: dict[str, Any] = {
+        "pr": pr,
+        "branch": ship_state.branch,
+        "repo": dispatch_repo,
+        "workflow_key": workflow_key,
+        "target": target,
+        "provider": resolved_provider,
+        "dispatch_fields": dict(plan.dispatch_fields),
+        "dry_run": dry_run,
+    }
+
+    if not ctx.json_mode:
+        render_message(f"Add-lane plan for PR #{pr} ({dispatch_repo}):")
+        render_message(f"  workflow:  {workflow_key}")
+        render_message(f"  ref:       {ship_state.branch}")
+        render_message(f"  target:    {target}")
+        render_message(f"  provider:  {resolved_provider}")
+        if plan.dispatch_fields:
+            render_message("  dispatch_fields:")
+            for k, v in plan.dispatch_fields.items():
+                render_message(f"    {k}={v}")
+
+    if dry_run:
+        if ctx.json_mode:
+            ctx.output("cloud.add-lane", {"event": "plan", **payload})
+        else:
+            render_message(
+                "\nDry-run. Re-run with --apply to dispatch.",
+                style="dim",
+            )
+        return
+
+    # ── Dispatch and record ─────────────────────────────────────
+    try:
+        workflow_dispatch(
+            repository=plan.repository,
+            workflow_file=plan.workflow.file,
+            ref=plan.ref,
+            fields=plan.dispatch_fields,
+        )
+    except (subprocess.CalledProcessError, TimeoutError) as exc:
+        render_error(f"workflow_dispatch failed: {exc}")
+        sys.exit(1)
+
+    # Best-effort: look up the dispatched run ID so the DispatchedRun
+    # entry carries it. If discovery times out, we still record the
+    # lane — the watch loop can backfill the run_id later.
+    run_id: str = ""
+    run_url: str | None = None
+    try:
+        discovered = find_dispatched_run(
+            repository=plan.repository,
+            workflow_file=plan.workflow.file,
+            ref=plan.ref,
+        )
+        run_id = str(discovered.get("databaseId") or "")
+        run_url = discovered.get("url")
+    except (subprocess.CalledProcessError, TimeoutError):
+        run_id = ""
+
+    now = datetime.now(timezone.utc)
+    dispatched = DispatchedRun(
+        target=target,
+        provider=resolved_provider,
+        run_id=run_id or f"pending-{target}",
+        status="queued",
+        started_at=now,
+        updated_at=now,
+        attempt=ship_state.attempt,
+    )
+    ship_state.append_run(dispatched)
+    ctx.ship_state.save(ship_state)
+
+    applied_payload = {
+        **payload,
+        "run_id": dispatched.run_id,
+        "run_url": run_url,
+    }
+    if ctx.json_mode:
+        ctx.output(
+            "cloud.add-lane",
+            {"event": "applied", **applied_payload},
+        )
+    else:
+        render_message(
+            f"✓ Dispatched {target} on {resolved_provider} "
+            f"(run_id={dispatched.run_id}). Appended to PR #{pr} "
+            "ship state.",
+            style="bold green",
+        )
+
+
 def _pr_fetch(repo_slug: str, pr: int) -> dict[str, Any] | None:
     try:
         result = subprocess.run(
