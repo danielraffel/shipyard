@@ -2131,7 +2131,7 @@ def cloud_add_lane(
                 f"run_id={existing.run_id}, status={existing.status})"
             )
         msg += ". No-op."
-        payload = {
+        noop_payload: dict[str, Any] = {
             "pr": pr,
             "target": target,
             "already_tracked": True,
@@ -2140,7 +2140,7 @@ def cloud_add_lane(
         }
         if ctx.json_mode:
             ctx.output(
-                "cloud.add-lane", {"event": "noop", **payload}
+                "cloud.add-lane", {"event": "noop", **noop_payload}
             )
         else:
             render_message(msg, style="dim")
