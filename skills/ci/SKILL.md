@@ -122,6 +122,18 @@ There is no `shipyard config` or `shipyard targets` subcommand yet. Inspect
 target definitions in `.shipyard/config.toml` and `.shipyard.local/config.toml`,
 and use `shipyard status --json` for live target state.
 
+### Locality routing (`requires`)
+
+Targets can declare capability constraints with `requires = [...]`; the
+fallback chain is then filtered to providers whose profile matches
+every required capability. Vocabulary: `gpu`, `arm64`, `x86_64`,
+`macos`, `linux`, `windows`, `nested_virt`, `privileged` (plus any
+user-defined strings). Missing `requires` = no filter (backward
+compatible). When nothing matches, the target errors with
+`no provider satisfies requires=[…]: tried [namespace.default, …]`.
+Full docs: [`docs/targets.md`](../../docs/targets.md) and
+[`docs/profiles.md`](../../docs/profiles.md).
+
 ## Troubleshooting
 
 - `shipyard doctor --json` — checks git, ssh, gh, nsc are installed
