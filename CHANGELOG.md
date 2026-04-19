@@ -4,6 +4,8 @@ All notable changes to Shipyard are documented here. Each entry links
 to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
 <a id="v0120"></a>
+## [0.13.0]
+
 ## [0.12.0] - 2026-04-19
 
 - Ship feat/locality-routing ([#89](https://github.com/danielraffel/Shipyard/pull/89))
