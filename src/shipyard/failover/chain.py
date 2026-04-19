@@ -25,10 +25,12 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from shipyard.core.job import TargetResult, TargetStatus
-from shipyard.providers.base import ProviderProfile
+
+if TYPE_CHECKING:
+    from shipyard.providers.base import ProviderProfile
 
 logger = logging.getLogger(__name__)
 

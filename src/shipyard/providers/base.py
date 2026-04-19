@@ -11,7 +11,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-
 # Well-known capability vocabulary. Users may define their own strings
 # on top of these — unknown capabilities are treated as opaque tags.
 KNOWN_CAPABILITIES: frozenset[str] = frozenset(

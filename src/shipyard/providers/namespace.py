@@ -27,7 +27,6 @@ from typing import Any
 
 from shipyard.providers.base import ProviderProfile, profile_from_config
 
-
 # Built-in capability profiles for Namespace. `default` covers the
 # bulk of Namespace's current fleet (multi-arch Linux, nested virt
 # for macOS/Windows VMs); `gpu` is the GPU-enabled lane. Users can
