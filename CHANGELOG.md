@@ -3,9 +3,12 @@
 All notable changes to Shipyard are documented here. Each entry links
 to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
-<a id="v0180"></a>
-## [0.19.0]
+<a id="v0190"></a>
+## [0.19.0] - 2026-04-19
 
+- feat: warm-pool runner reuse across PRs (closes #82) ([#98](https://github.com/danielraffel/Shipyard/pull/98))
+
+<a id="v0180"></a>
 ## [0.18.0] - 2026-04-19
 
 - Ship feat/degrade-mode ([#97](https://github.com/danielraffel/Shipyard/pull/97))
@@ -197,6 +200,7 @@ to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
 - feat/shipyard phases 1 4 ([#1](https://github.com/danielraffel/Shipyard/pull/1))
 
+[0.19.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.19.0
 [0.18.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.18.0
 [0.17.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.17.0
 [0.16.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.16.0
