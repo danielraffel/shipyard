@@ -4,6 +4,8 @@ All notable changes to Shipyard are documented here. Each entry links
 to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
 <a id="v0190"></a>
+## [0.20.0]
+
 ## [0.19.0] - 2026-04-19
 
 - feat: warm-pool runner reuse across PRs (closes #82) ([#98](https://github.com/danielraffel/Shipyard/pull/98))
