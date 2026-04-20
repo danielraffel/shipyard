@@ -3,6 +3,12 @@
 All notable changes to Shipyard are documented here. Each entry links
 to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
+<a id="v0191"></a>
+## [0.19.1] - 2026-04-20
+
+- fix(pr): resolve gate scripts from tools/scripts/ or scripts/ ([#104](https://github.com/danielraffel/Shipyard/pull/104))
+- docs: ship-state-machine audit (#101 Phase A) ([#107](https://github.com/danielraffel/Shipyard/pull/107))
+
 <a id="v0190"></a>
 ## [0.19.0] - 2026-04-19
 
@@ -200,6 +206,7 @@ to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
 - feat/shipyard phases 1 4 ([#1](https://github.com/danielraffel/Shipyard/pull/1))
 
+[0.19.1]: https://github.com/danielraffel/Shipyard/releases/tag/v0.19.1
 [0.19.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.19.0
 [0.18.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.18.0
 [0.17.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.17.0
