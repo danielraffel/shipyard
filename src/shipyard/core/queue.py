@@ -196,7 +196,15 @@ class Queue:
             # directory renames — this is the step that makes the
             # update visible. Either the old file or the fully-
             # written new file is present; never a torn half.
-            tmp_path.replace(self._queue_file)
+            #
+            # On Windows, MoveFileEx (which backs os.replace) can
+            # fail with PermissionError (WinError 5) when another
+            # process is mid-rename on the same target or has the
+            # target open for reading. This is the normal file-share
+            # contention window, not a real failure. A small retry
+            # loop covers it. POSIX renames don't hit this, so the
+            # first attempt always wins there.
+            _retry_replace_on_windows(tmp_path, self._queue_file)
         except Exception:
             # Clean up the tmp file so a failed save doesn't leave
             # stale files behind. The destination is untouched, so
@@ -359,6 +367,33 @@ class _DrainLock:
 
 
 # ---- Serialization ----
+
+
+def _retry_replace_on_windows(src: Path, dst: Path) -> None:
+    """Rename `src` onto `dst` with Windows file-share backoff.
+
+    POSIX: first attempt always succeeds (atomic, no share modes).
+    Windows: MoveFileEx can fail with WinError 5 (Access denied)
+    while a peer writer is mid-rename or the target is briefly open.
+    We retry up to ~600 ms total — long enough to clear any real
+    contention, short enough that a genuinely permission-denied
+    target still surfaces.
+    """
+    if sys.platform != "win32":
+        src.replace(dst)
+        return
+    import time as _time
+
+    last_exc: PermissionError | None = None
+    for attempt in range(12):
+        try:
+            src.replace(dst)
+            return
+        except PermissionError as exc:
+            last_exc = exc
+            _time.sleep(0.05 * (attempt + 1))
+    assert last_exc is not None
+    raise last_exc
 
 
 def _job_to_dict(job: Job) -> dict[str, Any]:
