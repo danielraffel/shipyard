@@ -173,22 +173,43 @@ def test_concurrent_writers_never_produce_torn_file(tmp_path: Path) -> None:
     # While writers are running, repeatedly read the file — every
     # read must parse cleanly. Without atomic writes this exposed
     # partial JSON around ~1 in 10 reads on a busy system.
+    #
+    # On Windows, `os.replace` uses MoveFileEx, which opens the target
+    # with file-sharing modes that can deny concurrent reads for a few
+    # milliseconds around the rename. A PermissionError here doesn't
+    # indicate a torn write — it means the reader hit the rename
+    # window. We tolerate those and just skip the read attempt; the
+    # contract (never-torn-JSON) is what we actually verify.
     queue_file = tmp_path / "queue.json"
     deadline = time.monotonic() + 3.0
     read_count = 0
+    permission_errors = 0
     while any(p.is_alive() for p in procs) and time.monotonic() < deadline:
-        if queue_file.exists():
-            raw = queue_file.read_text()
-            if raw:
-                # JSON must always be parseable, never half-written.
-                json.loads(raw)
-                read_count += 1
+        try:
+            if queue_file.exists():
+                raw = queue_file.read_text()
+                if raw:
+                    # JSON must always be parseable, never half-written.
+                    json.loads(raw)
+                    read_count += 1
+        except PermissionError:
+            # Windows rename window — see comment above.
+            permission_errors += 1
     for p in procs:
         p.join(timeout=5)
         assert p.exitcode == 0, f"worker failed: exit {p.exitcode}"
 
-    # The final file is valid JSON (last-writer wins is fine).
-    final = json.loads(queue_file.read_text())
+    # The final file is valid JSON (last-writer wins is fine). On
+    # Windows the final read can also race with a just-completing
+    # rename, so retry briefly.
+    for _ in range(20):
+        try:
+            final = json.loads(queue_file.read_text())
+            break
+        except PermissionError:
+            time.sleep(0.05)
+    else:
+        pytest.fail("final read never succeeded — file-share storm")
     assert isinstance(final["jobs"], list)
     # At least some reads happened during contention — sanity check
     # that the torn-read window was actually exercised.
