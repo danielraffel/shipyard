@@ -3,9 +3,19 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
+import pytest
+
 from shipyard.daemon.runner import daemon_is_running, stop_running
+
+# stop_running uses AF_UNIX sockets on the happy path. PID semantics
+# work on Windows but the full suite wasn't designed for it.
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="daemon lifecycle uses AF_UNIX sockets (macOS/Linux only)",
+)
 
 
 def test_no_pid_file_means_not_running(tmp_path: Path) -> None:

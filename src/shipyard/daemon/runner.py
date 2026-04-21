@@ -11,6 +11,7 @@ reach into asyncio internals. Callers get three verbs:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -18,11 +19,14 @@ import socket
 import subprocess
 import sys
 import time
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from shipyard.daemon import disclosure
 from shipyard.daemon.controller import Daemon, DaemonAlreadyRunningError, DaemonConfig
 from shipyard.daemon.tunnels.base import TunnelNotReadyError, TunnelStartError
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -131,7 +135,7 @@ def stop_running(state_dir: Path) -> bool:
                 client.settimeout(2.0)
                 client.connect(str(sock_path))
                 client.sendall(b'{"type":"stop"}\n')
-        except (OSError, socket.timeout):
+        except (TimeoutError, OSError):
             pass
         else:
             # Give the daemon a moment to exit, then check PID file.
@@ -158,16 +162,12 @@ def stop_running(state_dir: Path) -> bool:
                     return True
                 time.sleep(0.1)
             # Escalate.
-            try:
+            with contextlib.suppress(OSError):
                 os.kill(pid, 9)  # SIGKILL
-            except OSError:
-                pass
             return True
         # Stale PID file — clean up.
-        try:
+        with contextlib.suppress(OSError):
             pid_file.unlink()
-        except OSError:
-            pass
     return False
 
 
@@ -201,9 +201,9 @@ def _pid_alive(pid: int) -> bool:
 def subscribe(
     state_dir: Path,
     *,
-    on_event: "callable | None" = None,
+    on_event: callable | None = None,
     timeout: float = 5.0,
-) -> "object | None":
+) -> object | None:
     """Connect to the daemon's IPC socket and return a blocking iter
     of events. Returns None if the daemon isn't running / reachable."""
     sock_path = state_dir / "daemon" / "daemon.sock"
@@ -214,7 +214,7 @@ def subscribe(
         client.settimeout(timeout)
         client.connect(str(sock_path))
         client.sendall(b'{"type":"subscribe"}\n')
-    except (OSError, socket.timeout):
+    except (TimeoutError, OSError):
         return None
     return _EventIterator(client)
 
@@ -227,7 +227,7 @@ class _EventIterator:
         self._client.settimeout(None)
         self._buf = b""
 
-    def __iter__(self) -> "_EventIterator":
+    def __iter__(self) -> _EventIterator:
         return self
 
     def __next__(self) -> dict[str, object]:
@@ -244,7 +244,5 @@ class _EventIterator:
             return self.__next__()
 
     def close(self) -> None:
-        try:
+        with contextlib.suppress(OSError):
             self._client.close()
-        except OSError:
-            pass

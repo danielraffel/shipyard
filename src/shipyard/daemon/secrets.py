@@ -15,12 +15,16 @@ by generating a fresh one.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import subprocess
 import sys
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from shipyard.daemon import signature
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 SERVICE = "com.danielraffel.shipyard.webhook"
 ACCOUNT = "shared"
@@ -111,12 +115,10 @@ def _keychain_add(value: str) -> bool:
 
 
 def _keychain_delete() -> None:
-    try:
+    with contextlib.suppress(FileNotFoundError, subprocess.TimeoutExpired):
         subprocess.run(
             ["security", "delete-generic-password", "-s", SERVICE, "-a", ACCOUNT],
             check=False,
             capture_output=True,
             timeout=5,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass

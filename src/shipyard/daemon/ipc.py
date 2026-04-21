@@ -20,13 +20,17 @@ Messages from client to server:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -75,10 +79,8 @@ class IPCServer:
         self._socket_path.parent.mkdir(parents=True, exist_ok=True)
         # Clean up a stale socket from a previous crashed run.
         if self._socket_path.exists() or self._socket_path.is_symlink():
-            try:
+            with contextlib.suppress(OSError):
                 self._socket_path.unlink()
-            except OSError:
-                pass
         self._server = await asyncio.start_unix_server(
             self._handle_client, path=str(self._socket_path)
         )
@@ -100,10 +102,8 @@ class IPCServer:
             await self._server.wait_closed()
             self._server = None
         if self._socket_path.exists() or self._socket_path.is_symlink():
-            try:
+            with contextlib.suppress(OSError):
                 self._socket_path.unlink()
-            except OSError:
-                pass
 
     async def broadcast_event(self, event: dict[str, object]) -> None:
         """Append to ring buffer + fan out to every connected subscriber."""

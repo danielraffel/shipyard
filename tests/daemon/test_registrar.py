@@ -11,11 +11,20 @@ import asyncio
 import json
 import os
 import stat
+import sys
 from pathlib import Path
 
 import pytest
 
 from shipyard.daemon.registrar import Registrar, RegistrarError
+
+# The gh stub is a bash script; skip on Windows where /bin/bash isn't
+# guaranteed. The registrar itself is cross-platform but the test
+# harness isn't.
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="bash-stub test harness doesn't run on Windows",
+)
 
 
 def _write_gh_stub(path: Path, *, hook_id: int = 42, fail: bool = False) -> str:

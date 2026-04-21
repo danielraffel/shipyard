@@ -10,12 +10,21 @@ from __future__ import annotations
 import asyncio
 import json
 import socket
+import sys
 import tempfile
 from pathlib import Path
 
 import pytest
 
 from shipyard.daemon.ipc import IPCServer, IPCState
+
+# The daemon IPC uses AF_UNIX sockets, which don't exist on Windows.
+# The daemon itself is macOS/Linux only; skip at file scope rather
+# than littering each test.
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="AF_UNIX sockets are macOS/Linux only",
+)
 
 
 @pytest.fixture

@@ -21,13 +21,14 @@ State directory layout::
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
 import signal
 import time
 from dataclasses import dataclass
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from shipyard.daemon import events as events_mod
 from shipyard.daemon import secrets as secrets_mod
@@ -37,6 +38,9 @@ from shipyard.daemon.registrar import Registrar, RegistrarError
 from shipyard.daemon.server import HandlerResult, WebhookServer
 from shipyard.daemon.tunnels.base import TunnelInfo, TunnelNotReadyError, TunnelStartError
 from shipyard.daemon.tunnels.tailscale import TailscaleFunnelBackend
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -130,11 +134,11 @@ class Daemon:
         """Block until a stop is requested."""
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
-            try:
+            # Windows doesn't support add_signal_handler — suppress so
+            # CI on Windows can at least reach the wait path (even
+            # though the daemon as a whole isn't Windows-supported).
+            with contextlib.suppress(NotImplementedError):
                 loop.add_signal_handler(sig, lambda: self._stop_event.set())
-            except NotImplementedError:
-                # Windows doesn't support add_signal_handler.
-                pass
         await self._stop_event.wait()
 
     async def stop(self) -> None:
@@ -194,18 +198,14 @@ class Daemon:
                     "run `shipyard daemon stop` first"
                 )
             # Stale file — caller crashed.
-            try:
+            with contextlib.suppress(OSError):
                 self._pid_file.unlink()
-            except OSError:
-                pass
         self._pid_file.write_text(str(os.getpid()), encoding="utf-8")
 
     def _release_lock(self) -> None:
         if self._pid_file.exists():
-            try:
+            with contextlib.suppress(OSError):
                 self._pid_file.unlink()
-            except OSError:
-                pass
 
 
 @dataclass(frozen=True)
@@ -287,6 +287,6 @@ def read_daemon_status(state_dir: Path) -> dict[str, object] | None:
                     continue
                 if isinstance(obj, dict) and obj.get("type") == "status":
                     return obj
-    except (OSError, socket.timeout):
+    except (TimeoutError, OSError):
         return None
     return None

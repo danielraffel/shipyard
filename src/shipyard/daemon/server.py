@@ -33,15 +33,15 @@ class HandlerResult:
     body: str
 
     @staticmethod
-    def ok() -> "HandlerResult":
+    def ok() -> HandlerResult:
         return HandlerResult(status=HTTPStatus.OK, body="ok\n")
 
     @staticmethod
-    def unauthorized() -> "HandlerResult":
+    def unauthorized() -> HandlerResult:
         return HandlerResult(status=HTTPStatus.UNAUTHORIZED, body="bad signature\n")
 
     @staticmethod
-    def bad_request() -> "HandlerResult":
+    def bad_request() -> HandlerResult:
         return HandlerResult(status=HTTPStatus.BAD_REQUEST, body="bad request\n")
 
 
