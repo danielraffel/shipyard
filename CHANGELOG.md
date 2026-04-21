@@ -3,6 +3,11 @@
 All notable changes to Shipyard are documented here. Each entry links
 to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
+<a id="v0225"></a>
+## [0.22.5] - 2026-04-21
+
+- daemon: status must read past hello + CI smoke test (0.22.5) ([#143](https://github.com/danielraffel/Shipyard/pull/143))
+
 <a id="v0224"></a>
 ## [0.22.4] - 2026-04-21
 
@@ -260,6 +265,7 @@ to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
 - feat/shipyard phases 1 4 ([#1](https://github.com/danielraffel/Shipyard/pull/1))
 
+[0.22.5]: https://github.com/danielraffel/Shipyard/releases/tag/v0.22.5
 [0.22.4]: https://github.com/danielraffel/Shipyard/releases/tag/v0.22.4
 [0.22.3]: https://github.com/danielraffel/Shipyard/releases/tag/v0.22.3
 [0.22.2]: https://github.com/danielraffel/Shipyard/releases/tag/v0.22.2
