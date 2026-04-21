@@ -3,6 +3,15 @@
 All notable changes to Shipyard are documented here. Each entry links
 to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
+<a id="v0222"></a>
+## [0.22.2] - 2026-04-21
+
+- daemon: really fix spawn_detached for standalone binaries (0.22.1 → 0.22.2) ([#139](https://github.com/danielraffel/Shipyard/pull/139))
+- feat(plugin): emit SessionStart JSON with systemMessage banner ([#138](https://github.com/danielraffel/Shipyard/pull/138))
+- fix(plugin): wrap hooks.json events under 'hooks' key (Claude Code schema) ([#137](https://github.com/danielraffel/Shipyard/pull/137))
+- feat(plugin): reframe staleness as advisory, not AskUserQuestion directive ([#136](https://github.com/danielraffel/Shipyard/pull/136))
+- feat(plugin): add /shipyard:upgrade command for explicit CLI upgrades ([#134](https://github.com/danielraffel/Shipyard/pull/134))
+
 <a id="v0221"></a>
 ## [0.22.1] - 2026-04-21
 
@@ -241,6 +250,7 @@ to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
 - feat/shipyard phases 1 4 ([#1](https://github.com/danielraffel/Shipyard/pull/1))
 
+[0.22.2]: https://github.com/danielraffel/Shipyard/releases/tag/v0.22.2
 [0.22.1]: https://github.com/danielraffel/Shipyard/releases/tag/v0.22.1
 [0.22.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.22.0
 [0.21.2]: https://github.com/danielraffel/Shipyard/releases/tag/v0.21.2
