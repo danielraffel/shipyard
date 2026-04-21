@@ -3,6 +3,13 @@
 All notable changes to Shipyard are documented here. Each entry links
 to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
+<a id="v0211"></a>
+## [0.21.1] - 2026-04-20
+
+- fix(ssh): robust Windows probe + missing-host guard (#119, #120) ([#121](https://github.com/danielraffel/Shipyard/pull/121))
+- fix(ship-state): close B1-B4 audit-discovered bugs (#108-#111) ([#117](https://github.com/danielraffel/Shipyard/pull/117))
+- feat: Phase C doc-sync hook + dedicated state-machine CI lane (#101) ([#116](https://github.com/danielraffel/Shipyard/pull/116))
+
 <a id="v0210"></a>
 ## [0.21.0] - 2026-04-20
 
@@ -217,6 +224,7 @@ to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
 - feat/shipyard phases 1 4 ([#1](https://github.com/danielraffel/Shipyard/pull/1))
 
+[0.21.1]: https://github.com/danielraffel/Shipyard/releases/tag/v0.21.1
 [0.21.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.21.0
 [0.20.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.20.0
 [0.19.1]: https://github.com/danielraffel/Shipyard/releases/tag/v0.19.1
