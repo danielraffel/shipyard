@@ -3,6 +3,11 @@
 All notable changes to Shipyard are documented here. Each entry links
 to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
+<a id="v0212"></a>
+## [0.21.2] - 2026-04-20
+
+- feat(doctor): detect shadowed `shipyard` binaries on PATH ([#122](https://github.com/danielraffel/Shipyard/pull/122))
+
 <a id="v0211"></a>
 ## [0.21.1] - 2026-04-20
 
@@ -224,6 +229,7 @@ to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
 - feat/shipyard phases 1 4 ([#1](https://github.com/danielraffel/Shipyard/pull/1))
 
+[0.21.2]: https://github.com/danielraffel/Shipyard/releases/tag/v0.21.2
 [0.21.1]: https://github.com/danielraffel/Shipyard/releases/tag/v0.21.1
 [0.21.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.21.0
 [0.20.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.20.0
