@@ -13,6 +13,11 @@ set -euo pipefail
 #                      Where to place the binary + the `sy` symlink.
 #                      Default: "${HOME}/.local/bin".
 #
+#   SHIPYARD_DRY_RUN   When "1", resolve platform + version + install
+#                      dir, print them as KEY=value lines, and exit
+#                      without downloading or writing anything. Used
+#                      by the unit tests; harmless to use manually.
+#
 # Examples:
 #
 #   # Default: latest release to ~/.local/bin
@@ -55,7 +60,9 @@ case "$(uname -m)" in
 esac
 
 ARTIFACT="shipyard-${OS}-${ARCH}"
-echo "Detected platform: ${OS}-${ARCH}"
+if [ "${SHIPYARD_DRY_RUN:-0}" != "1" ]; then
+    echo "Detected platform: ${OS}-${ARCH}"
+fi
 
 # ── version resolution ──────────────────────────────────────────────
 #
@@ -74,6 +81,19 @@ else
     esac
     API_PATH="releases/tags/${TAG}"
     VERSION_LABEL="${TAG}"
+fi
+
+# Dry-run short-circuit — print the resolved config and exit before
+# doing any network or filesystem work. Kept minimal + parseable
+# (KEY=value lines) for test assertions.
+if [ "${SHIPYARD_DRY_RUN:-0}" = "1" ]; then
+    echo "OS=${OS}"
+    echo "ARCH=${ARCH}"
+    echo "ARTIFACT=${ARTIFACT}"
+    echo "INSTALL_DIR=${INSTALL_DIR}"
+    echo "VERSION_LABEL=${VERSION_LABEL}"
+    echo "API_PATH=${API_PATH}"
+    exit 0
 fi
 
 echo "Resolving ${VERSION_LABEL} from ${REPO}..."
