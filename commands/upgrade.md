@@ -36,6 +36,51 @@ Accepts `v0.22.1`, `0.22.1`, or `latest`.
 - After a release that fixes a bug affecting the current session
   (e.g. the 0.22.1 daemon-spawn fix).
 
+## Responding to the SessionStart staleness signal
+
+If the SessionStart hook detected a stale CLI you'll see a marker
+line like:
+
+```
+[Shipyard] SHIPYARD_CLI_STALE installed=0.22.0 min_expected=0.22.1
+```
+
+Don't silently run the upgrade. Use `AskUserQuestion` first with
+three options, recommending **Upgrade**:
+
+| Option | Action |
+|---|---|
+| **Upgrade the CLI now** (recommended) | Run the install command in this file; verify with `shipyard --version`. |
+| **Skip for this session** | Acknowledge; continue with existing CLI. Note any features that may not work. |
+| **My install is project-pinned (don't ask again)** | Defer to the project's own installer (e.g. pulp's `tools/install-shipyard.sh`). Also **persist the dismissal** so the hook stops prompting (see below). Suggest bumping their pin file instead. |
+
+After any option, drop the topic — don't re-prompt within the
+session unless the user explicitly asks.
+
+### Persisting a "don't ask again" choice
+
+When the user picks option 3, write a tiny JSON file under the
+shipyard state dir so the hook stays silent on future sessions
+(until the plugin raises its `min_shipyard_version` past what was
+dismissed — a new release that matters, new decision).
+
+The hook prints the exact paths in its marker; use those. On macOS
+that's `~/Library/Application Support/shipyard/plugin-upgrade-dismissed.json`;
+on Linux, `${XDG_STATE_HOME:-~/.local/state}/shipyard/plugin-upgrade-dismissed.json`.
+
+```bash
+# macOS example:
+mkdir -p "$HOME/Library/Application Support/shipyard"
+printf '%s\n' '{"dismissed_for_min":"0.22.1"}' \
+  > "$HOME/Library/Application Support/shipyard/plugin-upgrade-dismissed.json"
+```
+
+The `dismissed_for_min` value should match the `min_expected` from
+the staleness marker. Next session the hook reads the file; if the
+current plugin's `min_shipyard_version` is ≤ the dismissed version,
+it stays silent. If a newer plugin release bumps the minimum past
+that, the hook prompts again — by design.
+
 ## When NOT to auto-run this
 
 - **Project-pinned installs.** If a project pins a specific CLI
