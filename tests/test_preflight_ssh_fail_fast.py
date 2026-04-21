@@ -67,9 +67,12 @@ class TestSSHProbeDiagnosis:
         assert time.monotonic() - start < 2.0  # fake_run raises immediately
         assert diag["reachable"] is False
         assert diag["category"] == "timeout"
-        assert calls == [10], (
-            "probe must pass a 10s timeout to subprocess.run, "
-            "not the validation timeout"
+        # #119: timeouts now retry once (transient category), so we see
+        # two 10s calls. The important invariant is that EVERY call uses
+        # the 10s probe budget, not the full validation timeout.
+        assert calls == [10, 10], (
+            "probe must pass a 10s timeout to subprocess.run on each "
+            "attempt, not the validation timeout"
         )
 
     def test_missing_host_reports_configuration(self) -> None:
