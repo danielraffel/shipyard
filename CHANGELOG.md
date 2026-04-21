@@ -3,6 +3,13 @@
 All notable changes to Shipyard are documented here. Each entry links
 to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
+<a id="v0221"></a>
+## [0.22.1] - 2026-04-21
+
+- daemon: fix spawn_detached for standalone-binary installs (0.22.0 → 0.22.1) ([#130](https://github.com/danielraffel/Shipyard/pull/130))
+- fix(plugin): drop invalid `agents` manifest field (unblocks `claude plugin install shipyard`) ([#133](https://github.com/danielraffel/Shipyard/pull/133))
+- ci skill: add "Iterating on a single-platform failure" section ([#129](https://github.com/danielraffel/Shipyard/pull/129))
+
 <a id="v0220"></a>
 ## [0.22.0] - 2026-04-21
 
@@ -234,6 +241,7 @@ to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
 - feat/shipyard phases 1 4 ([#1](https://github.com/danielraffel/Shipyard/pull/1))
 
+[0.22.1]: https://github.com/danielraffel/Shipyard/releases/tag/v0.22.1
 [0.22.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.22.0
 [0.21.2]: https://github.com/danielraffel/Shipyard/releases/tag/v0.21.2
 [0.21.1]: https://github.com/danielraffel/Shipyard/releases/tag/v0.21.1
