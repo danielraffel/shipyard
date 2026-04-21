@@ -40,35 +40,24 @@ shipyard changelog init    # opt in to post-release CHANGELOG auto-sync
 
 ### Claude Code (recommended)
 
-**Step 1:** Add the Shipyard marketplace to `~/.claude/settings.json`:
+Two commands to register the marketplace and install the plugin:
 
-```json
-{
-  "extraKnownMarketplaces": {
-    "shipyard": {
-      "source": {
-        "source": "github",
-        "repo": "danielraffel/Shipyard"
-      }
-    }
-  }
-}
+```bash
+claude plugin marketplace add danielraffel/Shipyard
+claude plugin install shipyard
 ```
 
-**Step 2:** Install the plugin:
-
-```
-/plugin install shipyard@shipyard
-```
-
-**Step 3:** Set up your project:
+Then set up your project:
 
 ```
 /shipyard:init
 ```
 
 The plugin uses the CLI under the hood. If the `shipyard` binary isn't
-installed, the plugin will offer to install it for you.
+installed, the plugin will offer to install it for you — or grab it
+yourself via the [Codex / CLI install](#codex--cli) below. Plugin +
+CLI are independently versioned; installing one doesn't affect the
+other, and it's safe to install both.
 
 ### Codex / CLI
 
