@@ -15,6 +15,7 @@ from __future__ import annotations
 # Explicit import forces PyInstaller to include encodings.idna in the
 # --onefile binary. Keep this even if it looks unused.
 import encodings.idna  # noqa: F401 — PyInstaller bundle primer
+import json
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -4010,6 +4011,96 @@ def _ship_terminal_verdict(state: ShipState) -> bool | None:
         v == "pass" or tgt in advisory_targets
         for tgt, v in state.evidence_snapshot.items()
     )
+
+
+@ship_state_group.command("reconcile")
+@click.argument("pr", type=int, required=False)
+@click.option(
+    "--all",
+    "reconcile_all",
+    is_flag=True,
+    help="Reconcile every active ship-state (ignores the PR argument)",
+)
+@click.pass_obj
+def ship_state_reconcile(
+    ctx: Context, pr: int | None, reconcile_all: bool
+) -> None:
+    """Re-fetch CI state from GitHub and heal drifted ship-state.
+
+    Webhook events update dispatched_runs as they arrive; if the daemon
+    was down or not registered for the repo, those events are lost and
+    the local ship-state file keeps stale statuses. This command pulls
+    ``gh pr view <PR> --json statusCheckRollup`` and rewrites
+    dispatched_runs to match what GitHub reports right now.
+    """
+    import subprocess as _sp
+
+    from shipyard.ship.reconcile import reconcile_ship_state
+
+    if reconcile_all and pr is not None:
+        render_error("Pass either <pr> or --all, not both.")
+        sys.exit(2)
+    if not reconcile_all and pr is None:
+        render_error("Usage: shipyard ship-state reconcile <pr> | --all")
+        sys.exit(2)
+
+    targets: list[ShipState] = (
+        ctx.ship_state.list_active()
+        if reconcile_all
+        else [s for s in [ctx.ship_state.get(pr)] if s is not None]
+    )
+    if not targets:
+        render_message(
+            f"No active ship state for PR #{pr}." if pr else "No active ship state.",
+            style="dim",
+        )
+        return
+
+    results: list[dict[str, Any]] = []
+    for state in targets:
+        try:
+            raw = _sp.run(
+                [
+                    "gh", "pr", "view", str(state.pr),
+                    "--repo", state.repo,
+                    "--json", "statusCheckRollup",
+                ],
+                capture_output=True, text=True, check=True, timeout=20,
+            ).stdout
+        except (_sp.CalledProcessError, _sp.TimeoutExpired, FileNotFoundError) as exc:
+            results.append({"pr": state.pr, "ok": False, "error": str(exc)})
+            continue
+        try:
+            rollup = json.loads(raw).get("statusCheckRollup") or []
+        except (ValueError, KeyError):
+            results.append({"pr": state.pr, "ok": False, "error": "unparseable gh output"})
+            continue
+        new_state, changes = reconcile_ship_state(state, rollup)
+        if changes:
+            ctx.ship_state.save(new_state)
+        results.append({
+            "pr": state.pr, "ok": True, "changes": changes,
+        })
+
+    if ctx.json_mode:
+        ctx.output("ship-state:reconcile", {"results": results})
+        return
+
+    for r in results:
+        if not r["ok"]:
+            render_error(f"PR #{r['pr']}: {r['error']}")
+            continue
+        changes = r.get("changes") or []
+        if changes:
+            render_message(
+                f"PR #{r['pr']}: applied {len(changes)} change(s)", style="green",
+            )
+            for c in changes:
+                render_message(f"  · {c}", style="dim")
+        else:
+            render_message(
+                f"PR #{r['pr']}: already in sync with GitHub", style="dim",
+            )
 
 
 @ship_state_group.command("discard")
