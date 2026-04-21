@@ -15,6 +15,9 @@ Shipyard coordinates validation across local, SSH, and cloud targets.
 | Validate specific targets | `shipyard run --targets mac,ubuntu --json` |
 | Iterate on one platform's CI failure | `shipyard run --skip-target <others>` (see [Iterating on a single-platform failure](#iterating-on-a-single-platform-failure)) |
 | Fast smoke check | `shipyard run --smoke --json` |
+| Start the live-mode webhook daemon | `shipyard daemon start` |
+| Inspect the daemon | `shipyard daemon status --json` |
+| Stop the daemon | `shipyard daemon stop` |
 | Full ship (PR + validate + merge) | `shipyard ship --json` |
 | Ship to develop instead of main | `shipyard ship --base develop --json` |
 | Resume an interrupted ship | `shipyard ship --resume --json` (auto when state exists) |
@@ -64,6 +67,37 @@ Shipyard coordinates validation across local, SSH, and cloud targets.
 | List quarantined targets | `shipyard quarantine list --json` |
 | Quarantine a flaky target | `shipyard quarantine add <target> --reason "..."` |
 | Remove from quarantine | `shipyard quarantine remove <target>` |
+
+## Live mode (`shipyard daemon`) — when it helps and when to ignore it
+
+Shipyard has a long-running webhook receiver that converts GitHub
+Actions events into a push-based event stream. When it's running,
+`shipyard watch` can subscribe to the daemon instead of polling —
+near-realtime updates with zero GitHub API budget spent on the watch
+itself.
+
+| You're here | Does live mode matter? |
+|---|---|
+| Solo macOS dev with Tailscale + Funnel enabled | **Yes, big win.** `shipyard daemon start` registers webhooks on tracked repos and streams events; the macOS menu-bar app and any `shipyard watch` invocation in a terminal both consume the same stream. |
+| CI / headless server / someone without Tailscale | **Ignore it.** The daemon needs a public tunnel (Tailscale Funnel in v1) to receive webhooks. Without that, `shipyard watch` and everything else fall back to polling — behavior is unchanged from the pre-daemon CLI. |
+| Agent running one-shot `shipyard ship` + `watch --follow` | **Probably doesn't matter.** The daemon helps most when multiple sessions or the GUI are tracking the same state concurrently; a single session blocking on `watch --follow` already has its own connection. |
+
+**When in doubt, don't start the daemon.** The daemon is an
+optimization, not a requirement. Polling is the correct fallback
+for everything it doesn't cover and is always safe. The `run` /
+`ship` / `watch` / `auto-merge` commands don't require the daemon
+to be running.
+
+`shipyard daemon status` is free (no `gh api` calls, just reads
+the local socket) and cheap to probe from an agent — use it if
+you want to know whether the user has live mode on before
+deciding whether to rely on webhook-speed updates vs polling
+cadence.
+
+See [`docs/live-mode.md`](../../docs/live-mode.md) for setup (≈1
+click on a Tailscale-ready Mac) and troubleshooting. The macOS
+menu-bar app (`shipyard-macos-gui`) is a thin subscriber to this
+same daemon.
 
 ## When to use `watch` (agent decision guide)
 
