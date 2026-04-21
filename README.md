@@ -53,11 +53,17 @@ Then set up your project:
 /shipyard:init
 ```
 
-The plugin uses the CLI under the hood. If the `shipyard` binary isn't
-installed, the plugin will offer to install it for you — or grab it
-yourself via the [Codex / CLI install](#codex--cli) below. Plugin +
-CLI are independently versioned; installing one doesn't affect the
-other, and it's safe to install both.
+The plugin uses the CLI under the hood. On first session start it
+auto-installs the binary if it can't find `shipyard` on PATH — and
+skips the install if it can. If you've already installed the CLI
+(via `install.sh` or a project pinner like pulp's
+`tools/install-shipyard.sh`), make sure its bin directory is on
+PATH before you install the plugin; that way the plugin respects
+your existing pin instead of installing its own copy alongside it.
+
+Plugin + CLI are independently versioned; the plugin's version
+covers slash commands / skills / hooks, while the CLI's version
+covers the binary. It's safe to have both.
 
 ### Codex / CLI
 
