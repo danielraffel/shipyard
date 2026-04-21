@@ -1,31 +1,114 @@
 #!/bin/bash
-# Check if the shipyard CLI binary is installed.
-# If not, download and install it automatically.
-# Runs as a SessionStart hook from the Claude Code plugin.
+# SessionStart hook for the Claude Code plugin.
+#
+# Three jobs:
+#   1. Bootstrap: if no `shipyard` binary is on PATH, curl install.sh
+#      (best-effort). The plugin is deferential — it only installs
+#      when something's actually missing.
+#   2. Staleness signal: if a shipyard binary IS on PATH but is older
+#      than this plugin build's `min_shipyard_version`, print a
+#      structured marker the agent picks up and turns into an
+#      AskUserQuestion prompt offering to run /shipyard:upgrade.
+#   3. Honor a user's prior "don't ask again" choice via a dismiss
+#      file under the shipyard state dir. Re-prompts only when the
+#      plugin raises its min_shipyard_version past what was dismissed.
+#
+# We never auto-upgrade. Project pinners (e.g. pulp with
+# tools/shipyard.toml) rely on the plugin not surprise-upgrading
+# their CLI.
 
-if command -v shipyard &>/dev/null; then
+set -u
+
+# ── State-dir resolution (matches shipyard/core/config.py) ──────────
+
+case "$(uname -s)" in
+    Darwin)  SHIPYARD_STATE_DIR="$HOME/Library/Application Support/shipyard" ;;
+    Linux)   SHIPYARD_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/shipyard" ;;
+    *)       SHIPYARD_STATE_DIR="$HOME/.shipyard" ;;  # fallback for Windows / weird hosts
+esac
+DISMISS_FILE="$SHIPYARD_STATE_DIR/plugin-upgrade-dismissed.json"
+
+# ── Bootstrap ───────────────────────────────────────────────────────
+
+if ! command -v shipyard &>/dev/null; then
+  echo ""
+  echo "[Shipyard] CLI binary not found. Installing..."
+  echo ""
+  curl -fsSL https://raw.githubusercontent.com/danielraffel/Shipyard/main/install.sh | sh
+  if command -v shipyard &>/dev/null; then
+    echo ""
+    echo "[Shipyard] Installed successfully: $(shipyard --version)"
+  elif [ -f "$HOME/.local/bin/shipyard" ]; then
+    echo ""
+    echo "[Shipyard] Installed to ~/.local/bin/shipyard"
+    echo "[Shipyard] Add to PATH: export PATH=\"\$HOME/.local/bin:\$PATH\""
+  else
+    echo ""
+    echo "[Shipyard] Installation may have failed. Try manually:"
+    echo "  curl -fsSL https://raw.githubusercontent.com/danielraffel/Shipyard/main/install.sh | sh"
+  fi
   exit 0
 fi
 
-echo ""
-echo "[Shipyard] CLI binary not found. Installing..."
-echo ""
+# ── Staleness check ─────────────────────────────────────────────────
 
-# Download and run the install script
-curl -fsSL https://raw.githubusercontent.com/danielraffel/Shipyard/main/install.sh | sh
-
-# Verify it worked
-if command -v shipyard &>/dev/null; then
-  echo ""
-  echo "[Shipyard] Installed successfully: $(shipyard --version)"
-elif [ -f "$HOME/.local/bin/shipyard" ]; then
-  echo ""
-  echo "[Shipyard] Installed to ~/.local/bin/shipyard"
-  echo "[Shipyard] Add to PATH: export PATH=\"\$HOME/.local/bin:\$PATH\""
-else
-  echo ""
-  echo "[Shipyard] Installation may have failed. Try manually:"
-  echo "  curl -fsSL https://raw.githubusercontent.com/danielraffel/Shipyard/main/install.sh | sh"
+PLUGIN_JSON="${CLAUDE_PLUGIN_ROOT:-}/.claude-plugin/plugin.json"
+if [ -z "${CLAUDE_PLUGIN_ROOT:-}" ] || [ ! -f "$PLUGIN_JSON" ]; then
+  exit 0
 fi
 
+MIN_VERSION=$(sed -n 's/^[[:space:]]*"min_shipyard_version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$PLUGIN_JSON" | head -1)
+if [ -z "$MIN_VERSION" ]; then
+  exit 0
+fi
+
+INSTALLED=$(shipyard --version 2>/dev/null | awk 'NF{print $NF}' | head -1 | sed 's/^v//')
+if [ -z "$INSTALLED" ]; then
+  exit 0
+fi
+
+MIN_CMP="${MIN_VERSION#v}"
+
+# Pure-shell version compare via sort -V. If MIN_CMP sorts first or
+# is equal to INSTALLED, installed is >= min (no action).
+version_gte() {
+    # $1 >= $2 ?
+    [ "$1" = "$2" ] && return 0
+    [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -1)" = "$2" ]
+}
+
+if version_gte "$INSTALLED" "$MIN_CMP"; then
+  exit 0
+fi
+
+# ── Honor a prior "don't ask again" dismissal ───────────────────────
+
+if [ -f "$DISMISS_FILE" ]; then
+  DISMISSED_MIN=$(sed -n 's/.*"dismissed_for_min"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$DISMISS_FILE" | head -1)
+  DISMISSED_CMP="${DISMISSED_MIN#v}"
+  if [ -n "$DISMISSED_CMP" ] && version_gte "$DISMISSED_CMP" "$MIN_CMP"; then
+    # User already dismissed this (or a later) min version. Stay silent.
+    exit 0
+  fi
+fi
+
+# ── Print the structured marker so the agent prompts ────────────────
+
+cat <<EOF
+
+[Shipyard] SHIPYARD_CLI_STALE installed=${INSTALLED} min_expected=${MIN_VERSION}
+[Shipyard] The plugin in this session expects shipyard ≥ ${MIN_VERSION};
+           you're on ${INSTALLED}. Recent releases include fixes that
+           affect plugin behavior (see GitHub releases).
+[Shipyard] Agent: use AskUserQuestion to offer three options,
+           recommending (1):
+             (1) Upgrade the CLI now via /shipyard:upgrade [recommended]
+             (2) Skip for this session
+             (3) Project-pinned — don't ask again
+           If the user picks (3), persist the dismiss by writing:
+             mkdir -p "${SHIPYARD_STATE_DIR}"
+             printf '%s\n' '{"dismissed_for_min":"${MIN_VERSION}"}' \\
+               > "${DISMISS_FILE}"
+
+EOF
 exit 0
