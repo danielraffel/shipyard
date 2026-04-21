@@ -92,7 +92,14 @@ if [ -f "$DISMISS_FILE" ]; then
   fi
 fi
 
-# ── Print the structured marker so the agent prompts ────────────────
+# ── Print the advisory marker the agent surfaces ────────────────────
+#
+# This is advisory, not directive. Claude Code injects SessionStart hook
+# stdout into the session as context, but agents don't proactively act
+# before the user's first message — so the agent can't reliably fire an
+# AskUserQuestion on its own. What actually works: agent notes the
+# staleness in its first reply to the user's first message, and the
+# user initiates the upgrade via /shipyard:upgrade if they want it.
 
 cat <<EOF
 
@@ -100,12 +107,13 @@ cat <<EOF
 [Shipyard] The plugin in this session expects shipyard ≥ ${MIN_VERSION};
            you're on ${INSTALLED}. Recent releases include fixes that
            affect plugin behavior (see GitHub releases).
-[Shipyard] Agent: use AskUserQuestion to offer three options,
-           recommending (1):
-             (1) Upgrade the CLI now via /shipyard:upgrade [recommended]
-             (2) Skip for this session
-             (3) Project-pinned — don't ask again
-           If the user picks (3), persist the dismiss by writing:
+[Shipyard] Agent: when you reply to the user's first message, include a
+           single-line advisory like "(Note: shipyard CLI is ${INSTALLED};
+           plugin expects ≥ ${MIN_VERSION} — run /shipyard:upgrade when
+           convenient.)" then proceed with what they asked. Don't
+           interrupt their task or auto-run the upgrade. If the user
+           says they're project-pinned and want to silence this, persist
+           the dismiss by writing:
              mkdir -p "${SHIPYARD_STATE_DIR}"
              printf '%s\n' '{"dismissed_for_min":"${MIN_VERSION}"}' \\
                > "${DISMISS_FILE}"
