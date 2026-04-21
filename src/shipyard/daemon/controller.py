@@ -40,6 +40,7 @@ from shipyard.daemon.tunnels.base import TunnelInfo, TunnelNotReadyError, Tunnel
 from shipyard.daemon.tunnels.tailscale import TailscaleFunnelBackend
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -228,7 +229,9 @@ class _DaemonPaths:
         self.root.mkdir(parents=True, exist_ok=True)
 
 
-def _make_delivery_handler(secret: str, daemon: Daemon):
+def _make_delivery_handler(
+    secret: str, daemon: Daemon
+) -> Callable[[dict[str, str], bytes], HandlerResult]:
     """Produce a callback suitable for ``WebhookServer``.
 
     The HTTP server runs on a background thread; we schedule the

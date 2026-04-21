@@ -40,10 +40,13 @@ class TailscaleFunnelBackend:
             )
         self._binary = status.binary_path
 
+        binary = self._binary
+        assert binary is not None  # is_ready above guarantees this
+
         # Reset first so a previous launch's mapping doesn't win.
         # Without this, `funnel --bg <newport>` is a no-op when `/` is
         # already claimed by the old port. Swift hit this exact bug.
-        await self._run([self._binary, "funnel", "reset"])
+        await self._run([binary, "funnel", "reset"])
         # Brief settle — daemon sometimes hasn't applied the reset
         # when the next call lands, and the second call then silently
         # no-ops.
@@ -52,7 +55,7 @@ class TailscaleFunnelBackend:
         last_output = ""
         for attempt in range(1, 4):
             code, output = await self._run(
-                [self._binary, "funnel", "--bg", str(local_port)]
+                [binary, "funnel", "--bg", str(local_port)]
             )
             last_output = output
             if code != 0:

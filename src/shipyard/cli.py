@@ -6311,11 +6311,16 @@ def daemon_status(ctx: Context) -> None:
     if ctx.json_mode:
         ctx.output("daemon:status", {"running": True, **status})
     else:
-        tunnel = status.get("tunnel") or {}
+        tunnel_raw = status.get("tunnel")
+        tunnel: dict[str, Any] = tunnel_raw if isinstance(tunnel_raw, dict) else {}
         url = tunnel.get("url") or "—"
         backend = tunnel.get("backend") or "—"
         subs = status.get("subscribers", 0)
-        repos_text = ", ".join(status.get("registered_repos") or []) or "—"
+        repos_raw = status.get("registered_repos")
+        repos_list: list[str] = [
+            str(r) for r in (repos_raw if isinstance(repos_raw, list) else [])
+        ]
+        repos_text = ", ".join(repos_list) or "—"
         render_message(
             f"daemon running · tunnel={backend} · {url}\n"
             f"subscribers={subs} · repos={repos_text}",

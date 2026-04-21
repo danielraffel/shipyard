@@ -81,10 +81,14 @@ def decode(raw_json: bytes, binary_path: str | None) -> TailscaleStatus:
             dns_name=None,
             funnel_permitted=False,
         )
-    backend = obj.get("BackendState") if isinstance(obj.get("BackendState"), str) else None
-    self_obj = obj.get("Self") if isinstance(obj.get("Self"), dict) else {}
-    dns = self_obj.get("DNSName") if isinstance(self_obj.get("DNSName"), str) else None
-    cap_map = self_obj.get("CapMap") if isinstance(self_obj.get("CapMap"), dict) else {}
+    backend_raw = obj.get("BackendState")
+    backend = backend_raw if isinstance(backend_raw, str) else None
+    self_raw = obj.get("Self")
+    self_obj: dict[str, object] = self_raw if isinstance(self_raw, dict) else {}
+    dns_raw = self_obj.get("DNSName")
+    dns = dns_raw if isinstance(dns_raw, str) else None
+    cap_raw = self_obj.get("CapMap")
+    cap_map: dict[str, object] = cap_raw if isinstance(cap_raw, dict) else {}
     permitted = any(k in cap_map for k in _FUNNEL_CAP_KEYS)
     return TailscaleStatus(
         binary_path=binary_path,

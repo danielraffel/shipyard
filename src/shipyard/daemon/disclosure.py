@@ -20,7 +20,7 @@ from __future__ import annotations
 import sys
 import textwrap
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TextIO
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -82,7 +82,9 @@ def render(repos: list[str]) -> str:
     )
 
 
-def show_if_first_run(state_dir: Path, repos: list[str], stream=None) -> bool:
+def show_if_first_run(
+    state_dir: Path, repos: list[str], stream: TextIO | None = None
+) -> bool:
     """Print the disclosure if it hasn't been acked yet. Returns True
     if it was just shown (so the caller can react, e.g. by briefly
     pausing before continuing)."""

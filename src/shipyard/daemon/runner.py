@@ -201,9 +201,8 @@ def _pid_alive(pid: int) -> bool:
 def subscribe(
     state_dir: Path,
     *,
-    on_event: callable | None = None,
     timeout: float = 5.0,
-) -> object | None:
+) -> _EventIterator | None:
     """Connect to the daemon's IPC socket and return a blocking iter
     of events. Returns None if the daemon isn't running / reachable."""
     sock_path = state_dir / "daemon" / "daemon.sock"
