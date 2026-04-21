@@ -45,17 +45,29 @@ line like:
 [Shipyard] SHIPYARD_CLI_STALE installed=0.22.0 min_expected=0.22.1
 ```
 
-Don't silently run the upgrade. Use `AskUserQuestion` first with
-three options, recommending **Upgrade**:
+Claude Code injects this as session context *before* the user's
+first turn. Agents don't proactively act before a user message, so
+don't try to force an `AskUserQuestion` on your own. Instead:
 
-| Option | Action |
-|---|---|
-| **Upgrade the CLI now** (recommended) | Run the install command in this file; verify with `shipyard --version`. |
-| **Skip for this session** | Acknowledge; continue with existing CLI. Note any features that may not work. |
-| **My install is project-pinned (don't ask again)** | Defer to the project's own installer (e.g. pulp's `tools/install-shipyard.sh`). Also **persist the dismissal** so the hook stops prompting (see below). Suggest bumping their pin file instead. |
+**In your reply to the user's first message**, include a single
+one-line advisory pointing them at `/shipyard:upgrade`, then
+proceed with whatever they actually asked. Example:
 
-After any option, drop the topic — don't re-prompt within the
-session unless the user explicitly asks.
+> *(Note: shipyard CLI is 0.22.0; plugin expects ≥ 0.22.1 — run
+> `/shipyard:upgrade` when convenient.)*
+>
+> [then answer the user's actual question]
+
+If the user responds with "yes, upgrade now", run the install
+command in this file and verify with `shipyard --version`.
+
+If the user says their install is project-pinned (e.g. pulp's
+`tools/install-shipyard.sh`), don't upgrade — instead persist the
+dismissal so the hook stops advising on future sessions (see
+below), and suggest bumping their pin file instead.
+
+If the user ignores the advisory, drop the topic. Don't re-mention
+it within the session unless they raise it.
 
 ### Persisting a "don't ask again" choice
 
