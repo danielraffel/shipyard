@@ -74,7 +74,20 @@ class SSHWindowsExecutor:
         del mode
         target_name = target_config.get("name", "windows")
         platform = target_config.get("platform", "windows-x64")
-        host = target_config["host"]
+        host = target_config.get("host")
+        if not host:
+            # #120: never let a missing `host` crash with KeyError.
+            # Surface a clean ERROR result so the ship flow exits with
+            # a real message instead of a traceback.
+            now = datetime.now(timezone.utc)
+            log_file = Path(log_path)
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            return _error_result(
+                target_name, platform, now, time.monotonic(),
+                str(log_file),
+                f"Target '{target_name}' is misconfigured: no `host` field in "
+                f".shipyard/config.toml or .shipyard.local/config.toml.",
+            )
         remote_repo = target_config.get("repo_path", "C:\\repo")
         ssh_options = _ssh_options(target_config)
         started_at = datetime.now(timezone.utc)
@@ -306,28 +319,33 @@ class SSHWindowsExecutor:
         return toolchain
 
     def probe(self, target_config: dict[str, Any]) -> bool:
-        """Check SSH reachability with a PowerShell echo command."""
-        host = target_config.get("host")
-        if not host:
-            return False
+        """Check SSH reachability using the shared probe machinery.
 
-        ssh_options = _ssh_options(target_config)
-        cmd = (
-            ["ssh"]
-            + list(ssh_options)
-            + ["-o", "ConnectTimeout=5", host, "powershell", "-Command", "Write-Output ok"]
-        )
+        The remote command is a bare `echo ok` — valid in cmd.exe
+        (the default OpenSSH Windows shell), PowerShell, and bash.
+        This avoids the pre-#119 failure mode where the probe invoked
+        `powershell -Command ...` without `BatchMode=yes`, hung on
+        slow Windows handshakes, and lost the error classification.
+        """
+        from shipyard.executor.ssh import run_probe
+        diag = run_probe(target_config, remote_cmd=["echo", "ok"])
+        return bool(diag["reachable"])
 
-        try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            return result.returncode == 0
-        except (subprocess.TimeoutExpired, OSError):
-            return False
+    def diagnose(self, target_config: dict[str, Any]) -> dict[str, Any]:
+        """Rich reachability diagnosis mirroring SSHExecutor.diagnose.
+
+        Categories align with SSHExecutor so agents can branch on the
+        same stable set (auth / host_key / network / timeout /
+        configuration / unknown) regardless of the Windows-vs-POSIX
+        target split.
+        """
+        from shipyard.executor.ssh import _format_ssh_diagnosis, run_probe
+        diag = run_probe(target_config, remote_cmd=["echo", "ok"])
+        return {
+            "reachable": diag["reachable"],
+            "message": _format_ssh_diagnosis(target_config, diag),
+            "category": diag["category"],
+        }
 
 
 class _ApplyResult:

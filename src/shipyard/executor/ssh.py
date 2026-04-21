@@ -7,6 +7,7 @@ Captures output to a local log file for later inspection.
 from __future__ import annotations
 
 import subprocess
+import sys
 import tempfile
 import time
 from datetime import datetime, timezone
@@ -89,7 +90,21 @@ class SSHExecutor:
     ) -> TargetResult:
         target_name = target_config.get("name", "ssh")
         platform = target_config.get("platform", "unknown")
-        host = target_config["host"]
+        host = target_config.get("host")
+        if not host:
+            # #120: never let a missing `host` crash with KeyError.
+            # Surface a clean ERROR result naming the target so the
+            # ship flow exits with a real message instead of a
+            # traceback.
+            now = datetime.now(timezone.utc)
+            log_file = Path(log_path)
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            return _error_result(
+                target_name, platform, now, time.monotonic(),
+                str(log_file),
+                f"Target '{target_name}' is misconfigured: no `host` field in "
+                f".shipyard/config.toml or .shipyard.local/config.toml.",
+            )
         remote_repo = target_config.get("repo_path", "~/repo")
         ssh_options = _ssh_options(target_config)
         started_at = datetime.now(timezone.utc)
@@ -306,64 +321,9 @@ class SSHExecutor:
         }
 
     def _probe_ssh(self, target_config: dict[str, Any]) -> dict[str, Any]:
-        host = target_config.get("host")
-        if not host:
-            return {
-                "reachable": False,
-                "category": "configuration",
-                "last_error": "target has no host configured",
-                "timed_out": False,
-            }
-
-        ssh_options = _ssh_options(target_config)
-        cmd = (
-            ["ssh"]
-            + list(ssh_options)
-            + [
-                "-o", "ConnectTimeout=5",
-                "-o", "BatchMode=yes",
-                host,
-                "echo ok",
-            ]
-        )
-
-        try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-        except subprocess.TimeoutExpired:
-            return {
-                "reachable": False,
-                "category": "timeout",
-                "last_error": "ssh probe exceeded 10s",
-                "timed_out": True,
-            }
-        except OSError as exc:
-            return {
-                "reachable": False,
-                "category": "network",
-                "last_error": str(exc),
-                "timed_out": False,
-            }
-
-        if result.returncode == 0:
-            return {
-                "reachable": True,
-                "category": None,
-                "last_error": None,
-                "timed_out": False,
-            }
-
-        stderr = (result.stderr or "").strip()
-        return {
-            "reachable": False,
-            "category": _classify_probe_error(stderr, result.returncode),
-            "last_error": stderr or f"ssh exited {result.returncode}",
-            "timed_out": False,
-        }
+        # POSIX-friendly remote command. `-o BatchMode=yes` is in the
+        # shared option list from `_build_probe_cmd`.
+        return run_probe(target_config, remote_cmd=["echo", "ok"])
 
 
 def _remote_head_sha(
@@ -757,7 +717,141 @@ def _format_ssh_diagnosis(
     category = diag.get("category")
     if category:
         lines.append(f"  Failure category: {category}")
+    attempts = diag.get("attempts")
+    if attempts and attempts > 1:
+        lines.append(f"  Attempts: {attempts}")
     last = diag.get("last_error")
     if last:
         lines.append(f"  Last error: {last}")
     return "\n".join(lines)
+
+
+# ── Shared probe machinery (#119) ───────────────────────────────────────
+
+PROBE_TIMEOUT_SECS = 10
+PROBE_CONNECT_TIMEOUT_SECS = 5
+# Transient categories retry once — Windows OpenSSH handshakes occasionally
+# exceed the 10s budget on first connect after idle. Non-transient categories
+# (auth, host_key, configuration) do NOT retry: retrying a wrong key is
+# pointless and slow.
+_TRANSIENT_CATEGORIES = frozenset({"timeout", "network"})
+
+
+def _debug_probe_enabled() -> bool:
+    """True when SHIPYARD_DEBUG_PROBE=1 is set — print exact probe cmd."""
+    import os as _os
+    return _os.environ.get("SHIPYARD_DEBUG_PROBE") == "1"
+
+
+def _build_probe_cmd(
+    target_config: dict[str, Any], remote_cmd: list[str]
+) -> list[str]:
+    """Compose the full ssh command for a reachability probe.
+
+    Callers pass the remote command as a pre-split argv list so we don't
+    reshape quoting across POSIX vs Windows shells. The options list
+    includes BatchMode=yes so the probe never sits at a password prompt
+    (that was the pre-#119 bug that made Windows probes hang past the
+    timeout).
+    """
+    host = target_config.get("host", "")
+    ssh_options = _ssh_options(target_config)
+    return (
+        ["ssh"]
+        + list(ssh_options)
+        + [
+            "-o", f"ConnectTimeout={PROBE_CONNECT_TIMEOUT_SECS}",
+            "-o", "BatchMode=yes",
+            host,
+        ]
+        + list(remote_cmd)
+    )
+
+
+def run_probe(
+    target_config: dict[str, Any],
+    *,
+    remote_cmd: list[str],
+) -> dict[str, Any]:
+    """Run an SSH reachability probe once, with at most one retry on
+    transient failures (timeout / network).
+
+    Returns a dict with keys: reachable, category, last_error, timed_out,
+    attempts. Every category value is one of: None, "auth", "host_key",
+    "network", "timeout", "configuration", "unknown".
+
+    Callers who want the unrelated 'diagnose' output for the preflight
+    error message should pass this dict through `_format_ssh_diagnosis`.
+    """
+    host = target_config.get("host")
+    if not host:
+        return {
+            "reachable": False,
+            "category": "configuration",
+            "last_error": "target has no host configured",
+            "timed_out": False,
+            "attempts": 0,
+        }
+
+    cmd = _build_probe_cmd(target_config, remote_cmd)
+    if _debug_probe_enabled():
+        import shlex as _shlex
+        sys.stderr.write(
+            f"[shipyard:probe] target={target_config.get('name','?')} "
+            f"cmd={_shlex.join(cmd)} "
+            f"timeout={PROBE_TIMEOUT_SECS}s\n"
+        )
+
+    attempts = 0
+    last_result: dict[str, Any] | None = None
+    for attempt in range(2):
+        attempts = attempt + 1
+        last_result = _single_probe_attempt(cmd)
+        last_result["attempts"] = attempts
+        if last_result["reachable"]:
+            return last_result
+        if last_result["category"] not in _TRANSIENT_CATEGORIES:
+            return last_result
+        # Transient — retry once.
+    assert last_result is not None
+    return last_result
+
+
+def _single_probe_attempt(cmd: list[str]) -> dict[str, Any]:
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=PROBE_TIMEOUT_SECS,
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "reachable": False,
+            "category": "timeout",
+            "last_error": f"ssh probe exceeded {PROBE_TIMEOUT_SECS}s",
+            "timed_out": True,
+        }
+    except OSError as exc:
+        return {
+            "reachable": False,
+            "category": "network",
+            "last_error": str(exc),
+            "timed_out": False,
+        }
+
+    if result.returncode == 0:
+        return {
+            "reachable": True,
+            "category": None,
+            "last_error": None,
+            "timed_out": False,
+        }
+
+    stderr = (result.stderr or "").strip()
+    return {
+        "reachable": False,
+        "category": _classify_probe_error(stderr, result.returncode),
+        "last_error": stderr or f"ssh exited {result.returncode}",
+        "timed_out": False,
+    }

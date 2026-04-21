@@ -542,17 +542,18 @@ def doctor(ctx: Context, release_chain: bool, runners: bool) -> None:
 def _check_runners(ctx: Context) -> dict[str, Any] | None:
     """Probe configured SSH runners for reachability.
 
-    For each SSH-backed target in the config, run a short `true` probe
-    over SSH and report ok / unreachable. Timeout kept tight (5s) so a
-    dead host doesn't hold doctor hostage. Returns None when the
-    config has no SSH targets — doctor then silently skips the section.
+    Uses the same `run_probe` machinery as the ship preflight, so a
+    doctor result that says "reachable" means a real `shipyard ship`
+    will also succeed, and a "unreachable" here surfaces the same
+    classified category agents see at ship time (auth / host_key /
+    network / timeout / configuration). Fixed in #119 — the prior
+    implementation ran a bare `true` on the remote which fails in
+    cmd.exe on Windows SSH hosts even when the host is reachable.
 
-    The heartbeat/`last_heartbeat_at` part of #84 lives on
-    `TargetResult` and surfaces through `shipyard watch`; this
-    function intentionally only does the synchronous reachability
-    probe because doctor runs outside of a ship, with no live
-    TargetResult to inspect.
+    Returns None when the config has no SSH targets.
     """
+    from shipyard.executor.ssh import run_probe
+
     ssh_targets = {
         name: t
         for name, t in ctx.config.targets.items()
@@ -564,6 +565,8 @@ def _check_runners(ctx: Context) -> dict[str, Any] | None:
     rows: dict[str, Any] = {}
     for name, target in ssh_targets.items():
         host = target.get("host")
+        target_config = dict(target)
+        target_config["name"] = name
         if not host:
             rows[name] = {
                 "ok": False,
@@ -572,44 +575,21 @@ def _check_runners(ctx: Context) -> dict[str, Any] | None:
             }
             continue
 
-        cmd = [
-            "ssh",
-            "-o", "ConnectTimeout=5",
-            "-o", "BatchMode=yes",
-            host,
-            "true",
-        ]
-        try:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=8,
-            )
-        except subprocess.TimeoutExpired:
-            rows[name] = {
-                "ok": False,
-                "version": "unreachable",
-                "detail": f"ssh {host!r} timed out after 8s",
-            }
-            continue
-        except (subprocess.SubprocessError, FileNotFoundError) as exc:
-            rows[name] = {
-                "ok": False,
-                "version": "unreachable",
-                "detail": f"ssh {host!r}: {exc}",
-            }
-            continue
-
-        if result.returncode == 0:
+        diag = run_probe(target_config, remote_cmd=["echo", "ok"])
+        if diag["reachable"]:
             rows[name] = {
                 "ok": True,
                 "version": f"reachable ({host})",
             }
         else:
-            stderr = result.stderr.strip().splitlines()
-            last_line = stderr[-1] if stderr else f"exit {result.returncode}"
+            detail = f"ssh {host!r}: {diag.get('last_error') or 'unreachable'}"
+            category = diag.get("category")
+            if category:
+                detail = f"{detail} [category={category}]"
             rows[name] = {
                 "ok": False,
                 "version": "unreachable",
-                "detail": f"ssh {host!r}: {last_line}",
+                "detail": detail,
             }
 
     return rows

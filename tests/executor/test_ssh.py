@@ -728,16 +728,20 @@ class TestSSHResumeFrom:
 class TestSSHWindowsExecutorProbe:
     def test_probe_success(self) -> None:
         executor = SSHWindowsExecutor()
-        mock_result = MagicMock(returncode=0)
+        mock_result = MagicMock(returncode=0, stdout="ok\n", stderr="")
         with patch("subprocess.run", return_value=mock_result) as mock_run:
             assert executor.probe(_windows_target_config()) is True
             cmd = mock_run.call_args[0][0]
-            assert "powershell" in cmd
-            assert "Write-Output ok" in " ".join(cmd)
+            # #119: probe now uses `echo ok` (cross-shell — cmd.exe, PowerShell,
+            # bash all accept it) + BatchMode=yes. The prior `powershell
+            # -Command Write-Output ok` shape hung on hosts whose default
+            # shell was cmd.exe and never surfaced a classified failure.
+            assert "echo" in cmd
+            assert "BatchMode=yes" in cmd
 
     def test_probe_failure(self) -> None:
         executor = SSHWindowsExecutor()
-        mock_result = MagicMock(returncode=1)
+        mock_result = MagicMock(returncode=1, stdout="", stderr="Permission denied (publickey).")
         with patch("subprocess.run", return_value=mock_result):
             assert executor.probe(_windows_target_config()) is False
 
