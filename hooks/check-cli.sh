@@ -19,6 +19,12 @@
 
 set -u
 
+# ── Canary (temporary — remove after schema fix is verified) ────────
+# Confirms the plugin loader actually invokes this hook. Will be
+# removed in a follow-up PR once we've seen it fire.
+echo "HOOK_RAN at $(date) CLAUDE_PLUGIN_ROOT=${CLAUDE_PLUGIN_ROOT:-unset}" \
+  >> /tmp/shipyard-hook-ran.txt 2>/dev/null || true
+
 # ── State-dir resolution (matches shipyard/core/config.py) ──────────
 
 case "$(uname -s)" in
