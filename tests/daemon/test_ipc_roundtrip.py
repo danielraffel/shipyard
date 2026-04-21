@@ -180,18 +180,16 @@ def test_read_daemon_status_sees_past_hello_line(short_socket_path: Path) -> Non
         await server.start()
         try:
             # `read_daemon_status(state_dir)` expects `<state_dir>/daemon/daemon.sock`.
-            # Point it at the parent of the socket's parent so the path assembles
-            # back to the socket our server bound.
-            state_dir = short_socket_path.parent.parent
-            (short_socket_path.parent).mkdir(parents=True, exist_ok=True)
-            # The fixture uses `<tmp>/daemon.sock` directly; bridge to the
-            # expected layout with a symlink.
-            expected = state_dir / "daemon" / "daemon.sock"
-            expected.parent.mkdir(parents=True, exist_ok=True)
-            if not expected.exists():
+            # The fixture gave us `<tmp>/daemon.sock` directly; set up an
+            # isolated state_dir that points at our server's socket via
+            # a symlink. Use a fresh tempdir so parallel test runs don't
+            # collide on the `<tmp>/daemon/` path.
+            with tempfile.TemporaryDirectory(prefix="sy-state-") as state_str:
+                state_dir = Path(state_str)
+                expected = state_dir / "daemon" / "daemon.sock"
+                expected.parent.mkdir(parents=True, exist_ok=True)
                 expected.symlink_to(short_socket_path)
-
-            status = await asyncio.to_thread(read_daemon_status, state_dir)
+                status = await asyncio.to_thread(read_daemon_status, state_dir)
         finally:
             await server.stop()
 

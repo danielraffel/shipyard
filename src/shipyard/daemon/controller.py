@@ -131,6 +131,14 @@ class Daemon:
         )
         await self._ipc_server.start()
 
+        # Auto-heal any ship-state drift that accumulated while the
+        # daemon was down or watching the wrong repo set. Cheap: one
+        # `gh pr view --json statusCheckRollup` per active PR, then
+        # writes back only when something actually changed. Failures
+        # are logged but never block startup — the daemon is a real-
+        # time pipeline first; reconcile is a best-effort safety net.
+        asyncio.create_task(_reconcile_all_active_ships(self._config.state_dir))
+
     async def run(self) -> None:
         """Block until a stop is requested."""
         loop = asyncio.get_running_loop()
@@ -311,3 +319,60 @@ def read_daemon_status(state_dir: Path) -> dict[str, object] | None:
     except (TimeoutError, OSError):
         return None
     return None
+
+
+async def _reconcile_all_active_ships(state_dir: Path) -> None:
+    """Best-effort: for every active ship-state file, pull the current
+    CI rollup from GitHub and write back any changes. Runs once at
+    daemon startup as a safety net against missed webhook events.
+
+    Runs in the asyncio loop but shells out to `gh` via a thread so a
+    slow GitHub response doesn't stall the event loop. Errors are
+    logged and skipped — reconcile failure must never block daemon
+    startup or event processing.
+    """
+    from shipyard.core.ship_state import ShipStateStore
+    from shipyard.ship.reconcile import reconcile_ship_state
+
+    def _reconcile_sync() -> int:
+        """Returns the number of ship-states that were updated."""
+        import subprocess as _sp
+
+        store = ShipStateStore(state_dir / "ship")
+        healed = 0
+        for state in store.list_active():
+            try:
+                raw = _sp.run(
+                    [
+                        "gh", "pr", "view", str(state.pr),
+                        "--repo", state.repo,
+                        "--json", "statusCheckRollup",
+                    ],
+                    capture_output=True, text=True, check=True, timeout=20,
+                ).stdout
+            except (_sp.CalledProcessError, _sp.TimeoutExpired, FileNotFoundError) as exc:
+                logger.info(
+                    "reconcile: skipped PR #%d (%s): %s",
+                    state.pr, state.repo, exc,
+                )
+                continue
+            try:
+                rollup = json.loads(raw).get("statusCheckRollup") or []
+            except (ValueError, KeyError):
+                continue
+            new_state, changes = reconcile_ship_state(state, rollup)
+            if changes:
+                store.save(new_state)
+                healed += 1
+                logger.info(
+                    "reconcile: healed PR #%d — %s",
+                    state.pr, "; ".join(changes),
+                )
+        return healed
+
+    try:
+        healed = await asyncio.to_thread(_reconcile_sync)
+        if healed:
+            logger.info("reconcile: %d active ship-state(s) updated on startup", healed)
+    except Exception as exc:  # noqa: BLE001 — best-effort, never crash startup
+        logger.warning("reconcile on startup failed: %s", exc)
