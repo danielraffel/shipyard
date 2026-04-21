@@ -75,6 +75,55 @@ jobs:
         if: runner.os != 'Windows'
         run: mypy src/
 
+  binary-smoke:
+    # 0.22.5 — PR-gating smoke test against the actual PyInstaller
+    # --onefile artifact. Unit tests run against the dev install and
+    # don't catch bundling bugs like:
+    #   * LookupError: unknown encoding: idna   (0.22.3)
+    #   * read_daemon_status hello-race         (0.22.4)
+    # Both shipped to users before this job existed. Builds the
+    # binary, runs daemon start/status/stop against it, fails if the
+    # daemon can't stand up or status can't reach it over IPC.
+    name: Binary smoke (daemon start/status/stop)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15]
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install deps + pyinstaller
+        run: pip install .[dev] pyinstaller
+      - name: Build --onefile binary
+        run: pyinstaller --onefile --name shipyard src/shipyard/cli.py
+      - name: --version sanity
+        run: ./dist/shipyard --version
+      - name: daemon start
+        # Throwaway repo name; we're not testing webhook registration
+        # here, just that the daemon binds its socket and stays up.
+        run: ./dist/shipyard daemon start --repo owner/repo
+      - name: settle
+        run: sleep 3
+      - name: daemon status — must report running
+        run: |
+          ./dist/shipyard daemon status
+          ./dist/shipyard daemon status | grep -q "daemon running" || {
+            echo "::error::daemon status did not report running. Tail of daemon.log:"
+            if [ "$RUNNER_OS" = "macOS" ]; then
+              tail -50 "$HOME/Library/Application Support/shipyard/daemon/daemon.log" || true
+            else
+              tail -50 "${XDG_STATE_HOME:-$HOME/.local/state}/shipyard/daemon/daemon.log" || true
+            fi
+            exit 1
+          }
+      - name: daemon stop
+        if: always()
+        run: ./dist/shipyard daemon stop || true
+
   state-machine:
     # #101 Phase C — dedicated lane so ship-state-machine failures are
     # visually distinct from the full-suite run. Fast (ubuntu-only, no
