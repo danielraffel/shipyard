@@ -3,6 +3,11 @@
 All notable changes to Shipyard are documented here. Each entry links
 to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
+<a id="v0228"></a>
+## [0.22.8] - 2026-04-21
+
+- daemon: periodic reconcile loop — permanently closes state-drift gap (0.22.8) ([#146](https://github.com/danielraffel/Shipyard/pull/146))
+
 <a id="v0227"></a>
 ## [0.22.7] - 2026-04-21
 
@@ -275,6 +280,7 @@ to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
 - feat/shipyard phases 1 4 ([#1](https://github.com/danielraffel/Shipyard/pull/1))
 
+[0.22.8]: https://github.com/danielraffel/Shipyard/releases/tag/v0.22.8
 [0.22.7]: https://github.com/danielraffel/Shipyard/releases/tag/v0.22.7
 [0.22.6]: https://github.com/danielraffel/Shipyard/releases/tag/v0.22.6
 [0.22.5]: https://github.com/danielraffel/Shipyard/releases/tag/v0.22.5
