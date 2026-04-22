@@ -218,14 +218,22 @@ class IPCServer:
             async with self._lock:
                 self._subscribers.add(sub)
                 backlog = list(self._ring)
+            # Ring-buffer replays: use blocking `put()` so the
+            # subscriber's own writer loop provides backpressure.
+            # The prior `put_nowait` variant would drop the subscriber
+            # whenever the ring was larger than the queue (100 vs
+            # 64) — which is every time the daemon had any history.
+            # Every fresh GUI launch was getting kicked out on
+            # connect with reason="slow-subscriber", landing the user
+            # on polling despite a healthy daemon.
+            #
+            # Unlike live broadcasts (where back-pressure would stall
+            # reconcile), replay runs once per connect on a dedicated
+            # task and is free to block.
             for past in backlog:
-                # Ring-buffer replays go through the same queue so
-                # ordering is preserved relative to live events.
-                try:
-                    sub.queue.put_nowait({"type": "event", **past})
-                except asyncio.QueueFull:
-                    await self._drop_subscriber(sub, reason="slow-subscriber")
+                if not sub.alive:
                     return
+                await sub.queue.put({"type": "event", **past})
         elif msg_type == "status":
             state = self._status_provider()
             from shipyard import __version__ as _sy_version
