@@ -3,6 +3,11 @@
 All notable changes to Shipyard are documented here. Each entry links
 to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
+<a id="v0230"></a>
+## [0.23.0] - 2026-04-22
+
+- feat/wait primitive ([#150](https://github.com/danielraffel/Shipyard/pull/150))
+
 <a id="v0229"></a>
 ## [0.22.9] - 2026-04-21
 
@@ -10,8 +15,6 @@ to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 - chore(plugin): bump to 0.11.8 + raise min_shipyard_version floor to 0.22.8 ([#147](https://github.com/danielraffel/Shipyard/pull/147))
 
 <a id="v0228"></a>
-## [0.23.0]
-
 ## [0.22.8] - 2026-04-21
 
 - daemon: periodic reconcile loop — permanently closes state-drift gap (0.22.8) ([#146](https://github.com/danielraffel/Shipyard/pull/146))
@@ -288,6 +291,7 @@ to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
 - feat/shipyard phases 1 4 ([#1](https://github.com/danielraffel/Shipyard/pull/1))
 
+[0.23.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.23.0
 [0.22.9]: https://github.com/danielraffel/Shipyard/releases/tag/v0.22.9
 [0.22.8]: https://github.com/danielraffel/Shipyard/releases/tag/v0.22.8
 [0.22.7]: https://github.com/danielraffel/Shipyard/releases/tag/v0.22.7
