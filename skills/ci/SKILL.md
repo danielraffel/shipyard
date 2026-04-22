@@ -670,6 +670,8 @@ A doc-sync gate enforces that `docs/ship-state-machine.md` moves whenever `src/s
 | Auto-release  | `Release: skip reason="..."`                                 |
 | Lane policy   | `Lane-Policy: <target>=required\|advisory` (escalate/demote for this PR only) |
 
+**`Version-Bump` is authoritative when set.** The override wins against both the path-based heuristic and the conventional-commit subject ceiling. If you want a bug fix to ship as `cli=patch` even though it touches many public-API files, write `Version-Bump: cli=patch reason="bug fix"` — the trailer is the author's explicit accountability, and the reason string is reviewable. Two escape hatches stay in place: `skip` zeroes the level, and an override on a surface that wasn't actually touched is ignored (no rubber-stamping unrelated bumps).
+
 **Gotcha:** anything under `.github/workflows/**`, `.claude-plugin/**`, `commands/**`, `agents/**`, `hooks/**`, `scripts/release.sh`, `src/shipyard/cli/**`, `src/shipyard/runners/**`, or `src/shipyard/config/**` triggers the `ci` skill's path map (`scripts/skill_path_map.json`). Update this SKILL.md in the same PR — or use the `Skill-Update: skip` trailer with a real reason.
 
 **Manual release fallback:** `./scripts/release.sh` still exists for emergencies but is no longer the happy path. Normal releases flow through `shipyard pr` → merge → auto-release workflow.
