@@ -131,13 +131,22 @@ class Daemon:
         )
         await self._ipc_server.start()
 
-        # Auto-heal any ship-state drift that accumulated while the
-        # daemon was down or watching the wrong repo set. Cheap: one
-        # `gh pr view --json statusCheckRollup` per active PR, then
-        # writes back only when something actually changed. Failures
-        # are logged but never block startup — the daemon is a real-
-        # time pipeline first; reconcile is a best-effort safety net.
-        asyncio.create_task(_reconcile_all_active_ships(self._config.state_dir))
+        # Continuously heal ship-state drift against GitHub truth.
+        # Webhook events alone can't keep state accurate — re-runs get
+        # new run_ids and old events don't match, failed dispatched_run
+        # updates can be missed during daemon downtime, manual GH
+        # interventions (re-running a failed check, merging via the
+        # web UI) bypass the webhook path entirely. Periodic reconcile
+        # closes every one of those gaps.
+        #
+        # Cost: one `gh pr view --json statusCheckRollup` per active PR
+        # every 30s. At 5 active PRs that's 600/hr — 12% of the 5000/hr
+        # authenticated REST budget. Existing GUI polling already uses
+        # ~60/hr per repo, so this is a marginal add.
+        #
+        # First tick runs immediately so startup drift heals without
+        # the 30s initial delay.
+        asyncio.create_task(_reconcile_loop(self._config.state_dir))
 
     async def run(self) -> None:
         """Block until a stop is requested."""
@@ -321,10 +330,46 @@ def read_daemon_status(state_dir: Path) -> dict[str, object] | None:
     return None
 
 
+RECONCILE_INTERVAL_SECONDS = 30
+"""How often the daemon re-fetches statusCheckRollup for every active PR.
+
+Short enough to feel near-live for humans watching the GUI, long enough
+to keep the REST call count well inside GitHub's 5000/hr budget even
+with a dozen active PRs. Tuned for a single-user menu-bar deployment —
+lower this if you need real-time freshness, raise it if you have more
+active PRs than REST budget tolerates."""
+
+
+async def _reconcile_loop(state_dir: Path) -> None:
+    """Continuously heal ship-state drift against GitHub truth.
+
+    This is the definitive fix for the class of bugs where:
+      * a failed check got re-run on GitHub but the new run_id didn't
+        match any dispatched_run entry → event dropped → stale "failed"
+      * a manual merge / close on GitHub bypassed our webhook path
+      * a daemon outage dropped state-transition events that would
+        have resolved the drift
+
+    First tick runs immediately so startup drift heals without a 30s
+    initial delay. Subsequent ticks on RECONCILE_INTERVAL_SECONDS.
+    Cancellation propagates cleanly through the asyncio.sleep.
+    """
+    while True:
+        try:
+            await _reconcile_all_active_ships(state_dir)
+        except asyncio.CancelledError:  # pragma: no cover — shutdown path
+            raise
+        except Exception as exc:  # noqa: BLE001 — must never crash daemon
+            logger.warning("reconcile loop: iteration failed: %s", exc)
+        try:
+            await asyncio.sleep(RECONCILE_INTERVAL_SECONDS)
+        except asyncio.CancelledError:  # pragma: no cover — shutdown path
+            return
+
+
 async def _reconcile_all_active_ships(state_dir: Path) -> None:
     """Best-effort: for every active ship-state file, pull the current
-    CI rollup from GitHub and write back any changes. Runs once at
-    daemon startup as a safety net against missed webhook events.
+    CI rollup from GitHub and write back any changes.
 
     Runs in the asyncio loop but shells out to `gh` via a thread so a
     slow GitHub response doesn't stall the event loop. Errors are
