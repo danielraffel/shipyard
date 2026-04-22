@@ -2773,8 +2773,11 @@ def ship(
         if not ctx.json_mode:
             render_message(f"Found existing PR #{pr_info.number}")
     else:
-        pr_body = _compose_pr_body(ctx.config)
-        pr_info = create_pr(branch, base, f"Ship {branch}", pr_body)
+        from shipyard.ship.pr_text import compose_pr_body, compose_pr_title
+
+        pr_title = compose_pr_title(branch)
+        pr_body = compose_pr_body(config=ctx.config)
+        pr_info = create_pr(branch, base, pr_title, pr_body)
         if not ctx.json_mode:
             render_message(f"Created PR #{pr_info.number}")
 
@@ -4903,32 +4906,12 @@ def _update_ship_state_from_job(
 
 
 def _compose_pr_body(config: Config) -> str:
-    """Build the PR body for a freshly-opened ship, including advisory
-    lane annotations.
+    """Legacy entry point preserved for any callers importing this
+    name from cli.py. New code should import directly from
+    ``shipyard.ship.pr_text``."""
+    from shipyard.ship.pr_text import compose_pr_body
 
-    When the resolved lane policy marks one or more lanes advisory,
-    list them in the body so reviewers aren't surprised that a red
-    advisory lane still landed. Trailer-based overrides are called
-    out separately so the reviewer can audit why the default policy
-    was flipped on this PR.
-    """
-    lines: list[str] = []
-    policy = _resolve_lane_policy_for_ship(config)
-    advisory = sorted(policy.advisory_targets)
-    if advisory:
-        lines.append("## Advisory lanes")
-        lines.append(
-            "The following lanes are **advisory** — their status is "
-            "informational and does not block merge:"
-        )
-        for target in advisory:
-            suffix = (
-                " (overridden via Lane-Policy trailer)"
-                if target in policy.overrides_from_trailer
-                else ""
-            )
-            lines.append(f"- `{target}`{suffix}")
-    return "\n".join(lines)
+    return compose_pr_body(config=config)
 
 
 def _resolve_lane_policy_for_ship(config: Config) -> LanePolicy:
