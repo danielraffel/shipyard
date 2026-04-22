@@ -3,6 +3,11 @@
 All notable changes to Shipyard are documented here. Each entry links
 to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
+<a id="v0227"></a>
+## [0.22.7] - 2026-04-21
+
+- ship: reconcile must mirror healed status into evidence_snapshot (0.22.7) ([#145](https://github.com/danielraffel/Shipyard/pull/145))
+
 <a id="v0226"></a>
 ## [0.22.6] - 2026-04-21
 
@@ -270,6 +275,7 @@ to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
 - feat/shipyard phases 1 4 ([#1](https://github.com/danielraffel/Shipyard/pull/1))
 
+[0.22.7]: https://github.com/danielraffel/Shipyard/releases/tag/v0.22.7
 [0.22.6]: https://github.com/danielraffel/Shipyard/releases/tag/v0.22.6
 [0.22.5]: https://github.com/danielraffel/Shipyard/releases/tag/v0.22.5
 [0.22.4]: https://github.com/danielraffel/Shipyard/releases/tag/v0.22.4
