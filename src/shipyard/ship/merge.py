@@ -200,12 +200,16 @@ def ship(
             error="No required platforms configured in merge.require_platforms",
         )
 
-    # Find or create PR
+    # Find or create PR. Use the shared compose_pr_* helpers so the
+    # ship/merge path and the `shipyard pr` path produce identically-
+    # styled PRs — no drift between them.
     try:
         pr = find_pr_for_branch(branch)
         if pr is None:
-            title = _default_pr_title(branch)
-            body = f"Branch `{branch}` @ `{sha[:8]}`."
+            from shipyard.ship.pr_text import compose_pr_body, compose_pr_title
+
+            title = compose_pr_title(branch)
+            body = compose_pr_body(config=config)
             pr = create_pr(branch, base, title, body)
     except GhError as e:
         return ShipResult(success=False, error=f"PR creation failed: {e}")
