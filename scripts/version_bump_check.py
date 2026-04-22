@@ -505,26 +505,40 @@ def assess_surfaces(
         override = surface_trailer_override(trailers, cfg.trailer_version_bump, s.name)
         final = heur
         skip_requested = (override == "skip")
+        explicit_level = override in LEVELS
 
         if skip_requested:
             final = "none"
-        elif override in LEVELS:
-            # Only raise, never lower. And only if the surface was actually touched.
-            if heur != "none" and LEVELS.index(override) > LEVELS.index(heur):
+        elif explicit_level:
+            # An explicit `Version-Bump: <surface>=<level> reason="..."`
+            # trailer is authoritative: the author has stated the
+            # level AND accepted accountability via the reason. Use it
+            # exactly. This is *not* "can only raise" — patch can
+            # override a minor heuristic when the author judges that
+            # a large-surface-area change is still semver-patch
+            # (e.g. a bug fix that touches many files). The reason
+            # string carries the justification; a reviewer can still
+            # push back in PR review. Bailing to heuristic silently
+            # when the author asked for a lower level defeats the
+            # entire point of the trailer.
+            if heur != "none":
                 final = override
-            elif heur != "none":
-                final = heur
             else:
-                # Surface not touched; ignore the override to avoid
-                # rubber-stamping unrelated bumps.
+                # Surface not touched by paths — ignore the override
+                # to avoid rubber-stamping unrelated bumps.
                 final = "none"
 
         # Promote via conventional-commit subjects on commits that touched
         # THIS surface — never from commits that only touched unrelated
-        # paths. A plugin-only `feat:` cannot raise the SDK ceiling. An
-        # explicit `Version-Bump: <surface>=skip` on the tip commit is
-        # authoritative and is NOT raised back up by conv-commit subjects.
-        if heur != "none" and not skip_requested:
+        # paths. A plugin-only `feat:` cannot raise the SDK ceiling.
+        #
+        # Skipped when:
+        #   * `skip` trailer is set (authoritative)
+        #   * an explicit level trailer is set (also authoritative —
+        #     otherwise `feat:` in a commit subject would silently
+        #     raise an author-declared `=patch` back to `=minor`,
+        #     defeating the override's purpose).
+        if heur != "none" and not skip_requested and not explicit_level:
             conv_ceiling = "none"
             for sha, subject, body in git_log_subjects_and_bodies(base, head):
                 if is_revert_commit(subject, {}):
