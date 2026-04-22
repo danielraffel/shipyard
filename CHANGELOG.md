@@ -9,6 +9,8 @@ to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 - feat/wait primitive ([#150](https://github.com/danielraffel/Shipyard/pull/150))
 
 <a id="v0229"></a>
+## [0.24.0]
+
 ## [0.22.9] - 2026-04-21
 
 - ship: quality PR titles + bodies from commit subject/body (0.22.9) ([#148](https://github.com/danielraffel/Shipyard/pull/148))
