@@ -3,9 +3,13 @@
 All notable changes to Shipyard are documented here. Each entry links
 to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
-<a id="v0271"></a>
-## [0.27.2]
+<a id="v0272"></a>
+## [0.27.2] - 2026-04-22
 
+- fix/22 reconcile skip aged terminal ([#164](https://github.com/danielraffel/Shipyard/pull/164))
+- fix/157 preflight before pr ([#163](https://github.com/danielraffel/Shipyard/pull/163))
+
+<a id="v0271"></a>
 ## [0.27.1] - 2026-04-22
 
 - fix/155 worktree shipyard local fallback ([#162](https://github.com/danielraffel/Shipyard/pull/162))
@@ -330,6 +334,7 @@ to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
 - feat/shipyard phases 1 4 ([#1](https://github.com/danielraffel/Shipyard/pull/1))
 
+[0.27.2]: https://github.com/danielraffel/Shipyard/releases/tag/v0.27.2
 [0.27.1]: https://github.com/danielraffel/Shipyard/releases/tag/v0.27.1
 [0.27.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.27.0
 [0.26.2]: https://github.com/danielraffel/Shipyard/releases/tag/v0.26.2
