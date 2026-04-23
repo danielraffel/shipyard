@@ -10,6 +10,8 @@ to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 - release: resolve signing identity by Team ID; require all 5 secrets (#177) ([#184](https://github.com/danielraffel/Shipyard/pull/184))
 
 <a id="v0300"></a>
+## [0.31.0]
+
 ## [0.30.0] - 2026-04-22
 
 - fix: escape dynamic text before Rich markup interpolation (Codex on #170) ([#180](https://github.com/danielraffel/Shipyard/pull/180))
