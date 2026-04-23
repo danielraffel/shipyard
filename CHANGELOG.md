@@ -3,17 +3,20 @@
 All notable changes to Shipyard are documented here. Each entry links
 to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
-<a id="v0310"></a>
-## [0.32.0]
+<a id="v0320"></a>
+## [0.32.0] - 2026-04-22
 
+- daemon: 24h forced reconcile window closes aged-terminal blind spot (#176) ([#182](https://github.com/danielraffel/Shipyard/pull/182))
+- ci+release: default runner provider via repo variable (prefer Namespace) ([#187](https://github.com/danielraffel/Shipyard/pull/187))
+- daemon: widen tunnel-supervisor retry surface + restart on unexpected (#179) ([#183](https://github.com/danielraffel/Shipyard/pull/183))
+
+<a id="v0310"></a>
 ## [0.31.0] - 2026-04-22
 
 - ssh-windows: decode PowerShell CLIXML error envelope (#188) ([#189](https://github.com/danielraffel/Shipyard/pull/189))
 - release: resolve signing identity by Team ID; require all 5 secrets (#177) ([#184](https://github.com/danielraffel/Shipyard/pull/184))
 
 <a id="v0300"></a>
-## [0.31.0]
-
 ## [0.30.0] - 2026-04-22
 
 - fix: escape dynamic text before Rich markup interpolation (Codex on #170) ([#180](https://github.com/danielraffel/Shipyard/pull/180))
@@ -362,6 +365,7 @@ to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
 - feat/shipyard phases 1 4 ([#1](https://github.com/danielraffel/Shipyard/pull/1))
 
+[0.32.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.32.0
 [0.31.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.31.0
 [0.30.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.30.0
 [0.29.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.29.0
