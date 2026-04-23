@@ -4,6 +4,8 @@ All notable changes to Shipyard are documented here. Each entry links
 to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
 <a id="v0310"></a>
+## [0.32.0]
+
 ## [0.31.0] - 2026-04-22
 
 - ssh-windows: decode PowerShell CLIXML error envelope (#188) ([#189](https://github.com/danielraffel/Shipyard/pull/189))
