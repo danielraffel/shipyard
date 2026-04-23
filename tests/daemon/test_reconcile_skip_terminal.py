@@ -1,0 +1,192 @@
+"""Daemon reconcile skips aged-terminal PRs.
+
+Reconcile fetches `gh pr view --json statusCheckRollup` for every
+active ship-state every 30s. With 60+ states the budget blows past
+5000/hr. Most of those 60 are long-settled (terminal runs, last
+touched days ago). Skip reconcile for states that are BOTH:
+
+  - all dispatched_runs in a terminal status (or evidence_snapshot
+    entries all terminal for legacy states with empty runs), AND
+  - `updated_at` older than 1 hour (past the fresh window).
+
+Fresh terminal states still get reconciled — preserves the
+"reconcile heals a CI re-run that just completed" path that
+test_reconcile_emits_events.py depends on. The fresh window is
+short enough that webhook events reset it on any real state change,
+keeping the safety net intact.
+
+Task #22.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import subprocess
+import sys
+import tempfile
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+
+from shipyard.core.ship_state import DispatchedRun, ShipState, ShipStateStore
+from shipyard.daemon.controller import _reconcile_all_active_ships
+
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="reconcile shells out to gh; macOS/Linux only",
+)
+
+
+def _ship(*, pr: int, runs: list[tuple[str, str]], age_secs: int = 0) -> ShipState:
+    """Build a ShipState. `age_secs` backdates `updated_at` so tests
+    can control fresh-vs-aged."""
+    now = datetime.now(timezone.utc)
+    when = now - timedelta(seconds=age_secs)
+    dispatched = [
+        DispatchedRun(
+            target=t,
+            provider="namespace",
+            run_id=f"r-{pr}-{t}",
+            status=s,
+            started_at=when,
+            updated_at=when,
+        )
+        for t, s in runs
+    ]
+    return ShipState(
+        pr=pr,
+        repo="o/r",
+        branch=f"feat/{pr}",
+        base_branch="main",
+        head_sha="abc123",
+        policy_signature="sig",
+        dispatched_runs=dispatched,
+        evidence_snapshot={t: "pass" for t, _ in runs},
+        attempt=1,
+        created_at=when,
+        updated_at=when,
+    )
+
+
+def test_aged_terminal_ships_skip_gh_view(monkeypatch) -> None:
+    """Three aged-terminal ships + one still running. Reconcile hits
+    `gh pr view` exactly once — for the running one. Each aged ship
+    has updated_at > 1hr in the past."""
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory(prefix="sy-skip-") as tmp:
+            store = ShipStateStore(Path(tmp) / "ship")
+            store.save(_ship(
+                pr=1, runs=[("mac", "completed")], age_secs=7200,
+            ))
+            store.save(_ship(
+                pr=2, runs=[("mac", "failed")], age_secs=7200,
+            ))
+            store.save(_ship(
+                pr=3, runs=[("mac", "in_progress")], age_secs=7200,
+            ))
+
+            gh_calls: list[list[str]] = []
+
+            class _Completed:
+                stdout = '{"statusCheckRollup": []}'
+                returncode = 0
+
+            def fake_run(cmd, *a, **kw):
+                gh_calls.append(cmd)
+                return _Completed()
+
+            monkeypatch.setattr(subprocess, "run", fake_run)
+            await _reconcile_all_active_ships(Path(tmp), daemon=None)
+
+            assert len(gh_calls) == 1
+            assert "3" in gh_calls[0]
+
+    asyncio.run(run())
+
+
+def test_fresh_terminal_ships_still_reconciled(monkeypatch) -> None:
+    """A terminal ship whose updated_at is recent (< 1hr) must STILL
+    be reconciled — this is the CI-re-run recovery scenario. The
+    existing `test_reconcile_emits_event_when_target_transitions`
+    test pins this behavior."""
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory(prefix="sy-skip-") as tmp:
+            store = ShipStateStore(Path(tmp) / "ship")
+            # Fresh terminal (age=0).
+            store.save(_ship(pr=1, runs=[("mac", "failed")]))
+
+            gh_calls: list[list[str]] = []
+
+            class _Completed:
+                stdout = '{"statusCheckRollup": []}'
+                returncode = 0
+
+            monkeypatch.setattr(
+                subprocess, "run",
+                lambda c, *a, **kw: gh_calls.append(c) or _Completed(),
+            )
+            await _reconcile_all_active_ships(Path(tmp), daemon=None)
+            assert len(gh_calls) == 1, (
+                "fresh terminal states must still be reconciled — "
+                "catches CI re-runs that just completed"
+            )
+
+    asyncio.run(run())
+
+
+def test_pre_dispatch_ship_always_reconciled(monkeypatch) -> None:
+    """Pre-dispatch ship (empty dispatched_runs + empty evidence)
+    must NEVER be skipped regardless of age — we haven't even
+    observed a first rollup yet."""
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory(prefix="sy-skip-") as tmp:
+            store = ShipStateStore(Path(tmp) / "ship")
+            s = _ship(pr=42, runs=[], age_secs=86400)
+            s.evidence_snapshot = {}
+            store.save(s)
+
+            gh_calls: list[list[str]] = []
+
+            class _Completed:
+                stdout = '{"statusCheckRollup": []}'
+                returncode = 0
+
+            monkeypatch.setattr(
+                subprocess, "run",
+                lambda c, *a, **kw: gh_calls.append(c) or _Completed(),
+            )
+            await _reconcile_all_active_ships(Path(tmp), daemon=None)
+            assert len(gh_calls) == 1
+
+    asyncio.run(run())
+
+
+def test_aged_evidence_only_ship_is_skipped(monkeypatch) -> None:
+    """Legacy ship-state layout: only evidence_snapshot populated.
+    Aged + all evidence entries terminal → skip."""
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory(prefix="sy-skip-") as tmp:
+            store = ShipStateStore(Path(tmp) / "ship")
+            s = _ship(pr=7, runs=[], age_secs=7200)
+            s.evidence_snapshot = {"mac": "pass", "linux": "fail"}
+            store.save(s)
+
+            gh_calls: list[list[str]] = []
+
+            class _Completed:
+                stdout = '{"statusCheckRollup": []}'
+                returncode = 0
+
+            monkeypatch.setattr(
+                subprocess, "run",
+                lambda c, *a, **kw: gh_calls.append(c) or _Completed(),
+            )
+            await _reconcile_all_active_ships(Path(tmp), daemon=None)
+            assert gh_calls == []
+
+    asyncio.run(run())
