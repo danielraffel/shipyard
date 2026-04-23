@@ -91,10 +91,13 @@ class Daemon:
         self._pid_file: Path = self._paths.pid_file
         self._state = _RuntimeState()
         self._webhook_server: WebhookServer | None = None
+        self._webhook_port: int | None = None
+        self._webhook_secret: str | None = None
         self._ipc_server: IPCServer | None = None
         self._tunnel = TailscaleFunnelBackend()
         self._registrar = Registrar(config.state_dir)
         self._stop_event = asyncio.Event()
+        self._tunnel_supervisor_task: asyncio.Task[None] | None = None
         # Rolling 5-min dedupe set for X-GitHub-Delivery IDs. GitHub
         # retries failed deliveries with the same ID; without dedupe a
         # retry would re-broadcast an already-seen event, causing double
@@ -102,41 +105,50 @@ class Daemon:
         self._seen_delivery_ids: dict[str, float] = {}
 
     async def start(self) -> None:
+        """Bring the daemon up.
+
+        Ordering (changed in v0.26.3 — don't revert to the pre-IPC
+        sequence without reading shipyard#26):
+
+          1. Acquire the PID lock.
+          2. Load the webhook secret.
+          3. Bind the webhook HTTP server on localhost (needs a port
+             so the tunnel can target it).
+          4. **Start the IPC server immediately.** Subscribers (the
+             GUI, `shipyard wait`, `shipyard watch --follow`) can now
+             connect for ship-state-list queries and live status
+             reads regardless of tunnel state. Before this change,
+             any Tailscale hiccup at startup killed the whole daemon
+             and the GUI fell back to polling with no recovery until
+             a manual restart.
+          5. Spawn the tunnel supervisor as a background task. It
+             retries the Tailscale probe forever (capped backoff),
+             registers webhooks when the tunnel becomes ready, and
+             watches for tunnel loss mid-session.
+          6. Spawn the reconcile loop (unchanged).
+
+        `start()` only raises on truly-fatal startup errors: PID
+        lock contention, port bind failures, or socket setup
+        failures. Tunnel-related failures no longer take the daemon
+        down — they surface through `_build_status_snapshot` so
+        subscribers see an accurate tunnel state.
+        """
         self._paths.ensure_dirs()
         self._acquire_lock()
 
         # Resolve secret (keychain on macOS, file on Linux).
-        secret = secrets_mod.load_or_create(self._config.state_dir)
+        self._webhook_secret = secrets_mod.load_or_create(self._config.state_dir)
 
-        # Bring the HTTP server up first — need the bound port for
-        # the tunnel backend.
-        self._webhook_server = WebhookServer(_make_delivery_handler(secret, self))
-        port = self._webhook_server.start()
+        # Bind webhook server → port for the tunnel to target. Even
+        # if the tunnel never comes up, the port sits idle and
+        # harmless.
+        self._webhook_server = WebhookServer(
+            _make_delivery_handler(self._webhook_secret, self)
+        )
+        self._webhook_port = self._webhook_server.start()
 
-        # Bring the tunnel up.
-        try:
-            tunnel_info = await self._tunnel.start(port)
-        except (TunnelNotReadyError, TunnelStartError):
-            # If the tunnel can't come up, the daemon is still useful
-            # as a local-only subscribe host (future), but for v1 the
-            # whole point is webhook delivery. Fail fast.
-            self._webhook_server.stop()
-            self._release_lock()
-            raise
-        self._state.tunnel = tunnel_info
-        self._state.tunnel_verified_at = time.time()
-
-        # Register webhooks. URL always ends in /webhook — the server
-        # also accepts / for legacy compatibility.
-        public_url = tunnel_info.public_url.rstrip("/") + "/webhook"
-        for repo in self._config.repos:
-            try:
-                await self._registrar.ensure_registered(repo, public_url, secret)
-            except RegistrarError as exc:
-                logger.error("failed to register %s: %s", repo, exc)
-
-        # Last: the IPC server (so subscribers can connect once
-        # everything else is live).
+        # IPC server comes up here, NOT after the tunnel. See the
+        # docstring above for the rationale.
         self._ipc_server = IPCServer(
             socket_path=self._paths.socket_file,
             status_provider=self._build_status_snapshot,
@@ -144,6 +156,13 @@ class Daemon:
             ship_state_list_provider=self._build_ship_state_list,
         )
         await self._ipc_server.start()
+
+        # Tunnel supervisor: brings up Funnel (retrying forever with
+        # capped backoff), registers webhooks when it's up, watches
+        # for mid-session loss.
+        self._tunnel_supervisor_task = asyncio.create_task(
+            self._tunnel_supervisor_loop()
+        )
 
         # Continuously heal ship-state drift against GitHub truth.
         # Webhook events alone can't keep state accurate — re-runs get
@@ -174,8 +193,17 @@ class Daemon:
         await self._stop_event.wait()
 
     async def stop(self) -> None:
-        # Fire the event so a concurrent run() returns.
+        # Fire the event so a concurrent run() and the tunnel
+        # supervisor both observe the stop.
         self._stop_event.set()
+
+        # Cancel the tunnel supervisor before IPC shutdown so it
+        # doesn't try to push a status update into a closed server.
+        if self._tunnel_supervisor_task is not None:
+            self._tunnel_supervisor_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._tunnel_supervisor_task
+            self._tunnel_supervisor_task = None
 
         if self._ipc_server is not None:
             await self._ipc_server.stop()
@@ -198,6 +226,132 @@ class Daemon:
 
     async def _request_stop(self) -> None:
         self._stop_event.set()
+
+    # Capped exponential backoff for tunnel retry. Starts aggressive
+    # for fast recovery from tailscaled warmup / DERP fallback, caps
+    # at 5min so a tailnet that's genuinely offline for hours doesn't
+    # spam the probe (still retries forever, just rarely).
+    _TUNNEL_RETRY_BACKOFFS: tuple[float, ...] = (
+        2.0, 6.0, 15.0, 30.0, 60.0, 120.0, 300.0,
+    )
+    # Once the tunnel is up, verify cadence. A tailnet that drops mid-
+    # session (sleep/wake, VPN switch, admin panel change) is detected
+    # within this window and the supervisor kicks a re-establish.
+    _TUNNEL_VERIFY_INTERVAL_SECS: float = 30.0
+
+    async def _tunnel_supervisor_loop(self) -> None:
+        """Bring the tunnel up, keep it up, never let it kill the daemon.
+
+        Three phases run in sequence inside an outer while-not-stopped
+        loop:
+
+          * **Bring-up.** Probe + start the tunnel. On failure, wait
+            `_TUNNEL_RETRY_BACKOFFS[i]` seconds (capped) and retry.
+            `_stop_event` preempts the sleep so shutdown is prompt.
+          * **Register webhooks.** Idempotent; runs every time the
+            tunnel comes up (new tunnel → same Tailscale DNS name →
+            existing hook still valid; the registrar dedupes).
+          * **Watch.** Verify every
+            `_TUNNEL_VERIFY_INTERVAL_SECS`. If the verify fails, flip
+            tunnel state to None (so IPC status reports the loss) and
+            loop back to bring-up.
+
+        The daemon never exits because of tunnel trouble. IPC stays
+        up, `shipyard wait` + GUI fast-path keeps working on the
+        local store, and live webhook delivery resumes automatically
+        whenever the tunnel recovers.
+        """
+        try:
+            while not self._stop_event.is_set():
+                tunnel_info = await self._bring_up_tunnel()
+                if tunnel_info is None:
+                    return  # stopped during bring-up
+
+                self._state.tunnel = tunnel_info
+                self._state.tunnel_verified_at = time.time()
+                logger.info("tunnel ready: %s", tunnel_info.public_url)
+                await self._register_webhooks(tunnel_info)
+
+                # Watch loop: periodically re-verify. When verify
+                # fails, fall through to the outer loop which restarts
+                # bring-up.
+                await self._watch_tunnel()
+                # Watch exited → either stop-requested or tunnel lost.
+                if self._stop_event.is_set():
+                    return
+                logger.warning(
+                    "tunnel lost mid-session; re-establishing (URL was %s)",
+                    tunnel_info.public_url,
+                )
+                self._state.tunnel = None
+                self._state.tunnel_verified_at = None
+        except asyncio.CancelledError:  # pragma: no cover — shutdown
+            raise
+        except Exception as exc:  # noqa: BLE001 — must never crash daemon
+            logger.error("tunnel supervisor crashed: %s", exc, exc_info=True)
+
+    async def _bring_up_tunnel(self) -> TunnelInfo | None:
+        """Retry tunnel.start indefinitely (capped backoff) until it
+        succeeds or stop is requested."""
+        attempt = 0
+        assert self._webhook_port is not None  # start() invariant
+        while not self._stop_event.is_set():
+            try:
+                return await self._tunnel.start(self._webhook_port)
+            except (TunnelNotReadyError, TunnelStartError) as exc:
+                wait_secs = self._TUNNEL_RETRY_BACKOFFS[
+                    min(attempt, len(self._TUNNEL_RETRY_BACKOFFS) - 1)
+                ]
+                attempt += 1
+                logger.info(
+                    "tunnel bring-up attempt %d failed: %s "
+                    "(retrying in %.0fs)",
+                    attempt, exc, wait_secs,
+                )
+                # Sleep preempted by stop_event so shutdown doesn't
+                # wait out the full backoff.
+                try:
+                    await asyncio.wait_for(
+                        self._stop_event.wait(), timeout=wait_secs
+                    )
+                    return None  # stop requested
+                except TimeoutError:
+                    continue
+        return None
+
+    async def _register_webhooks(self, tunnel_info: TunnelInfo) -> None:
+        """Idempotent webhook registration. Safe to call on every
+        tunnel bring-up — Registrar reuses existing hook IDs."""
+        assert self._webhook_secret is not None
+        public_url = tunnel_info.public_url.rstrip("/") + "/webhook"
+        for repo in self._config.repos:
+            try:
+                await self._registrar.ensure_registered(
+                    repo, public_url, self._webhook_secret
+                )
+            except RegistrarError as exc:
+                logger.error("failed to register %s: %s", repo, exc)
+
+    async def _watch_tunnel(self) -> None:
+        """Poll `tunnel.verify` every `_TUNNEL_VERIFY_INTERVAL_SECS`
+        and return once the verification fails or stop is requested."""
+        assert self._webhook_port is not None
+        while not self._stop_event.is_set():
+            try:
+                await asyncio.wait_for(
+                    self._stop_event.wait(),
+                    timeout=self._TUNNEL_VERIFY_INTERVAL_SECS,
+                )
+                return  # stop requested
+            except TimeoutError:
+                pass
+            try:
+                ok = await self._tunnel.verify(self._webhook_port)
+            except Exception as exc:  # noqa: BLE001 — verify must never crash the loop
+                logger.warning("tunnel verify raised: %s", exc)
+                return
+            if not ok:
+                return
 
     async def _on_delivery(
         self,
