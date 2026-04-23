@@ -3,9 +3,13 @@
 All notable changes to Shipyard are documented here. Each entry links
 to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
-<a id="v0272"></a>
-## [0.28.0]
+<a id="v0280"></a>
+## [0.28.0] - 2026-04-22
 
+- cli: surface target error_message under the run/ship summary table ([#170](https://github.com/danielraffel/Shipyard/pull/170))
+- release: sign + notarize the macOS CLI binary ([#165](https://github.com/danielraffel/Shipyard/pull/165))
+
+<a id="v0272"></a>
 ## [0.27.2] - 2026-04-22
 
 - fix/22 reconcile skip aged terminal ([#164](https://github.com/danielraffel/Shipyard/pull/164))
@@ -336,6 +340,7 @@ to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
 - feat/shipyard phases 1 4 ([#1](https://github.com/danielraffel/Shipyard/pull/1))
 
+[0.28.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.28.0
 [0.27.2]: https://github.com/danielraffel/Shipyard/releases/tag/v0.27.2
 [0.27.1]: https://github.com/danielraffel/Shipyard/releases/tag/v0.27.1
 [0.27.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.27.0
