@@ -4,6 +4,8 @@ All notable changes to Shipyard are documented here. Each entry links
 to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
 <a id="v0271"></a>
+## [0.27.2]
+
 ## [0.27.1] - 2026-04-22
 
 - fix/155 worktree shipyard local fallback ([#162](https://github.com/danielraffel/Shipyard/pull/162))
