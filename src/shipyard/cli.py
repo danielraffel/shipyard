@@ -2823,7 +2823,47 @@ def ship(
     if _should_auto_create_base(base, auto_create_base):
         _maybe_auto_create_base_branch(ctx, base)
 
-    # Push branch
+    # ── Preflight BEFORE opening the PR ─────────────────────────
+    # shipyard#157: opening the PR and then aborting on a preflight
+    # failure (e.g. a flaky ssh probe, a worktree missing its
+    # .shipyard.local overlay) leaves the user with a stranded PR
+    # that was never dispatched, no CI runs kicked off, and no
+    # ship-state progress. Running preflight first means any
+    # reachability / config failure exits before we touch GitHub at
+    # all. If preflight passes, the PR creation + push below are
+    # safe to proceed.
+    #
+    # Preflight itself doesn't depend on the PR existing — it only
+    # needs the config, the target list, and the local repo layout.
+    config = ctx.config
+    target_names = list(config.targets.keys())
+    if not target_names:
+        render_error("No targets configured")
+        sys.exit(1)
+    dispatcher = _make_dispatcher(config)
+    try:
+        preflight = run_submission_preflight(
+            config,
+            target_names=target_names,
+            dispatcher=dispatcher,
+            allow_root_mismatch=allow_root_mismatch,
+            allow_unreachable_targets=allow_unreachable_targets,
+            skip_targets=skip_target,
+        )
+    except BackendUnreachableError as exc:
+        render_error(str(exc))
+        sys.exit(EXIT_BACKEND_UNREACHABLE)
+    except ValueError as exc:
+        render_error(str(exc))
+        sys.exit(1)
+
+    if not ctx.json_mode:
+        for warning in preflight.warnings:
+            render_message(warning, style="yellow")
+
+    # Push branch (only after preflight passed — no orphan PR if
+    # preflight later rejects something we'd otherwise have pushed
+    # a commit for).
     subprocess.run(["git", "push", "-u", "origin", branch], capture_output=True)
 
     # Find or create PR
@@ -2843,13 +2883,6 @@ def ship(
 
     if not pr_info:
         render_error("Failed to create or find PR")
-        sys.exit(1)
-
-    # Run validation
-    config = ctx.config
-    target_names = list(config.targets.keys())
-    if not target_names:
-        render_error("No targets configured")
         sys.exit(1)
 
     # ── Durable ship-state: detect or create ────────────────────
@@ -2928,27 +2961,9 @@ def ship(
         existing_state.touch()
         ship_state_store.save(existing_state)
 
-    dispatcher = _make_dispatcher(config)
-    try:
-        preflight = run_submission_preflight(
-            config,
-            target_names=target_names,
-            dispatcher=dispatcher,
-            allow_root_mismatch=allow_root_mismatch,
-            allow_unreachable_targets=allow_unreachable_targets,
-            skip_targets=skip_target,
-        )
-    except BackendUnreachableError as exc:
-        render_error(str(exc))
-        sys.exit(EXIT_BACKEND_UNREACHABLE)
-    except ValueError as exc:
-        render_error(str(exc))
-        sys.exit(1)
-
-    if not ctx.json_mode:
-        for warning in preflight.warnings:
-            render_message(f"warning: {warning}", style="bold yellow")
-
+    # Preflight already ran above (before PR creation, per
+    # shipyard#157). `preflight`, `dispatcher`, and `target_names`
+    # are in scope here.
     target_names = [n for n in target_names if n not in set(skip_target)]
     if not target_names:
         render_error("No targets remain after --skip-target filtering.")
