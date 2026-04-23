@@ -3,9 +3,15 @@
 All notable changes to Shipyard are documented here. Each entry links
 to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
-<a id="v0340"></a>
-## [0.35.0]
+<a id="v0350"></a>
+## [0.35.0] - 2026-04-23
 
+- ssh-windows: persist raw bundle-apply stderr to disk (#200) ([#201](https://github.com/danielraffel/Shipyard/pull/201))
+- preflight: annotate target-unreachable errors with daemon version skew (#197) ([#199](https://github.com/danielraffel/Shipyard/pull/199))
+- ci+release: per-target runner provider override (#193) ([#196](https://github.com/danielraffel/Shipyard/pull/196))
+- test(executor): widen streaming heartbeat flake window (#186) ([#194](https://github.com/danielraffel/Shipyard/pull/194))
+
+<a id="v0340"></a>
 ## [0.34.0] - 2026-04-23
 
 - ci+release: --break-system-packages for Namespace macOS runners ([#191](https://github.com/danielraffel/Shipyard/pull/191))
@@ -378,6 +384,7 @@ to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
 - feat/shipyard phases 1 4 ([#1](https://github.com/danielraffel/Shipyard/pull/1))
 
+[0.35.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.35.0
 [0.34.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.34.0
 [0.33.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.33.0
 [0.32.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.32.0
