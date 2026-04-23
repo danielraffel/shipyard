@@ -28,7 +28,7 @@ import os
 import signal
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from shipyard.daemon import events as events_mod
 from shipyard.daemon import secrets as secrets_mod
@@ -585,6 +585,24 @@ lower this if you need real-time freshness, raise it if you have more
 active PRs than REST budget tolerates."""
 
 
+RECONCILE_TERMINAL_RUN_STATUSES = frozenset(
+    {"completed", "passed", "failed", "cancelled", "canceled"}
+)
+"""Run statuses that mean "this check has reached a settled state."
+
+Shared with `_is_aged_terminal` below. States whose runs are ALL in
+this set AND whose `updated_at` is past the fresh window are skipped
+by reconcile — cuts the daemon's gh-API budget on machines with a
+long shipyard history. See task #22."""
+
+RECONCILE_FRESH_WINDOW_SECONDS = 3600
+"""Grace period after a ship-state's last update during which it's
+still reconciled even if all runs are terminal. Covers CI re-runs
+that complete quickly after a failure — updated_at still reflects
+the recent activity, so reconcile picks up the transition. Past
+this window, terminal states are treated as settled and skipped."""
+
+
 async def _reconcile_loop(state_dir: Path, daemon: Daemon | None = None) -> None:
     """Continuously heal ship-state drift against GitHub truth.
 
@@ -633,6 +651,35 @@ async def _reconcile_all_active_ships(
     # (pr, repo, target, before_status, after_status)
     transition_t = tuple[int, str, str, str, str]
 
+    def _is_aged_terminal(state: Any) -> bool:
+        """True iff every run is terminal AND the state is past its
+        fresh window (so reconcile can skip it this tick without
+        missing a real CI transition)."""
+        runs = state.dispatched_runs or []
+        if not runs:
+            evidence = state.evidence_snapshot or {}
+            if not evidence:
+                return False  # pre-dispatch — always reconcile
+            all_terminal = all(
+                v in {"pass", "fail", "reused", "skipped"}
+                for v in evidence.values()
+            )
+        else:
+            all_terminal = all(
+                (r.status or "").lower() in RECONCILE_TERMINAL_RUN_STATUSES
+                for r in runs
+            )
+        if not all_terminal:
+            return False
+        updated = state.updated_at
+        if updated is None:
+            return False
+        from datetime import datetime as _dt
+        from datetime import timezone as _tz
+
+        age_secs = (_dt.now(_tz.utc) - updated).total_seconds()
+        return age_secs > RECONCILE_FRESH_WINDOW_SECONDS
+
     def _reconcile_sync() -> tuple[int, list[transition_t]]:
         """Returns (healed count, list of per-target transitions)."""
         import subprocess as _sp
@@ -640,7 +687,20 @@ async def _reconcile_all_active_ships(
         store = ShipStateStore(state_dir / "ship")
         healed = 0
         transitions: list[transition_t] = []
+        skipped_terminal = 0
         for state in store.list_active():
+            if _is_aged_terminal(state):
+                # Aged-terminal ship — every run is in a terminal
+                # status AND the state hasn't been updated in the
+                # fresh window. No reconcile drift expected; if CI
+                # actually re-runs, the check_run/check_suite
+                # webhook refreshes updated_at and the next tick
+                # picks it up (no longer aged). Safety net is
+                # still intact for the webhook-missed case — the
+                # updated_at timestamp advances on every observed
+                # change, so any drift resets the aging clock.
+                skipped_terminal += 1
+                continue
             try:
                 raw = _sp.run(
                     [
@@ -683,6 +743,11 @@ async def _reconcile_all_active_ships(
             logger.info(
                 "reconcile: %d active ship-state(s) updated", healed
             )
+        # The skipped-terminal count is intentionally NOT logged —
+        # on a machine with 60 terminal ships that'd be a line every
+        # 30s with no signal. The relevant view is `shipyard cleanup
+        # --ship-state` which surfaces aged-terminal states for
+        # optional archiving.
         if daemon is not None:
             for pr, repo, target, before, after in transitions:
                 await daemon.broadcast_reconcile_healed(
