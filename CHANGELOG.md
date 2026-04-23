@@ -4,6 +4,8 @@ All notable changes to Shipyard are documented here. Each entry links
 to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
 <a id="v0290"></a>
+## [0.30.0]
+
 ## [0.29.0] - 2026-04-22
 
 - perf: defer rich import + bump PyInstaller Python to 3.13 (#28) ([#174](https://github.com/danielraffel/Shipyard/pull/174))
