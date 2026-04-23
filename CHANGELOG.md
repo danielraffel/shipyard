@@ -3,9 +3,12 @@
 All notable changes to Shipyard are documented here. Each entry links
 to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
-<a id="v0290"></a>
-## [0.30.0]
+<a id="v0300"></a>
+## [0.30.0] - 2026-04-22
 
+- fix: escape dynamic text before Rich markup interpolation (Codex on #170) ([#180](https://github.com/danielraffel/Shipyard/pull/180))
+
+<a id="v0290"></a>
 ## [0.29.0] - 2026-04-22
 
 - perf: defer rich import + bump PyInstaller Python to 3.13 (#28) ([#174](https://github.com/danielraffel/Shipyard/pull/174))
@@ -349,6 +352,7 @@ to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
 - feat/shipyard phases 1 4 ([#1](https://github.com/danielraffel/Shipyard/pull/1))
 
+[0.30.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.30.0
 [0.29.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.29.0
 [0.28.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.28.0
 [0.27.2]: https://github.com/danielraffel/Shipyard/releases/tag/v0.27.2
