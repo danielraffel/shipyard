@@ -116,6 +116,36 @@ def test_failing_target_without_error_message_is_silent() -> None:
     assert "✗ mac" not in output
 
 
+def test_error_text_with_brackets_does_not_crash_markup() -> None:
+    """Codex-review P1 catch on #170: error messages like `[Errno 2]`
+    used to be interpolated into a markup-enabled `console.print`,
+    which would treat `[Errno 2]` as a style tag. Worst case: Rich
+    raises `MarkupError` mid-flush and the whole run summary fails
+    to render. Fix: every dynamic segment goes through
+    `rich.markup.escape`.
+
+    This test asserts the render *completes* (no exception) and that
+    the literal bracketed text appears in output as plain characters,
+    not as a style tag interpretation.
+    """
+    now = datetime.now(timezone.utc)
+    errored = TargetResult(
+        target_name="ubuntu",
+        platform="linux-arm64",
+        status=TargetStatus.ERROR,
+        backend="ssh",
+        started_at=now,
+        completed_at=now,
+        duration_secs=14.0,
+        log_path="/tmp/shipyard/logs/ubuntu[2].log",
+        error_message="Bundle apply failed: [Errno 2] No such file or directory",
+    )
+    output = _render(_job_with_results([errored]))
+    assert "[Errno 2]" in output
+    assert "Bundle apply failed" in output
+    assert "ubuntu[2].log" in output
+
+
 def test_reused_target_skipped() -> None:
     now = datetime.now(timezone.utc)
     reused = TargetResult(

@@ -122,7 +122,18 @@ def _render_target_errors(job: Job) -> None:
     Without this, the summary table collapses a bundle-upload failure
     or remote-apply failure into a bare "error" cell and the user has
     to `cat` the log file by hand to know what happened. See #169.
+
+    Backend error text is *uncontrolled* — it comes from raw exception
+    strings (``str(exc)``, SSH stderr, remote cmd stderr) and often
+    carries bracketed fragments like ``[Errno 2]`` or
+    ``[WinError 32]``. Rich's markup parser would otherwise treat
+    those as style tags and either render garbage or raise
+    ``MarkupError`` mid-flush, turning a target failure into a CLI
+    rendering crash. Pass every dynamic segment through
+    ``rich.markup.escape``. Codex-review catch post-#170.
     """
+    from rich.markup import escape
+
     for name in job.target_names:
         result = job.results.get(name)
         if result is None or result.passed:
@@ -137,9 +148,9 @@ def _render_target_errors(job: Job) -> None:
         first_line = msg.splitlines()[0].strip()
         if len(first_line) > 200:
             first_line = first_line[:200].rstrip() + "…"
-        console.print(f"  [red]✗ {name}:[/] {first_line}")
+        console.print(f"  [red]✗ {escape(name)}:[/] {escape(first_line)}")
         if result.log_path:
-            console.print(f"    [dim]log: {result.log_path}[/]")
+            console.print(f"    [dim]log: {escape(result.log_path)}[/]")
 
 
 def render_status(
