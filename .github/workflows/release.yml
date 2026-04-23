@@ -94,11 +94,49 @@ jobs:
       # Skipped on forks / PRs from outside contributors (APPLE_ID
       # secret absent) — the install.sh xattr-strip + ad-hoc re-sign
       # fallback still handles those.
-      - name: Import signing identity (macOS)
-        id: import_signing_identity
-        if: startsWith(matrix.target, 'macos-') && env.APPLE_ID != ''
+      # Signing is enabled only when ALL five secrets are present.
+      # Gating on just APPLE_ID (pre-#177) let a partial rotation —
+      # e.g. new APPLE_ID pasted but the p12 not re-uploaded yet —
+      # run the signing path and fail mid-release on `base64 -d` or
+      # `codesign`. Requiring all five makes the no-op fallback match
+      # the docs ("when all five are set, we sign; otherwise ad-hoc").
+      #
+      # GitHub Actions does NOT evaluate `secrets.*` in step-level
+      # `if:` conditions (documented limitation; condition evaluates
+      # to an unexpanded string which is truthy → step would run
+      # even when the secret is missing, #184). Work around it with
+      # a detect-readiness step whose env block populates the
+      # secrets and whose bash body emits a boolean output; later
+      # `if:` conditions branch on that output.
+      - name: Detect signing readiness (macOS)
+        id: detect_signing_readiness
+        if: startsWith(matrix.target, 'macos-')
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
+          TEAM_ID: ${{ secrets.TEAM_ID }}
+          APP_SPECIFIC_PASSWORD: ${{ secrets.APP_SPECIFIC_PASSWORD }}
+          SIGNING_CERT_P12_BASE64: ${{ secrets.SIGNING_CERT_P12_BASE64 }}
+          SIGNING_CERT_PASSWORD: ${{ secrets.SIGNING_CERT_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${APPLE_ID:-}" ] \
+             && [ -n "${TEAM_ID:-}" ] \
+             && [ -n "${APP_SPECIFIC_PASSWORD:-}" ] \
+             && [ -n "${SIGNING_CERT_P12_BASE64:-}" ] \
+             && [ -n "${SIGNING_CERT_PASSWORD:-}" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "All five signing secrets present; enabling signing path."
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "One or more signing secrets missing; falling back to ad-hoc."
+          fi
+
+      - name: Import signing identity (macOS)
+        id: import_signing_identity
+        if: steps.detect_signing_readiness.outputs.enabled == 'true'
+        env:
+          TEAM_ID: ${{ secrets.TEAM_ID }}
           SIGNING_CERT_P12_BASE64: ${{ secrets.SIGNING_CERT_P12_BASE64 }}
           SIGNING_CERT_PASSWORD: ${{ secrets.SIGNING_CERT_PASSWORD }}
         run: |
@@ -121,37 +159,45 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: \
             -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
 
-          # Emit the keychain path so the cleanup step can delete it
-          # regardless of later failures.
+          # Resolve the signing identity by SHA-1 fingerprint, keyed
+          # on the Team ID rather than the cert subject CN (which was
+          # hardcoded to "Daniel Raffel" pre-#177 and broke forks / org
+          # certs / maintainer rotation). `security find-identity`
+          # prints lines like `  1) <HASH> "Developer ID Application:
+          # <any name> (<TEAM_ID>)"` — we grep on `(TEAM_ID)` and
+          # pull the hash.
+          IDENTITY_HASH="$(security find-identity -v -p codesigning "$KEYCHAIN" \
+            | grep -m1 "(${TEAM_ID})" \
+            | awk '{print $2}')"
+          if [ -z "$IDENTITY_HASH" ]; then
+            echo "::error::No Developer ID Application identity matching Team ID ${TEAM_ID} found in the imported keychain." >&2
+            exit 1
+          fi
+          echo "Resolved signing identity: $IDENTITY_HASH"
+
+          # Emit identity + keychain path so downstream steps can sign
+          # regardless of the cert subject, and the cleanup step can
+          # delete the keychain on any exit path.
+          echo "identity=$IDENTITY_HASH" >> "$GITHUB_OUTPUT"
           echo "keychain=$KEYCHAIN" >> "$GITHUB_OUTPUT"
 
       - name: Build binary
-        # When signing is enabled on a macOS matrix row, the keychain
-        # from the import step above is already the default; TEAM_ID
-        # is read from the secret. PyInstaller's --codesign-identity
-        # signs every embedded dylib (incl. Python.framework) with
-        # our Team ID so dyld's runtime Team-ID check passes. On
-        # non-macOS rows, or when the secret is absent (forks), it
-        # falls through to a plain ad-hoc build. `shell: bash` so
-        # Windows uses Git-for-Windows bash instead of PowerShell
-        # (the `case` and `set -euo pipefail` below are bashisms).
+        # When signing is enabled on a macOS matrix row, the import
+        # step above already imported the cert and resolved the
+        # identity to a SHA-1 fingerprint. PyInstaller's
+        # --codesign-identity signs every embedded dylib (incl.
+        # Python.framework) with that identity so dyld's runtime
+        # Team-ID check passes. On non-macOS rows, or when any of the
+        # five signing secrets is missing, we fall through to a plain
+        # ad-hoc build. `shell: bash` so Windows uses Git-for-Windows
+        # bash instead of PowerShell.
         shell: bash
         env:
-          TEAM_ID: ${{ secrets.TEAM_ID }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          TARGET: ${{ matrix.target }}
+          SIGNING_IDENTITY: ${{ steps.import_signing_identity.outputs.identity }}
           ARTIFACT: ${{ matrix.artifact }}
         run: |
           set -euo pipefail
-          SIGNING_IDENTITY=""
-          case "$TARGET" in
-            macos-*)
-              if [ -n "${APPLE_ID:-}" ]; then
-                SIGNING_IDENTITY="Developer ID Application: Daniel Raffel (${TEAM_ID})"
-              fi
-              ;;
-          esac
-          if [ -n "$SIGNING_IDENTITY" ]; then
+          if [ -n "${SIGNING_IDENTITY:-}" ]; then
             pyinstaller --onefile \
               --name "$ARTIFACT" \
               --codesign-identity "$SIGNING_IDENTITY" \
@@ -163,11 +209,12 @@ jobs:
           fi
 
       - name: Re-sign with hardened runtime + notarize (macOS)
-        if: startsWith(matrix.target, 'macos-') && env.APPLE_ID != ''
+        if: steps.import_signing_identity.outputs.identity != ''
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           TEAM_ID: ${{ secrets.TEAM_ID }}
           APP_SPECIFIC_PASSWORD: ${{ secrets.APP_SPECIFIC_PASSWORD }}
+          SIGNING_IDENTITY: ${{ steps.import_signing_identity.outputs.identity }}
         run: |
           set -euo pipefail
           BINARY="dist/${{ matrix.artifact }}"
@@ -177,9 +224,12 @@ jobs:
           # Mach-O to add --options runtime (hardened runtime) and
           # --timestamp (secure timestamp) — both required for
           # notarytool to accept the submission. Team IDs already match
-          # so dyld's runtime check passes.
+          # so dyld's runtime check passes. `--sign` takes the SHA-1
+          # fingerprint resolved at import time, so any Developer ID
+          # cert on Team ID ${TEAM_ID} works (forks, org certs,
+          # rotations) — no hardcoded subject CN. See #177.
           codesign --force --options runtime --timestamp \
-            --sign "Developer ID Application: Daniel Raffel (${TEAM_ID})" \
+            --sign "$SIGNING_IDENTITY" \
             "$BINARY"
           codesign -dv --verbose=4 "$BINARY"
 
