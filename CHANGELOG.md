@@ -3,9 +3,12 @@
 All notable changes to Shipyard are documented here. Each entry links
 to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
-<a id="v0320"></a>
-## [0.33.0]
+<a id="v0330"></a>
+## [0.33.0] - 2026-04-23
 
+- config: compare main_checkout to repo toplevel, not cwd (#178) ([#185](https://github.com/danielraffel/Shipyard/pull/185))
+
+<a id="v0320"></a>
 ## [0.32.0] - 2026-04-22
 
 - daemon: 24h forced reconcile window closes aged-terminal blind spot (#176) ([#182](https://github.com/danielraffel/Shipyard/pull/182))
@@ -367,6 +370,7 @@ to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
 - feat/shipyard phases 1 4 ([#1](https://github.com/danielraffel/Shipyard/pull/1))
 
+[0.33.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.33.0
 [0.32.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.32.0
 [0.31.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.31.0
 [0.30.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.30.0
