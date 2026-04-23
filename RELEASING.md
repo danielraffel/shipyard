@@ -77,7 +77,9 @@ Five secrets on the repo (all `gh secret set NAME`):
 | `SIGNING_CERT_P12_BASE64` | `base64 -i DeveloperID.p12` of your exported Developer ID Application cert + private key |
 | `SIGNING_CERT_PASSWORD` | Export password for the .p12 |
 
-When all five are set, the release workflow's macOS matrix jobs import the cert into a temp keychain, pass `--codesign-identity "Developer ID Application: Daniel Raffel (TEAM_ID)"` to PyInstaller so every embedded dylib (notably `Python.framework`) gets signed with our Team ID at collection time, then re-sign the outer Mach-O with `--options runtime --timestamp` and submit to `xcrun notarytool submit --wait`. Users downloading a signed binary get clean execution on macOS 26.3+ with no xattr dance.
+When **all five** are set, the release workflow's macOS matrix jobs import the cert into a temp keychain, resolve the Developer ID Application identity by **Team ID** (via `security find-identity -v -p codesigning | grep "(TEAM_ID)"` — not by subject CN, so forks / org-owned certs / maintainer rotation all work), pass the resulting SHA-1 fingerprint to PyInstaller's `--codesign-identity` so every embedded dylib (notably `Python.framework`) gets signed at collection time, then re-sign the outer Mach-O with `--options runtime --timestamp` and submit to `xcrun notarytool submit --wait`. Users downloading a signed binary get clean execution on macOS 26.3+ with no xattr dance.
+
+The gate is all-five-present (not just `APPLE_ID`). A partial rotation — say a new `APPLE_ID` pasted in but the new `SIGNING_CERT_P12_BASE64` not yet uploaded — used to run the signing path and fail mid-release on `base64 -d`. Now the step cleanly no-ops in that state and the ad-hoc fallback publishes normally.
 
 **Why PyInstaller has to see the identity, not just the post-build step.** An earlier iteration signed only the outer Mach-O after PyInstaller had already bundled an ad-hoc-signed `Python.framework` inside. dyld's "same Team ID" check then rejected the load at first launch:
 
