@@ -124,3 +124,112 @@ def test_install_dir_override_does_not_affect_version_resolution() -> None:
     )
     assert config["INSTALL_DIR"] == "/tmp/foo"
     assert config["API_PATH"] == "releases/tags/v0.22.1"
+
+
+# -- #219: post-install smoke + remediation -------------------------
+# install.sh now runs the freshly-installed binary's `--version` and
+# fails loud (exit 1, specific error messages) if it can't launch.
+# This is the first line of defense against the v0.42.0 taskgated
+# SIGKILL class of bug where `codesign --verify` passes but the
+# binary dies at runtime. Testability hook: SHIPYARD_SKIP_DOWNLOAD=1
+# reuses an existing binary at $INSTALL_DIR/shipyard so we can
+# inject a stub that succeeds or fails deterministically.
+
+def _install_with_stub(
+    tmp_path: Path,
+    *,
+    stub_behaviour: str,
+    extra_env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Drive install.sh against a tmp install dir with a stub binary
+    pre-planted at ``$INSTALL_DIR/shipyard``.
+
+    ``stub_behaviour`` is either ``"ok"`` (script exits 0 with a
+    version line) or ``"sigkill"`` (script exits 137 with no output,
+    simulating taskgated rejection).
+    """
+    install_dir = tmp_path / "bin"
+    install_dir.mkdir()
+    stub = install_dir / "shipyard"
+    if stub_behaviour == "ok":
+        stub.write_text("#!/bin/sh\necho shipyard 99.99.99\n")
+    elif stub_behaviour == "sigkill":
+        # kill -KILL $$ is the closest deterministic proxy for the
+        # real taskgated SIGKILL: no stdout, no stderr, exit 137.
+        stub.write_text("#!/bin/sh\nkill -KILL $$\n")
+    else:
+        raise ValueError(stub_behaviour)
+    stub.chmod(0o755)
+
+    env = {
+        **os.environ,
+        "SHIPYARD_INSTALL_DIR": str(install_dir),
+        "SHIPYARD_SKIP_DOWNLOAD": "1",
+    }
+    if extra_env:
+        env.update(extra_env)
+    return subprocess.run(
+        ["bash", str(INSTALL_SH)],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_post_install_smoke_passes_when_binary_launches(tmp_path: Path) -> None:
+    # Happy path: a binary that actually starts should produce an
+    # installer exit 0 with the usual success messages.
+    result = _install_with_stub(tmp_path, stub_behaviour="ok")
+    assert result.returncode == 0, (
+        f"installer failed: stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    assert "Installed shipyard to" in result.stdout
+
+
+def test_post_install_smoke_fails_loud_on_sigkill(tmp_path: Path) -> None:
+    # The #219 failure mode: binary exists, is executable, passes
+    # codesign verify on macOS — but dies at launch. The installer
+    # MUST exit non-zero so downstream wrappers (pulp's
+    # install-shipyard.sh, Spectr's, etc.) can abort instead of
+    # claiming success and leaving the user with a dead binary.
+    result = _install_with_stub(tmp_path, stub_behaviour="sigkill")
+    assert result.returncode != 0, (
+        "smoke test failure must propagate exit code; got 0 with "
+        f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    # Message must be on stderr (not swallowed by stdout redirection
+    # in wrapper scripts) and must name #219 so the user has a
+    # pointer to the tracking thread for the proper .dmg fix.
+    assert "smoke test" in result.stderr.lower()
+    assert "219" in result.stderr or "/issues/219" in result.stderr
+
+
+def test_post_install_smoke_can_be_disabled(tmp_path: Path) -> None:
+    # Escape hatch: CI or a wrapper that dispatches its own
+    # verification can opt out via SHIPYARD_SKIP_SMOKE=1 so a
+    # deliberately-broken stub doesn't prevent install-dir staging.
+    result = _install_with_stub(
+        tmp_path,
+        stub_behaviour="sigkill",
+        extra_env={"SHIPYARD_SKIP_SMOKE": "1"},
+    )
+    assert result.returncode == 0, (
+        f"SHIPYARD_SKIP_SMOKE=1 must bypass smoke gate; got exit "
+        f"{result.returncode} stderr={result.stderr!r}"
+    )
+
+
+def test_post_install_smoke_remediation_mentions_crash_report_on_macos(
+    tmp_path: Path,
+) -> None:
+    # macOS-only: the remediation block should point at the
+    # ~/Library/Logs/DiagnosticReports path so the user knows where
+    # to look for the taskgated crash signature, not just "retry".
+    # On Linux the hint is simpler so we conditionally assert.
+    if sys.platform != "darwin":
+        pytest.skip("macOS-specific remediation hint")
+    result = _install_with_stub(tmp_path, stub_behaviour="sigkill")
+    assert result.returncode != 0
+    assert "DiagnosticReports" in result.stderr
+    assert "Code Signature Invalid" in result.stderr
