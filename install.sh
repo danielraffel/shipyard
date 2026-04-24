@@ -113,7 +113,13 @@ fi
 
 echo "Downloading ${ARTIFACT} (${VERSION_LABEL})..."
 mkdir -p "${INSTALL_DIR}"
-curl -sL "${RELEASE_URL}" -o "${INSTALL_DIR}/shipyard"
+# SHIPYARD_SKIP_DOWNLOAD=1 preserves an already-present binary at
+# ${INSTALL_DIR}/shipyard. Used by the tests to exercise the
+# post-install smoke + remediation paths without hitting the
+# network or needing a real release asset.
+if [ "${SHIPYARD_SKIP_DOWNLOAD:-0}" != "1" ]; then
+    curl -sL "${RELEASE_URL}" -o "${INSTALL_DIR}/shipyard"
+fi
 chmod +x "${INSTALL_DIR}/shipyard"
 
 # macOS post-download signature handling.
@@ -166,6 +172,52 @@ fi
 # `sy` is the short-form alias that shipyard's packaging ships as an
 # entry point; mirror it with a symlink here so both names resolve.
 ln -sf "${INSTALL_DIR}/shipyard" "${INSTALL_DIR}/sy"
+
+# Post-install smoke test (#219).
+#
+# Bare Mach-O binaries on macOS can pass `codesign --verify` and
+# still SIGKILL at launch with "Taskgated Invalid Signature" —
+# notarization tickets can't be stapled to a Mach-O (only to .app
+# / .pkg / .dmg), so Gatekeeper falls back to an ONLINE check the
+# first time the binary runs. If that check hiccups (network, DNS,
+# Apple-side CDN), taskgated rejects launch and the user sees
+# exit 137 with zero output. Without this gate the installer
+# cheerfully reports "installed" and leaves the user with a dead
+# binary; that's exactly #219.
+#
+# If the smoke fails, try one recovery round (remove provenance
+# xattr + force a second launch) before giving up with a specific,
+# actionable error message. Skip entirely if SHIPYARD_SKIP_SMOKE=1
+# is set — useful for CI that's dispatching its own verification.
+if [ "${SKIP_SMOKE:-${SHIPYARD_SKIP_SMOKE:-0}}" != "1" ]; then
+    if ! "${INSTALL_DIR}/shipyard" --version >/dev/null 2>&1; then
+        # Recovery attempt: macOS occasionally caches an old
+        # taskgated rejection; stripping provenance + retrying gives
+        # the notarization check a second shot.
+        if [ "${OS}" = "macos" ]; then
+            xattr -d com.apple.provenance "${INSTALL_DIR}/shipyard" 2>/dev/null || true
+            sleep 1
+        fi
+        if ! "${INSTALL_DIR}/shipyard" --version >/dev/null 2>&1; then
+            echo "" >&2
+            echo "ERROR: shipyard was installed but failed its post-install smoke test." >&2
+            echo "" >&2
+            if [ "${OS}" = "macos" ]; then
+                echo "On macOS this usually means one of:" >&2
+                echo "  - Gatekeeper's first-launch online notarization check failed" >&2
+                echo "    (transient network / Apple CDN). Retry: ${INSTALL_DIR}/shipyard --version" >&2
+                echo "  - taskgated rejected the binary. Check the crash report under" >&2
+                echo "    ~/Library/Logs/DiagnosticReports/shipyard-*.ips for 'Code Signature Invalid'." >&2
+                echo "    If that's the signature, see https://github.com/danielraffel/Shipyard/issues/219" >&2
+                echo "    for status on the .dmg-stapling fix." >&2
+            else
+                echo "Run '${INSTALL_DIR}/shipyard --version' manually for a specific error." >&2
+            fi
+            echo "" >&2
+            exit 1
+        fi
+    fi
+fi
 
 echo ""
 echo "Installed shipyard to ${INSTALL_DIR}/shipyard"

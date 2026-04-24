@@ -299,6 +299,39 @@ jobs:
           # is registered with Apple server-side and matches the
           # binary's hash.
 
+      - name: End-to-end launch gate (macOS — #219)
+        # Runs the *signed + notarized* Mach-O as the CI runner would
+        # see it after an end-user install. Catches taskgated
+        # rejections (exit 137, "Code Signature Invalid") that
+        # `codesign --verify` and `spctl --assess` miss.
+        #
+        # install.sh's post-install smoke runs client-side on the
+        # end user's box; this runs server-side pre-upload, which is
+        # the only place we can block a broken binary from ever
+        # becoming a release asset.
+        #
+        # Tied to the notarize step's `needs`: if this job fails, the
+        # `release` job's `needs: build` dependency holds the tag from
+        # getting a release uploaded. Bad binaries never ship.
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          BINARY="dist/${{ matrix.artifact }}"
+          echo "Running signed+notarized binary's --version to verify taskgated acceptance..."
+          # If taskgated will reject this binary, it'll do so here
+          # with exit 137 and zero output — the exact #219 shape.
+          if ! "$BINARY" --version >/dev/null 2>&1; then
+            echo "::error::Post-notarization launch gate FAILED for $BINARY"
+            echo "::error::This binary passes codesign --verify but taskgated rejects it at launch."
+            echo "::error::This is the #219 class of bug — fix before releasing."
+            echo "Attempting diagnostic capture:"
+            "$BINARY" --version || true
+            codesign -dvvv "$BINARY" 2>&1 | head -40 || true
+            spctl --assess --type execute -vv "$BINARY" 2>&1 || true
+            exit 1
+          fi
+          echo "✓ Binary launched cleanly under signed-and-notarized state."
+
       - name: Delete signing keychain (macOS)
         if: always() && steps.import_signing_identity.outputs.keychain != ''
         run: |
