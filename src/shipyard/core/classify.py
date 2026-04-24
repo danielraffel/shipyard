@@ -44,6 +44,7 @@ class FailureClass(str, Enum):
     TIMEOUT = "TIMEOUT"
     CONTRACT = "CONTRACT"
     TEST = "TEST"
+    TREE_DRIFT = "TREE_DRIFT"
     UNKNOWN = "UNKNOWN"
 
 
