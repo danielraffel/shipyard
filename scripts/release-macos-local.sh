@@ -287,18 +287,60 @@ if [ "$DO_UPLOAD" -eq 1 ]; then
     # ── Publish (flip draft → public) ─────────────────────────────
     # #252: `release.yml` creates the release as draft so end users
     # on macOS don't 404 on the missing dmg during the build/upload
-    # window. Now that the dmg is uploaded (and the mount test at
-    # step 6 proved it launches), flip draft=false so install.sh can
-    # resolve this tag as latest. If step 8's E2E check fails below,
-    # we revert to draft so the broken release disappears from
-    # install.sh's `releases/latest` resolution.
+    # window.
+    #
+    # Codex P1 on #253: this script is run ONCE PER ARCH (arm64,
+    # x64). If the first run flipped draft=false unconditionally
+    # and the second arch's run hadn't happened yet, Intel-Mac users
+    # would still see a public release that's missing their dmg —
+    # defeats the whole gate. So we only flip public when EVERY
+    # expected arch is on the release. "Expected" = whatever
+    # shipyard-macos-*.dmg assets release.yml's build matrix
+    # produces today (arm64 + x64; keep in sync if the matrix
+    # changes).
+    EXPECTED_MACOS_DMGS=(
+        "shipyard-macos-arm64.dmg"
+        "shipyard-macos-x64.dmg"
+    )
+    PRESENT_DMGS=$(gh release view "$TAG" --json assets \
+        --jq '.assets[].name' 2>/dev/null | grep -E 'shipyard-macos-.*\.dmg$' || true)
+    MISSING_DMGS=()
+    for expected in "${EXPECTED_MACOS_DMGS[@]}"; do
+        if ! echo "$PRESENT_DMGS" | grep -qx "$expected"; then
+            MISSING_DMGS+=("$expected")
+        fi
+    done
+
     WAS_DRAFT=0
+    DID_PUBLISH=0
     if [ "$(gh release view "$TAG" --json isDraft --jq '.isDraft')" = "true" ]; then
         WAS_DRAFT=1
     fi
+
+    if [ "${#MISSING_DMGS[@]}" -gt 0 ]; then
+        echo "Step 8/9: Keeping release $TAG as draft — still missing:"
+        for m in "${MISSING_DMGS[@]}"; do echo "           $m"; done
+        echo "         Re-run this script for the other arch(es)"
+        echo "         before the release goes public. install.sh's"
+        echo "         \`releases/latest\` will keep degrading to the"
+        echo "         previous published tag until every macOS dmg"
+        echo "         is attached."
+        # With dmgs still missing, skip the E2E check — it would
+        # only exercise one arch and doesn't tell us whether the
+        # combined release is ready to go public.
+        echo "Step 9/9: E2E verification SKIPPED (waiting for other arch)."
+        echo ""
+        echo "═══ Partial done. Re-run for the missing arch(es). ═══"
+        echo ""
+        rm -rf "$E2E_TMPDIR" 2>/dev/null || true
+        exit 0
+    fi
+
     if [ "$WAS_DRAFT" -eq 1 ]; then
-        echo "Step 8/9: Flipping release $TAG from draft to published..."
+        echo "Step 8/9: All expected macOS dmgs present; flipping release"
+        echo "         $TAG from draft to published..."
         gh release edit "$TAG" --draft=false >/dev/null
+        DID_PUBLISH=1
         echo "  ✓ Release $TAG is now public."
     else
         echo "Step 8/9: Release $TAG is already public (skipping draft flip)."
@@ -320,7 +362,14 @@ if [ "$DO_UPLOAD" -eq 1 ]; then
     # `releases/latest` degrades to the previous good release) and
     # exit 4.
     revert_to_draft_on_failure() {
-        if [ "$WAS_DRAFT" -eq 1 ]; then
+        # Revert when THIS run flipped the release public. `WAS_DRAFT`
+        # reflects the state *before* this run's flip, so after a
+        # successful publish it's 0 and would cause revert to no-op
+        # (Codex P1 on #253). Track `DID_PUBLISH` separately so the
+        # revert fires whenever this run is responsible for the
+        # public state. Don't revert a release that was already
+        # public when we started — that's not ours to hide.
+        if [ "$DID_PUBLISH" -eq 1 ] || [ "$WAS_DRAFT" -eq 1 ]; then
             echo "  → Reverting release $TAG to draft so end users" >&2
             echo "    don't see the broken dmg." >&2
             gh release edit "$TAG" --draft=true >/dev/null 2>&1 || true
