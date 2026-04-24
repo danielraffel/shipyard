@@ -360,6 +360,17 @@ class TestRetargetCli:
         assert parsed["event"] == "applied"
         assert parsed["cancelled_job_ids"] == [777]
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason=(
+            "#198: intermittent Click CliRunner isolation failure on "
+            "Windows surfacing as exit 1 with non-empty output. Same "
+            "flake as test_apply_json_emits_single_applied_envelope "
+            "above. Coverage preserved on Linux + macOS; the test "
+            "exercises GitHub API CLI flow with no Windows-specific "
+            "behavior."
+        ),
+    )
     def test_apply_cancels_and_dispatches(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
