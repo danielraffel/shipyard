@@ -198,11 +198,18 @@ def test_post_install_smoke_fails_loud_on_sigkill(tmp_path: Path) -> None:
         "smoke test failure must propagate exit code; got 0 with "
         f"stdout={result.stdout!r} stderr={result.stderr!r}"
     )
-    # Message must be on stderr (not swallowed by stdout redirection
-    # in wrapper scripts) and must name #219 so the user has a
-    # pointer to the tracking thread for the proper .dmg fix.
+    # Error message must be on stderr so wrapper scripts that redirect
+    # stdout don't swallow it.
     assert "smoke test" in result.stderr.lower()
-    assert "219" in result.stderr or "/issues/219" in result.stderr
+    # The #219 issue link is macOS-specific (taskgated doesn't exist
+    # on Linux, and the .dmg-stapling fix is macOS-only). On Linux
+    # the hint is generic "run the binary manually" — assert whichever
+    # the current OS should emit. `test_post_install_smoke_remediation
+    # _mentions_crash_report_on_macos` covers the macOS-specific text.
+    if sys.platform == "darwin":
+        assert "219" in result.stderr or "/issues/219" in result.stderr
+    else:
+        assert "run" in result.stderr.lower() and "manually" in result.stderr.lower()
 
 
 def test_post_install_smoke_can_be_disabled(tmp_path: Path) -> None:
