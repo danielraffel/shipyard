@@ -133,8 +133,15 @@ if [ "${SHIPYARD_SKIP_DOWNLOAD:-0}" != "1" ]; then
 
     RELEASE_URL=""
     if [ -z "${DMG_URL}" ]; then
+        # Match either `<ARTIFACT>"` (bare Mach-O / Linux binaries)
+        # or `<ARTIFACT>.exe"` (Windows) at the end of the asset name.
+        # The trailing double-quote anchor is load-bearing: without it,
+        # `shipyard-macos-arm64` would also match `shipyard-macos-arm64.dmg`
+        # in the JSON, which is the bug the DMG_URL branch is there to
+        # handle separately. Codex caught an earlier iteration that
+        # anchored with just `"` and broke Windows (#227 P1).
         RELEASE_URL=$(curl -sL "https://api.github.com/repos/${REPO}/${API_PATH}" \
-            | grep "browser_download_url.*${ARTIFACT}\"" \
+            | grep -E "browser_download_url.*${ARTIFACT}(\.exe)?\"" \
             | head -1 \
             | cut -d '"' -f 4 || true)
     fi

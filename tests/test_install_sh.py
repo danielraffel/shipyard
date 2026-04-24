@@ -513,6 +513,103 @@ exec "$REAL_CURL" "$@"
     )
 
 
+def test_install_sh_matches_windows_exe_asset(tmp_path: Path) -> None:
+    # Codex P1 on #227: my earlier RELEASE_URL grep anchored with
+    # just `"` after `${ARTIFACT}`, which worked for Linux + macOS
+    # bare Mach-O (where the asset name ends right before the
+    # closing quote) but broke Windows — `shipyard-windows-x64.exe`
+    # has `.exe` between ARTIFACT and the quote. The fix allows an
+    # optional `.exe` suffix.
+    #
+    # Drive install.sh through the RELEASE_URL branch with a fake
+    # windows-x64.exe asset. We can't actually RUN a .exe on
+    # macOS/Linux, but we CAN verify the URL-resolution step picks
+    # the right asset and gets through the download step. Skip the
+    # final smoke since the stub isn't a real Windows binary.
+    if sys.platform == "win32":
+        pytest.skip("drives install.sh URL resolution; macOS+Linux enough")
+
+    install_dir = tmp_path / "bin"
+    install_dir.mkdir()
+
+    # A fake Windows-named artifact. install.sh sees OS/ARCH from
+    # `uname`, so ARTIFACT on a non-Windows test host is always
+    # `shipyard-<os>-<arch>` (no .exe). To exercise the .exe match
+    # path specifically we shim curl + force the grep target via
+    # the fake JSON name — but install.sh computes ARTIFACT locally
+    # from uname, so we also need the on-disk file to match the
+    # local artifact name PLUS the .exe suffix case.
+    #
+    # Easier: build a test binary file that simulates a
+    # platform-appropriate "windows-ish" asset name the grep would
+    # see, and check install.sh follows it through to download.
+    # We confirm the match by asserting install.sh writes the
+    # downloaded bytes to ${INSTALL_DIR}/shipyard.
+    platform_artifact = subprocess.run(
+        ["bash", "-c",
+         'case "$(uname -s)" in Darwin) echo "shipyard-macos-$(uname -m | sed s/x86_64/x64/;s/arm64/arm64/)";; '
+         'Linux) echo "shipyard-linux-$(uname -m | sed s/x86_64/x64/;s/aarch64/arm64/)";; '
+         'esac'],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    # We're going to pretend the release serves the platform artifact
+    # with a `.exe` suffix — the grep must still match. We write a
+    # file with .exe in the name and make the fake curl return a URL
+    # pointing at it.
+    exe_asset = tmp_path / f"{platform_artifact}.exe"
+    exe_asset.write_text("fake-windows-payload\n")
+
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+    fake_curl = shim_dir / "curl"
+    fake_curl.write_text(f"""#!/bin/sh
+REAL_CURL=/usr/bin/curl
+for arg in "$@"; do
+    case "$arg" in
+        *api.github.com*)
+            # Asset name carries .exe suffix. Before the fix this
+            # line would NOT match the RELEASE_URL grep because the
+            # grep anchored with just `"` right after ARTIFACT.
+            echo '"browser_download_url": "file://{exe_asset}"'
+            exit 0
+            ;;
+    esac
+done
+exec "$REAL_CURL" "$@"
+""")
+    fake_curl.chmod(0o755)
+
+    env = {
+        **os.environ,
+        "SHIPYARD_INSTALL_DIR": str(install_dir),
+        "PATH": f"{shim_dir}:{os.environ.get('PATH', '')}",
+        "SHIPYARD_SKIP_SMOKE": "1",  # the fake payload isn't a real binary
+    }
+    env.pop("SHIPYARD_SKIP_DOWNLOAD", None)
+
+    result = subprocess.run(
+        ["bash", str(INSTALL_SH)],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f".exe asset detection failed: stdout={result.stdout!r} "
+        f"stderr={result.stderr!r}"
+    )
+    # The downloaded file must end up at ${INSTALL_DIR}/shipyard
+    # with the payload we placed in exe_asset. If the grep failed
+    # to match, install.sh would have exited with "No binary found"
+    # before downloading anything.
+    installed = install_dir / "shipyard"
+    assert installed.exists(), "install.sh should have downloaded the .exe asset"
+    assert installed.read_text() == "fake-windows-payload\n", (
+        "downloaded content must match the .exe asset — proves the "
+        "grep picked the .exe URL, not some other line"
+    )
+
+
 def test_install_sh_falls_back_to_bare_macho_when_no_dmg(tmp_path: Path) -> None:
     # Backward compat: if a tag has no .dmg asset (older releases,
     # forks without the local-sign script, etc.) install.sh must
