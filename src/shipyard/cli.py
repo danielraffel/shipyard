@@ -2718,6 +2718,61 @@ def _find_matching_jobs(
     ]
 
 
+def _cancel_workflow_run(repo_slug: str, run_id: int) -> bool:
+    """Cancel a whole workflow run. Returns True on success.
+
+    Used by ``cloud handoff`` where the whole run needs to go away
+    (not just a single job, as in ``cloud retarget``). Requires
+    ``actions:write`` scope on the gh token.
+    """
+    try:
+        result = subprocess.run(
+            ["gh", "api", "-X", "POST",
+             f"repos/{repo_slug}/actions/runs/{run_id}/cancel"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError):
+        return False
+    return result.returncode == 0
+
+
+def _list_queued_runs(repo_slug: str, limit: int = 50) -> list[dict[str, Any]]:
+    """Return currently queued GitHub Actions runs for ``repo_slug``.
+
+    Queries ``/actions/runs?status=queued`` and returns the raw run
+    records (``databaseId``, ``name``, ``headBranch``, ``createdAt``,
+    ``workflowName``, ``url``). Empty list on any error — ``list-stuck``
+    is diagnostic and shouldn't hard-fail on a transient gh blip.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "gh", "api",
+                f"repos/{repo_slug}/actions/runs?status=queued&per_page={limit}",
+                "--jq", (
+                    '.workflow_runs[] | {databaseId: .id, name: .name, '
+                    'headBranch: .head_branch, createdAt: .created_at, '
+                    'workflowName: .name, url: .html_url, path: .path}'
+                ),
+            ],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError):
+        return []
+    if result.returncode != 0:
+        return []
+    out: list[dict[str, Any]] = []
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return out
+
+
 def _cancel_workflow_job(repo_slug: str, job_id: int) -> bool:
     """Cancel a single job. Returns True on success, False on any failure."""
     try:
@@ -2729,6 +2784,304 @@ def _cancel_workflow_job(repo_slug: str, job_id: int) -> bool:
     except (subprocess.SubprocessError, FileNotFoundError):
         return False
     return result.returncode == 0
+
+
+@cloud.group("handoff")
+def cloud_handoff() -> None:
+    """Generalized in-flight runner handoff for any GH Actions workflow.
+
+    Sibling to ``cloud retarget`` (which is scoped to Shipyard-managed
+    ships). ``cloud handoff`` operates on arbitrary GH Actions runs by
+    run ID — useful when the consuming repo's GitHub-hosted macOS
+    queue is backed up 15+ minutes and you want to reroute to
+    Namespace or a self-hosted runner without tearing down any
+    per-PR state Shipyard owns.
+
+    See issue #77 for the feature scope.
+    """
+
+
+def _parse_threshold_secs(raw: str) -> float | None:
+    """Parse ``"10m"`` / ``"30s"`` / ``"600"`` into seconds.
+
+    Returns None on malformed input — callers surface that as a
+    user-facing error rather than a hard-coded default.
+    """
+    raw = raw.strip().lower()
+    if not raw:
+        return None
+    if raw.endswith("h") and raw[:-1].isdigit():
+        return float(raw[:-1]) * 3600.0
+    if raw.endswith("m") and raw[:-1].isdigit():
+        return float(raw[:-1]) * 60.0
+    if raw.endswith("s") and raw[:-1].isdigit():
+        return float(raw[:-1])
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
+@cloud_handoff.command("list-stuck")
+@click.option(
+    "--threshold",
+    default="10m",
+    show_default=True,
+    help=(
+        "Minimum queue age to surface. Accepts plain seconds or "
+        "a `Ns`/`Nm`/`Nh` suffix."
+    ),
+)
+@click.option(
+    "--repo",
+    default=None,
+    help="Owner/repo slug. Defaults to the current git repo.",
+)
+@click.pass_obj
+def cloud_handoff_list_stuck(
+    ctx: Context, threshold: str, repo: str | None,
+) -> None:
+    """List GH Actions runs currently queued past the threshold.
+
+    Diagnostic only — prints run ID, workflow, branch, and queued
+    age. Does not cancel or redispatch. Feed an interesting run ID
+    to ``cloud handoff run <id> --to <provider>`` to execute the
+    handoff.
+    """
+    threshold_secs = _parse_threshold_secs(threshold)
+    if threshold_secs is None:
+        render_error(f"Bad --threshold value: {threshold!r}")
+        sys.exit(1)
+
+    repo_slug = repo or _detect_repo_slug_or_empty()
+    if not repo_slug:
+        render_error(
+            "No repo detected. Pass --repo OWNER/REPO or run inside a git "
+            "clone with a tracked remote."
+        )
+        sys.exit(1)
+
+    runs = _list_queued_runs(repo_slug)
+    now = datetime.now(timezone.utc)
+    stuck: list[dict[str, Any]] = []
+    for run in runs:
+        created = run.get("createdAt")
+        if not created:
+            continue
+        try:
+            created_dt = datetime.fromisoformat(
+                created.replace("Z", "+00:00")
+            )
+        except ValueError:
+            continue
+        age_secs = (now - created_dt).total_seconds()
+        if age_secs < threshold_secs:
+            continue
+        stuck.append({
+            "run_id": run.get("databaseId"),
+            "workflow": run.get("workflowName"),
+            "branch": run.get("headBranch"),
+            "queued_for_secs": int(age_secs),
+            "url": run.get("url"),
+        })
+
+    if ctx.json_mode:
+        ctx.output(
+            "cloud.handoff",
+            {
+                "event": "list-stuck",
+                "repo": repo_slug,
+                "threshold_secs": threshold_secs,
+                "stuck": stuck,
+            },
+        )
+        return
+
+    if not stuck:
+        render_message(
+            f"No queued runs older than {threshold} on {repo_slug}.",
+            style="dim",
+        )
+        return
+
+    render_message(f"Stuck queued runs on {repo_slug} (>{threshold}):")
+    for row in stuck:
+        age_mins = row["queued_for_secs"] // 60
+        render_message(
+            f"  {row['run_id']}  {row['workflow']} @ {row['branch']}  "
+            f"queued {age_mins}m"
+        )
+
+
+@cloud_handoff.command("run")
+@click.argument("run_id", type=int)
+@click.option(
+    "--to",
+    "provider",
+    required=True,
+    help=(
+        "Target runner provider for the handoff (e.g. namespace, "
+        "github-hosted, local). Passed as `runner_provider=` to the "
+        "workflow_dispatch input."
+    ),
+)
+@click.option(
+    "--repo",
+    default=None,
+    help="Owner/repo slug. Defaults to the current git repo.",
+)
+@click.option(
+    "--dry-run/--apply",
+    "dry_run",
+    default=True,
+    help=(
+        "Dry-run by default. Shows what would be cancelled and "
+        "redispatched. --apply executes."
+    ),
+)
+@click.pass_obj
+def cloud_handoff_run(
+    ctx: Context, run_id: int, provider: str, repo: str | None, dry_run: bool,
+) -> None:
+    """Cancel a stuck GH Actions run and re-dispatch with a provider override.
+
+    Unlike ``cloud retarget`` (which operates on a Shipyard-managed PR
+    and targets a single job), this cancels the entire workflow run
+    and dispatches a fresh one against the same ref + workflow, with
+    ``runner_provider=<provider>`` threaded through. The workflow
+    must support that input (or the configured equivalent) — if it
+    doesn't, ``resolve_cloud_dispatch_plan`` raises and we refuse
+    rather than YAML-surgery the consumer's workflow file.
+    """
+    repo_slug = repo or _detect_repo_slug_or_empty()
+    if not repo_slug:
+        render_error(
+            "No repo detected. Pass --repo OWNER/REPO or run inside a git "
+            "clone with a tracked remote."
+        )
+        sys.exit(1)
+
+    try:
+        result = subprocess.run(
+            [
+                "gh", "api",
+                f"repos/{repo_slug}/actions/runs/{run_id}",
+                "--jq",
+                ".path, .head_branch, .name, .status",
+            ],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError) as exc:
+        render_error(f"gh api failed: {exc}")
+        sys.exit(1)
+    if result.returncode != 0:
+        render_error(f"Could not fetch run {run_id}: {result.stderr.strip()}")
+        sys.exit(1)
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    if len(lines) < 4:
+        render_error(f"Unexpected gh response for run {run_id}: {result.stdout!r}")
+        sys.exit(1)
+    workflow_path, head_branch, workflow_name, run_status = (
+        lines[0], lines[1], lines[2], lines[3],
+    )
+    workflow_file = workflow_path.rsplit("/", 1)[-1]
+
+    # Find the workflow key that matches this file so the dispatch
+    # plan resolver picks the right config overrides.
+    workflows = discover_workflows()
+    workflow_key: str | None = None
+    for key, wf in workflows.items():
+        if getattr(wf, "file", None) == workflow_file:
+            workflow_key = key
+            break
+    if workflow_key is None:
+        render_error(
+            f"Run {run_id} is for workflow '{workflow_file}' but "
+            "no matching key was found in .shipyard/config.toml. "
+            "Add a [cloud.workflows.<key>] entry that maps to it, or "
+            "use `shipyard cloud retarget` if this is a Shipyard-managed PR."
+        )
+        sys.exit(1)
+
+    try:
+        plan = resolve_cloud_dispatch_plan(
+            config=ctx.config,
+            workflows=workflows,
+            workflow_key=workflow_key,
+            ref=head_branch,
+            provider_override=provider,
+        )
+    except ValueError as exc:
+        render_error(
+            f"Workflow '{workflow_key}' can't be handed off: {exc}. "
+            "The workflow likely has no runner_provider input — add "
+            "one or use a config-driven override."
+        )
+        sys.exit(1)
+
+    payload: dict[str, Any] = {
+        "repo": repo_slug,
+        "run_id": run_id,
+        "workflow_key": workflow_key,
+        "workflow_file": workflow_file,
+        "workflow_name": workflow_name,
+        "ref": head_branch,
+        "status": run_status,
+        "new_provider": provider,
+        "dry_run": dry_run,
+    }
+
+    if not ctx.json_mode:
+        render_message(f"Handoff plan for run {run_id} ({repo_slug}):")
+        render_message(f"  workflow:    {workflow_name} ({workflow_file})")
+        render_message(f"  ref:         {head_branch}")
+        render_message(f"  status:      {run_status}")
+        render_message(f"  new provider: {provider}")
+
+    if dry_run:
+        if ctx.json_mode:
+            ctx.output("cloud.handoff", {"event": "plan", **payload})
+        else:
+            render_message(
+                "\nDry-run. Re-run with --apply to cancel + redispatch.",
+                style="dim",
+            )
+        return
+
+    if not _cancel_workflow_run(repo_slug, run_id):
+        render_error(
+            f"Could not cancel run {run_id}. Token may lack "
+            "`actions:write`. Cancel manually then re-run with --apply."
+        )
+        sys.exit(1)
+
+    try:
+        workflow_dispatch(
+            repository=plan.repository or repo_slug,
+            workflow_file=plan.workflow.file,
+            ref=plan.ref,
+            fields=plan.dispatch_fields,
+        )
+    except (subprocess.CalledProcessError, TimeoutError) as exc:
+        render_error(f"workflow_dispatch failed: {exc}")
+        sys.exit(1)
+
+    if ctx.json_mode:
+        ctx.output(
+            "cloud.handoff",
+            {
+                "event": "applied",
+                **payload,
+                "cancelled_run_id": run_id,
+                "new_dispatch": plan.to_dict(),
+            },
+        )
+    else:
+        render_message(
+            f"✓ Cancelled run {run_id}; dispatched fresh run with "
+            f"provider={provider}.",
+            style="bold green",
+        )
 
 
 @cloud.command("status")
