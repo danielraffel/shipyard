@@ -26,6 +26,13 @@ from shipyard.core.prepared_state import (
     filter_stages_by_prepared_state,
     hash_stage_commands,
 )
+from shipyard.core.tree_drift import (
+    compute_signature as _tree_signature,
+)
+from shipyard.core.tree_drift import (
+    format_drift_error,
+    list_dirty_paths,
+)
 from shipyard.executor.contract import (
     evaluate_contract,
     required_markers,
@@ -109,6 +116,9 @@ class LocalExecutor:
             sha=sha,
             mode=mode,
             prepared_state_enabled=_prepared_state_enabled(validation_config),
+            allow_tree_drift=bool(
+                validation_config.get("_allow_tree_drift", False)
+            ),
         )
 
     def _run_single(
@@ -181,6 +191,7 @@ class LocalExecutor:
         sha: str = "",
         mode: str = "default",
         prepared_state_enabled: bool = False,
+        allow_tree_drift: bool = False,
     ) -> TargetResult:
         """Run validation as separate stages. Stop at first failure.
 
@@ -222,6 +233,22 @@ class LocalExecutor:
             if prepared_skipped:
                 stages = stages_to_run
 
+        # #249 — tree-drift detection. Capture a signature of the
+        # working tree before any stage runs, then re-check before
+        # each subsequent stage. Mid-run edits (common in multi-agent
+        # workflows) would otherwise silently corrupt the build and
+        # surface 20+ minutes later as unrelated-looking compile
+        # errors. Skipped entirely when the project / operator opts
+        # out via --allow-tree-drift, or when git isn't available
+        # (signature returns None → guard no-ops).
+        drift_cwd = target_config.get("cwd")
+        initial_signature: str | None = None
+        initial_dirty_paths: list[str] = []
+        if not allow_tree_drift:
+            initial_signature = _tree_signature(drift_cwd)
+            if initial_signature is not None:
+                initial_dirty_paths = list_dirty_paths(drift_cwd)
+
         try:
             log_file.write_text("")
             if prepared_skipped:
@@ -232,7 +259,37 @@ class LocalExecutor:
                         f"({', '.join(prepared_skipped)}) for sha={sha} "
                         f"target={target_name} mode={mode} ===\n"
                     )
-            for stage_name, command in stages:
+            for stage_index, (stage_name, command) in enumerate(stages):
+                # Drift check at every stage boundary AFTER the first
+                # — the first stage's check would compare the baseline
+                # to itself. By checking at the top of each subsequent
+                # stage we catch drift within seconds of the previous
+                # stage finishing, not the 20-min-deep compile error.
+                if (
+                    stage_index > 0
+                    and initial_signature is not None
+                ):
+                    current = _tree_signature(drift_cwd)
+                    if current is not None and current != initial_signature:
+                        current_dirty = list_dirty_paths(drift_cwd)
+                        error_msg = format_drift_error(
+                            stage_name, initial_dirty_paths, current_dirty,
+                        )
+                        with open(log_file, "a", encoding="utf-8") as log:
+                            log.write(f"\n=== TREE_DRIFT at {stage_name} ===\n")
+                            log.write(error_msg + "\n")
+                        return TargetResult(
+                            target_name=target_name, platform=platform,
+                            status=TargetStatus.ERROR, backend="local",
+                            duration_secs=time.monotonic() - start_time,
+                            started_at=started_at,
+                            completed_at=datetime.now(timezone.utc),
+                            log_path=str(log_file),
+                            error_message=error_msg,
+                            phase=stage_name,
+                            failure_class=FailureClass.TREE_DRIFT.value,
+                        )
+
                 stage_start = time.monotonic()
                 with open(log_file, "a", encoding="utf-8") as log:
                     log.write(f"\n=== {stage_name} ===\n")

@@ -28,6 +28,7 @@ from shipyard import __version__
 from shipyard.cloud.github import find_dispatched_run, run_view, workflow_dispatch
 from shipyard.cloud.records import CloudRecordStore, CloudRunRecord
 from shipyard.cloud.registry import default_workflow_key, discover_workflows, resolve_cloud_dispatch_plan
+from shipyard.core.classify import FailureClass
 from shipyard.core.config import Config
 from shipyard.core.evidence import EvidenceStore
 from shipyard.core.job import Job, JobStatus, TargetResult, TargetStatus, ValidationMode
@@ -189,6 +190,19 @@ def main(ctx: click.Context, json_mode: bool) -> None:
         "SHIPYARD_NO_WARM_POOL=1 for this invocation."
     ),
 )
+@click.option(
+    "--allow-tree-drift",
+    is_flag=True,
+    default=False,
+    help=(
+        "Suppress the #249 working-tree drift guard for this run. "
+        "By default, `shipyard run` fails fast if the working tree "
+        "changes between validation stages (mid-run edits in a "
+        "multi-agent workflow produce non-deterministic failures). "
+        "Pass this flag when a build step legitimately writes "
+        "generated files into the tree."
+    ),
+)
 @click.pass_obj
 def run(
     ctx: Context,
@@ -200,6 +214,7 @@ def run(
     allow_unreachable_targets: bool,
     skip_target: tuple[str, ...],
     no_warm: bool,
+    allow_tree_drift: bool,
 ) -> None:
     """Validate current HEAD on configured targets.
 
@@ -291,6 +306,7 @@ def run(
         fail_fast=fail_fast,
         resume_from=resume_from,
         warm_disabled=no_warm,
+        allow_tree_drift=allow_tree_drift,
     )
 
     if ctx.json_mode:
@@ -300,7 +316,16 @@ def run(
             render_message("All green.", style="bold green")
         else:
             render_message("Failed.", style="bold red")
-            sys.exit(1)
+    # Exit 3 when any target hit tree drift — distinct from validation
+    # failure (exit 1) so agents can distinguish "the build was correct
+    # but the tree moved under it" from "the code actually failed."
+    if any(
+        (r.failure_class or "") == FailureClass.TREE_DRIFT.value
+        for r in job.results.values()
+    ):
+        sys.exit(3)
+    if not job.passed:
+        sys.exit(1)
 
 
 @main.command()
@@ -5887,11 +5912,21 @@ def _execute_job(
     resume_from: str | None,
     ship_state: ShipState | None = None,
     warm_disabled: bool = False,
+    allow_tree_drift: bool = False,
 ) -> Job:
     job = job.start()
     ctx.queue.update(job)
 
     validation_config = _resolve_validation(config, mode)
+    # #249: thread the CLI `--allow-tree-drift` opt-out through as a
+    # private flag on validation_config. LocalExecutor reads this to
+    # decide whether to enforce drift detection; other executors
+    # (ssh, cloud) ignore it today. Using a leading underscore to
+    # mark this as a runtime-injected key, not a user-declared one.
+    validation_config = {
+        **validation_config,
+        "_allow_tree_drift": allow_tree_drift,
+    }
     had_failure = False
     warm_pool = WarmPool(default_pool_path(config.state_dir))
     # Global kill switch: env var disables everything for this process.
