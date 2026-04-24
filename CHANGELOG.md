@@ -3,9 +3,13 @@
 All notable changes to Shipyard are documented here. Each entry links
 to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
-<a id="v0390"></a>
-## [0.40.0]
+<a id="v0400"></a>
+## [0.40.0] - 2026-04-23
 
+- bundle: treat /-prefixed and UNC paths as absolute in upload (Codex P1 on #211) ([#213](https://github.com/danielraffel/Shipyard/pull/213))
+- watch: fold stuck_queued into signature so --follow re-emits on threshold crossing (Codex on #206) ([#212](https://github.com/danielraffel/Shipyard/pull/212))
+
+<a id="v0390"></a>
 ## [0.39.0] - 2026-04-23
 
 - ssh-windows: fix bundle-open path mismatch + pre-sentinel stderr decode (#210) ([#211](https://github.com/danielraffel/Shipyard/pull/211))
@@ -407,6 +411,7 @@ to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
 - feat/shipyard phases 1 4 ([#1](https://github.com/danielraffel/Shipyard/pull/1))
 
+[0.40.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.40.0
 [0.39.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.39.0
 [0.38.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.38.0
 [0.37.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.37.0
