@@ -3,6 +3,12 @@
 All notable changes to Shipyard are documented here. Each entry links
 to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
+<a id="v0360"></a>
+## [0.36.0] - 2026-04-23
+
+- test(cloud_retarget): diagnose+skipif for flaky Windows retarget test (#198) ([#204](https://github.com/danielraffel/Shipyard/pull/204))
+- install.sh: preserve Developer-ID notarization when present ([#203](https://github.com/danielraffel/Shipyard/pull/203))
+
 <a id="v0350"></a>
 ## [0.35.0] - 2026-04-23
 
@@ -384,6 +390,7 @@ to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
 - feat/shipyard phases 1 4 ([#1](https://github.com/danielraffel/Shipyard/pull/1))
 
+[0.36.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.36.0
 [0.35.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.35.0
 [0.34.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.34.0
 [0.33.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.33.0
