@@ -388,7 +388,12 @@ fi
 # logged out (the doctor covers those) and silent for fine-grained
 # tokens + GitHub Apps which don't expose their scope list locally.
 if command -v gh >/dev/null 2>&1; then
-    gh_status_out=$(gh auth status 2>&1 || true)
+    # Scope probe to github.com specifically (Codex P2 on #237).
+    # Bare `gh auth status` inspects every configured host (GHE,
+    # etc.) and would false-positive or false-negative from
+    # unrelated hosts. Shipyard's retarget/handoff calls go to
+    # github.com, so that's the only host whose scope matters.
+    gh_status_out=$(gh auth status --hostname github.com 2>&1 || true)
     if echo "${gh_status_out}" | grep -qi "Token scopes:" \
         && ! echo "${gh_status_out}" | grep -q "'workflow'"; then
         echo "heads up: \`shipyard cloud retarget\` + \`cloud handoff run --apply\`"
