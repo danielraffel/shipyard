@@ -178,3 +178,22 @@ def test_release_yml_creates_draft_release_until_dmg_uploaded() -> None:
     # Anchor the draft:true line to the softprops action block,
     # not a comment or stray YAML, by requiring both in the file.
     assert "softprops/action-gh-release" in content
+
+
+def test_publish_waits_for_both_macos_arches() -> None:
+    # Codex P1 on #253: running this script for only arm64 previously
+    # flipped the release public while the x64 dmg was still missing,
+    # leaving Intel-Mac users with a public release that still 404'd
+    # on install. The fix requires EVERY expected macOS dmg to be
+    # on the release before the flip. Pin the two current arches
+    # so a refactor can't silently drop the arch-completeness check.
+    content = SCRIPT.read_text()
+    assert "EXPECTED_MACOS_DMGS" in content, (
+        "script must express which macOS dmgs are expected before publish"
+    )
+    assert "shipyard-macos-arm64.dmg" in content
+    assert "shipyard-macos-x64.dmg" in content
+    # Revert-on-failure must track DID_PUBLISH, not just WAS_DRAFT —
+    # otherwise a failed E2E right after this run's flip wouldn't
+    # revert (WAS_DRAFT is 0 post-flip).
+    assert "DID_PUBLISH" in content
