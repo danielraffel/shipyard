@@ -39,13 +39,21 @@ INSTALL_SH = REPO_ROOT / "install.sh"
 
 
 def _platform_artifact_name() -> str:
-    """Return the shipyard-<os>-<arch> artifact name for the current
-    host, matching install.sh's ARTIFACT computation.
+    """Return the full release-asset filename for the current host.
 
-    Used by tests that shim curl: the fake release URL's filename
-    must match the ARTIFACT regex install.sh greps against, and
-    that's computed from ``uname`` at run time. Hardcoding
-    ``shipyard-macos-arm64`` in the test breaks on Linux CI.
+    Matches install.sh's ARTIFACT + `.exe`-suffix convention so the
+    test fixture looks exactly like the real GitHub release asset:
+    ``shipyard-linux-x64`` / ``shipyard-macos-arm64`` / etc. —
+    with ``.exe`` appended on Windows.
+
+    Load-bearing for tests that shim curl: the fake URL's filename
+    must match install.sh's RELEASE_URL grep. Install.sh tolerates
+    both ``<ARTIFACT>"`` and ``<ARTIFACT>.exe"`` so technically
+    either works on any host, but we mirror reality so a reviewer
+    reading the fixture sees the real asset shape. Tests in this
+    module are currently skipped on Windows via the module-level
+    pytestmark; the Windows branch here is kept correct in case
+    that skip is lifted later.
     """
     osname = "linux"
     if sys.platform == "darwin":
@@ -58,7 +66,8 @@ def _platform_artifact_name() -> str:
         arch = "arm64"
     else:
         arch = "x64"
-    return f"shipyard-{osname}-{arch}"
+    base = f"shipyard-{osname}-{arch}"
+    return f"{base}.exe" if osname == "windows" else base
 
 
 def _run_dry(env: dict[str, str] | None = None) -> dict[str, str]:
