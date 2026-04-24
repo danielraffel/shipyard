@@ -131,3 +131,30 @@ def test_neutral_pass_when_no_token_scopes_line(
     # Version string makes it clear we didn't verify.
     assert "fine-grained" in result["version"].lower() \
         or "not inspectable" in result["version"].lower()
+
+
+def test_probe_scopes_gh_auth_status_to_github_com(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Codex P2 on #237: `gh auth status` without --hostname inspects
+    # every configured host (GHE enterprise tokens, etc.) and can
+    # exit non-zero from an unrelated host's auth problem — or show
+    # a `Token scopes:` line from the wrong host. Lock in that the
+    # probe always passes `--hostname github.com`.
+    captured: dict[str, Any] = {"cmd": None}
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = list(cmd)
+        return _ok_proc(stderr="Token scopes: 'workflow'")
+
+    with patch("shipyard.cli.subprocess.run", side_effect=fake_run):
+        _call()
+    assert captured["cmd"] is not None
+    assert "--hostname" in captured["cmd"], (
+        "probe must be scoped to a specific host; reintroducing the "
+        "unscoped `gh auth status` call regresses #237"
+    )
+    # And the host must be github.com — Shipyard's retarget/handoff
+    # calls hit github.com, not GHE.
+    host_idx = captured["cmd"].index("--hostname")
+    assert captured["cmd"][host_idx + 1] == "github.com"

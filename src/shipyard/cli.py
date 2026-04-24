@@ -5485,15 +5485,23 @@ def _check_gh_workflow_scope() -> dict[str, Any] | None:
     but no scope line" as a neutral pass since we can't know
     without hitting the API).
     """
+    # Scope to github.com specifically (Codex P2 on #237). Without
+    # `--hostname`, `gh auth status` inspects every configured host
+    # (GHE, GitHub App tokens on enterprise, etc.) and can exit
+    # non-zero from an unrelated host's auth problem — or show a
+    # `Token scopes:` line from the wrong host and grep past the
+    # github.com answer. Shipyard's cancel/dispatch calls go to
+    # github.com, so that's the only host whose scope matters.
     try:
         result = subprocess.run(
-            ["gh", "auth", "status"],
+            ["gh", "auth", "status", "--hostname", "github.com"],
             capture_output=True, text=True, timeout=5,
         )
     except (subprocess.SubprocessError, FileNotFoundError):
         return None
     if result.returncode != 0:
-        # gh not logged in — unrelated to scope; stay quiet.
+        # gh not logged in to github.com specifically — unrelated
+        # to scope; stay quiet.
         return None
     combined = (result.stdout + result.stderr).lower()
     # Classic PAT path prints `Token scopes: 'gist', 'repo', 'workflow'`.
