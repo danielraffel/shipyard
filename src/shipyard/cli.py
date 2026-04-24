@@ -2927,7 +2927,7 @@ def cloud_handoff_run(
     if result.returncode != 0:
         render_error(f"Could not fetch run {run_id}: {result.stderr.strip()}")
         sys.exit(1)
-    lines = [l for l in result.stdout.splitlines() if l.strip()]
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
     if len(lines) < 4:
         render_error(f"Unexpected gh response for run {run_id}: {result.stdout!r}")
         sys.exit(1)
