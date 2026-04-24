@@ -3,9 +3,12 @@
 All notable changes to Shipyard are documented here. Each entry links
 to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
-<a id="v0400"></a>
-## [0.41.0]
+<a id="v0410"></a>
+## [0.41.0] - 2026-04-23
 
+- queue: jitter concurrent-writer retry (#175) + doctor: rich bundle smoke (#181) ([#214](https://github.com/danielraffel/Shipyard/pull/214))
+
+<a id="v0400"></a>
 ## [0.40.0] - 2026-04-23
 
 - bundle: treat /-prefixed and UNC paths as absolute in upload (Codex P1 on #211) ([#213](https://github.com/danielraffel/Shipyard/pull/213))
@@ -413,6 +416,7 @@ to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
 - feat/shipyard phases 1 4 ([#1](https://github.com/danielraffel/Shipyard/pull/1))
 
+[0.41.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.41.0
 [0.40.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.40.0
 [0.39.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.39.0
 [0.38.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.38.0
