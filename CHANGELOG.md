@@ -3,6 +3,11 @@
 All notable changes to Shipyard are documented here. Each entry links
 to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
+<a id="v0370"></a>
+## [0.37.0] - 2026-04-23
+
+- cli/watch: flag runs stuck in queued state past threshold (#190) ([#206](https://github.com/danielraffel/Shipyard/pull/206))
+
 <a id="v0360"></a>
 ## [0.36.0] - 2026-04-23
 
@@ -390,6 +395,7 @@ to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
 - feat/shipyard phases 1 4 ([#1](https://github.com/danielraffel/Shipyard/pull/1))
 
+[0.37.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.37.0
 [0.36.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.36.0
 [0.35.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.35.0
 [0.34.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.34.0
