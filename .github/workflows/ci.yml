@@ -136,12 +136,22 @@ jobs:
     # (LookupError, ModuleNotFoundError, PYI-*:ERROR, etc.). A clean
     # "Tailscale Funnel isn't available" exit is acceptable here and
     # proves the bundle itself is sound.
+    needs: resolve-runners
     name: Binary smoke (PyInstaller bundle health)
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ fromJSON(matrix.runs_on) }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-15]
+        include:
+          # Mirror the macOS/linux routing the main test job uses so
+          # Binary-smoke macOS doesn't get stuck in the GH-hosted
+          # `macos-15` queue while the resolver is pointing everyone
+          # else at Namespace. Windows isn't in this matrix (no
+          # Windows-specific PyInstaller smoke today).
+          - os: linux
+            runs_on: ${{ needs.resolve-runners.outputs.linux }}
+          - os: macos
+            runs_on: ${{ needs.resolve-runners.outputs.macos }}
     steps:
       - uses: actions/checkout@v5
       - name: Set up Python
