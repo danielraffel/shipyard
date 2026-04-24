@@ -258,90 +258,54 @@ jobs:
               src/shipyard/cli.py
           fi
 
-      - name: Re-sign with hardened runtime + notarize (macOS)
-        if: steps.import_signing_identity.outputs.identity != ''
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          TEAM_ID: ${{ secrets.TEAM_ID }}
-          APP_SPECIFIC_PASSWORD: ${{ secrets.APP_SPECIFIC_PASSWORD }}
-          SIGNING_IDENTITY: ${{ steps.import_signing_identity.outputs.identity }}
-        run: |
-          set -euo pipefail
-          BINARY="dist/${{ matrix.artifact }}"
-
-          # PyInstaller already signed every embedded dylib with our
-          # identity (via --codesign-identity). Re-sign only the outer
-          # Mach-O to add --options runtime (hardened runtime) and
-          # --timestamp (secure timestamp) — both required for
-          # notarytool to accept the submission. Team IDs already match
-          # so dyld's runtime check passes. `--sign` takes the SHA-1
-          # fingerprint resolved at import time, so any Developer ID
-          # cert on Team ID ${TEAM_ID} works (forks, org certs,
-          # rotations) — no hardcoded subject CN. See #177.
-          codesign --force --options runtime --timestamp \
-            --sign "$SIGNING_IDENTITY" \
-            "$BINARY"
-          codesign -dv --verbose=4 "$BINARY"
-
-          # Notarize. --wait blocks up to 30min; in practice a bare
-          # Mach-O notarizes in <60s. submit needs a zip or dmg, so
-          # wrap first.
-          NOTARIZE_ZIP="$RUNNER_TEMP/${{ matrix.artifact }}.zip"
-          /usr/bin/ditto -c -k --keepParent "$BINARY" "$NOTARIZE_ZIP"
-          xcrun notarytool submit "$NOTARIZE_ZIP" \
-            --apple-id "$APPLE_ID" \
-            --team-id "$TEAM_ID" \
-            --password "$APP_SPECIFIC_PASSWORD" \
-            --wait
-
-          # Can't staple a bare Mach-O (no Info.plist). Gatekeeper
-          # verifies notarization online at first launch. The ticket
-          # is registered with Apple server-side and matches the
-          # binary's hash.
-
-      - name: End-to-end launch gate (macOS — #219)
-        # Runs the *signed + notarized* Mach-O as the CI runner would
-        # see it after an end-user install. Catches taskgated
-        # rejections (exit 137, "Code Signature Invalid") that
-        # `codesign --verify` and `spctl --assess` miss.
-        #
-        # install.sh's post-install smoke runs client-side on the
-        # end user's box; this runs server-side pre-upload, which is
-        # the only place we can block a broken binary from ever
-        # becoming a release asset.
-        #
-        # Tied to the notarize step's `needs`: if this job fails, the
-        # `release` job's `needs: build` dependency holds the tag from
-        # getting a release uploaded. Bad binaries never ship.
-        if: runner.os == 'macOS'
-        run: |
-          set -euo pipefail
-          BINARY="dist/${{ matrix.artifact }}"
-          echo "Running signed+notarized binary's --version to verify taskgated acceptance..."
-          # If taskgated will reject this binary, it'll do so here
-          # with exit 137 and zero output — the exact #219 shape.
-          if ! "$BINARY" --version >/dev/null 2>&1; then
-            echo "::error::Post-notarization launch gate FAILED for $BINARY"
-            echo "::error::This binary passes codesign --verify but taskgated rejects it at launch."
-            echo "::error::This is the #219 class of bug — fix before releasing."
-            echo "Attempting diagnostic capture:"
-            "$BINARY" --version || true
-            codesign -dvvv "$BINARY" 2>&1 | head -40 || true
-            spctl --assess --type execute -vv "$BINARY" 2>&1 || true
-            exit 1
-          fi
-          echo "✓ Binary launched cleanly under signed-and-notarized state."
-
+      # #219: macOS signing + notarization happens LOCALLY on the
+      # maintainer's Mac via scripts/release-macos-local.sh, NOT here.
+      # Two rounds of CI-signed+notarized macOS binaries (v0.42.0,
+      # v0.43.0) passed every CI check including the on-runner launch
+      # gate but SIGKILL'd at launch on the maintainer's actual Mac
+      # ("Taskgated Invalid Signature"). The CI runner and end-user
+      # Mac evidently differ enough on taskgated/Gatekeeper state
+      # that a CI-notarized binary is not reliably launchable. See
+      # RELEASING.md § "macOS signing is local-only" for the
+      # confirmed diagnosis + workflow.
+      #
+      # The macOS build step above still runs — it catches
+      # PyInstaller regressions. We just don't sign, notarize, or
+      # upload the CI-built binary: the maintainer's local script
+      # produces + uploads the asset that users actually download.
       - name: Delete signing keychain (macOS)
         if: always() && steps.import_signing_identity.outputs.keychain != ''
         run: |
           security delete-keychain "${{ steps.import_signing_identity.outputs.keychain }}" || true
 
-      - name: Upload artifact
+      # Skip uploading macOS artifacts to the workflow's artifact
+      # store — they're unsigned, unnotarized, and should not reach
+      # the release. The local script publishes the signed macOS
+      # assets directly via `gh release upload --clobber`.
+      - name: Upload artifact (non-macOS)
+        if: runner.os != 'macOS'
         uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.artifact }}
           path: dist/${{ matrix.artifact }}*
+
+      - name: macOS build health check (build-only, no asset upload)
+        if: runner.os == 'macOS'
+        # Explicitly surface in the CI log that the macOS build
+        # succeeded but is intentionally NOT being packaged into the
+        # release. Post-workflow, the maintainer runs
+        # scripts/release-macos-local.sh to sign+notarize on their
+        # Mac and upload the signed asset.
+        run: |
+          echo "✓ macOS build succeeded (${{ matrix.artifact }})."
+          echo ""
+          echo "This binary is NOT being uploaded to the release."
+          echo "macOS signing + notarization is local-only (see #219)."
+          echo "Run this on your Mac after the release tag appears:"
+          echo ""
+          echo "  ./scripts/release-macos-local.sh \\"
+          echo "    --tag ${{ github.ref_name }} --upload"
+          echo ""
 
   release:
     needs: build

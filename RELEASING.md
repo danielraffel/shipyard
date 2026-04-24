@@ -61,11 +61,45 @@ gh workflow run release.yml --ref v<x.y.z>
 
 Run that after the auto-tag appears. The release workflow will pick up the existing tag and publish the binaries. (Pulp's first auto-released tag, `v0.4.0`, used this fallback before its `RELEASE_BOT_TOKEN` was provisioned.)
 
-## Optional: sign + notarize the macOS CLI binary
+## macOS signing is local-only
 
-macOS 26.3+ refuses to execute ad-hoc-signed binaries that carry the `com.apple.provenance` xattr GitHub stamps on every release download — the OS SIGKILLs with "Taskgated Invalid Signature" and the user sees a bare `zsh: killed` with no context.
+**As of 2026-04-24, the macOS release binary is signed + notarized on the maintainer's own Mac, NOT on GitHub Actions.** Two rounds of CI-signed+notarized binaries (v0.42.0, v0.43.0) passed every CI check — `codesign --verify`, `spctl --assess`, and an on-runner launch gate that ran the notarized binary's `--version` — yet SIGKILL'd at launch on the primary maintainer's actual Mac with "Taskgated Invalid Signature" (issue [#219](https://github.com/danielraffel/Shipyard/issues/219)).
 
-`install.sh` works around this locally by stripping the xattr and re-applying an ad-hoc signature. Anyone installing via `gh release download` or a manual browser click still hits the crash. The proper fix is Developer-ID-signed + Apple-notarized binaries produced by the release workflow itself.
+The 2026-04-24 local-signing diagnostic (commit c112830 → `scripts/release-macos-local.sh`) confirmed the delta: a locally-built+signed+notarized binary from the **same commit as v0.43.0** with the **same Developer-ID cert** launches cleanly on the maintainer's Mac. The CI runner and the end-user Mac differ enough on taskgated/Gatekeeper state that CI-notarized binaries are not reliably launchable.
+
+### How to cut a macOS release
+
+CI still handles Linux + Windows. For the macOS binary:
+
+```bash
+# One-time setup — either .env file or shell rc.
+export SHIPYARD_NOTARIZE_APPLE_ID=<apple-id-email>
+export SHIPYARD_NOTARIZE_TEAM_ID=<team-id>              # 10-char from developer.apple.com/account
+export SHIPYARD_NOTARIZE_APP_PASSWORD=<app-specific>    # appleid.apple.com → Sign-In and Security
+export SHIPYARD_SIGNING_IDENTITY=<SHA1-or-CN>           # `security find-identity -v -p codesigning`
+
+# After the release.yml workflow publishes the non-macOS assets:
+./scripts/release-macos-local.sh --tag vX.Y.Z --upload
+```
+
+The script runs the full pipeline on the local Mac:
+
+1. Fails fast if any env var is missing (before the ~60s PyInstaller build).
+2. Builds via `pyinstaller --onefile --codesign-identity <...>` — identical flags to what CI used to do, only the environment differs.
+3. Re-signs outer Mach-O with `--options runtime --timestamp` (notarytool prerequisites).
+4. Submits to Apple via `xcrun notarytool submit --wait`, asserts `status: Accepted`.
+5. **Runs `<binary> --version` locally.** If this fails (the #219 shape), exits 3 with `codesign --verify`, `spctl --assess`, and `xattr -l` diagnostics, and does NOT upload. This is the whole point — the Mac running the script is the same Mac that will need to launch the binary tomorrow.
+6. On launch success: uploads via `gh release upload --clobber` and updates `checksums.sha256` for the artifact.
+
+Running without `--upload` is the diagnostic mode (used to confirm the local signing path actually works on a given Mac). Test coverage in `tests/test_release_macos_local.py` ensures missing creds / bad flags / bash syntax errors all surface before the expensive build step.
+
+### Why the repo secrets are still listed below
+
+The CI signing steps have been removed from `.github/workflows/release.yml` (build-only for macOS, no signing / notarizing / uploading). The five secrets below are kept in the repo for:
+
+- The x64 slice once we add Rosetta-hosted local cross-builds or move x64 to local too
+- Future `.dmg` stapling pipeline (task #52 — the long-term answer that eliminates Apple's online-check dependency entirely)
+- Forks that might want to re-enable CI signing for their own environments
 
 Five secrets on the repo (all `gh secret set NAME`):
 

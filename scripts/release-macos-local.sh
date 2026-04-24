@@ -191,21 +191,28 @@ if [ "$DO_UPLOAD" -eq 1 ]; then
     # just our line. If the file doesn't exist yet, this creates it.
     CHECKSUM=$(shasum -a 256 "$DIST_BINARY" | awk '{print $1}')
     LINE="${CHECKSUM}  ${ARTIFACT}"
-    CHECKSUMS_TMP="$(mktemp)"
-    if gh release view "$TAG" --json assets --jq '.assets[] | select(.name=="checksums.sha256") | .name' | grep -q checksums.sha256; then
-        gh release download "$TAG" --pattern checksums.sha256 --output "$CHECKSUMS_TMP" --clobber
+    # Build the file at its final name from the start. The earlier
+    # approach uploaded a mktemp-named file first then re-uploaded
+    # a renamed copy, which left both on the release as sibling
+    # assets (observed on v0.43.0's first upload — stray `tmp.XYZ`
+    # asset had to be deleted by hand).
+    CHECKSUMS_DIR="$(mktemp -d)"
+    CHECKSUMS_FILE="${CHECKSUMS_DIR}/checksums.sha256"
+    if gh release view "$TAG" --json assets \
+            --jq '.assets[] | select(.name=="checksums.sha256") | .name' \
+            | grep -q checksums.sha256; then
+        gh release download "$TAG" --pattern checksums.sha256 \
+            --output "$CHECKSUMS_FILE" --clobber
         # Drop any existing line for this artifact; append the new one.
-        grep -v "  ${ARTIFACT}\$" "$CHECKSUMS_TMP" > "${CHECKSUMS_TMP}.new" || true
-        echo "$LINE" >> "${CHECKSUMS_TMP}.new"
-        mv "${CHECKSUMS_TMP}.new" "$CHECKSUMS_TMP"
+        grep -v "  ${ARTIFACT}\$" "$CHECKSUMS_FILE" \
+            > "${CHECKSUMS_FILE}.new" || true
+        echo "$LINE" >> "${CHECKSUMS_FILE}.new"
+        mv "${CHECKSUMS_FILE}.new" "$CHECKSUMS_FILE"
     else
-        echo "$LINE" > "$CHECKSUMS_TMP"
+        echo "$LINE" > "$CHECKSUMS_FILE"
     fi
-    gh release upload "$TAG" "$CHECKSUMS_TMP" --clobber
-    # Rename into the expected filename via clobber upload.
-    # gh upload uses the basename, so rename first:
-    mv "$CHECKSUMS_TMP" "$(dirname "$CHECKSUMS_TMP")/checksums.sha256"
-    gh release upload "$TAG" "$(dirname "$CHECKSUMS_TMP")/checksums.sha256" --clobber
+    gh release upload "$TAG" "$CHECKSUMS_FILE" --clobber
+    rm -rf "$CHECKSUMS_DIR"
     echo "  ✓ Uploaded to release $TAG"
 else
     echo "Step 5/5: SKIPPED (--upload not passed)."

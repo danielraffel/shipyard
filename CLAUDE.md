@@ -153,6 +153,18 @@ rather than stacking them.
 
 `./scripts/release.sh` remains as a break-glass manual path. The default is the automatic path above (auto-release workflow on merge). Do not call `release.sh` directly unless the automatic path is genuinely blocked.
 
+## macOS binary is signed LOCALLY, not in CI
+
+As of #219 (2026-04-24), the macOS release binary is **built, signed, notarized, and launch-tested on the maintainer's own Mac** — CI only handles Linux + Windows. Two rounds of CI-signed binaries (v0.42.0, v0.43.0) passed every CI check (including an on-runner launch gate) but SIGKILL'd on the maintainer's actual Mac. The local-signing pipeline in `scripts/release-macos-local.sh` produces a binary that works where it matters, on the Mac that will need to launch it.
+
+After any new tag lands and the release workflow publishes non-macOS assets, run:
+
+```bash
+./scripts/release-macos-local.sh --tag vX.Y.Z --upload
+```
+
+The script fails loud if the local `--version` test fails, **refusing to upload a broken binary**. Do not edit `.github/workflows/release.yml` to re-enable CI macOS signing without first re-running the #219 diagnostic and proving the underlying issue is resolved. Full flow + env-var setup in `RELEASING.md` § "macOS signing is local-only".
+
 ## Development
 
 - `uv sync` to install.
