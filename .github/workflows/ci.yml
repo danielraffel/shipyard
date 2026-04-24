@@ -64,10 +64,18 @@ jobs:
             && echo "linux=\"namespace-profile-generouscorp\"" >> "$GITHUB_OUTPUT" \
             || echo "linux=\"ubuntu-latest\"" >> "$GITHUB_OUTPUT"
 
-          # Both namespace and github-hosted macOS resolve to macos-15
-          # today — Namespace piggybacks on GitHub's macOS runner fleet
-          # because Apple silicon hosting is a niche capacity.
-          echo "macos=\"macos-15\"" >> "$GITHUB_OUTPUT"
+          # Route macOS to Namespace's own M-series pool
+          # (namespace-profile-generouscorp-macos) when P_MACOS=namespace.
+          # The earlier assumption that "Namespace piggybacks on
+          # GitHub's macOS fleet" turned out to be wrong: Namespace
+          # runs its own macOS infrastructure with far shorter queue
+          # times than GH-hosted `macos-15`, which routinely stalls
+          # PRs 10-30 min during business hours. `release.yml`
+          # already routes macOS to namespace correctly; this brings
+          # PR checks into alignment.
+          [ "$P_MACOS" = "namespace" ] \
+            && echo "macos=\"namespace-profile-generouscorp-macos\"" >> "$GITHUB_OUTPUT" \
+            || echo "macos=\"macos-15\"" >> "$GITHUB_OUTPUT"
 
           [ "$P_WINDOWS" = "namespace" ] \
             && echo "windows=\"namespace-profile-generouscorp-windows\"" >> "$GITHUB_OUTPUT" \
@@ -128,12 +136,22 @@ jobs:
     # (LookupError, ModuleNotFoundError, PYI-*:ERROR, etc.). A clean
     # "Tailscale Funnel isn't available" exit is acceptable here and
     # proves the bundle itself is sound.
+    needs: resolve-runners
     name: Binary smoke (PyInstaller bundle health)
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ fromJSON(matrix.runs_on) }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-15]
+        include:
+          # Mirror the macOS/linux routing the main test job uses so
+          # Binary-smoke macOS doesn't get stuck in the GH-hosted
+          # `macos-15` queue while the resolver is pointing everyone
+          # else at Namespace. Windows isn't in this matrix (no
+          # Windows-specific PyInstaller smoke today).
+          - os: linux
+            runs_on: ${{ needs.resolve-runners.outputs.linux }}
+          - os: macos
+            runs_on: ${{ needs.resolve-runners.outputs.macos }}
     steps:
       - uses: actions/checkout@v5
       - name: Set up Python
