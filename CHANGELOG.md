@@ -3,6 +3,11 @@
 All notable changes to Shipyard are documented here. Each entry links
 to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
+<a id="v0490"></a>
+## [0.49.0] - 2026-04-24
+
+- ssh-windows: post-upload bundle probe (#247) ([#251](https://github.com/danielraffel/Shipyard/pull/251))
+
 <a id="v0480"></a>
 ## [0.48.0] - 2026-04-24
 
@@ -463,6 +468,7 @@ to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
 - feat/shipyard phases 1 4 ([#1](https://github.com/danielraffel/Shipyard/pull/1))
 
+[0.49.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.49.0
 [0.48.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.48.0
 [0.47.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.47.0
 [0.46.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.46.0
