@@ -610,6 +610,164 @@ exec "$REAL_CURL" "$@"
     )
 
 
+def test_install_sh_skips_download_when_already_at_target(tmp_path: Path) -> None:
+    # #231: redundant pulp+spectr back-to-back installs were burning
+    # ~15MB each time even when the target version matched what's
+    # already on disk. install.sh now short-circuits the download
+    # when VERSION_LABEL is a specific tag AND the existing binary
+    # reports that exact version. This test proves no download
+    # happens by shimming curl to drop a sentinel if called.
+    install_dir = tmp_path / "bin"
+    install_dir.mkdir()
+    existing = install_dir / "shipyard"
+    existing.write_text("#!/bin/sh\necho 'shipyard, version 0.46.0'\n")
+    existing.chmod(0o755)
+
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+    fake_curl = shim_dir / "curl"
+    sentinel = tmp_path / "curl-was-called"
+    fake_curl.write_text(f"""#!/bin/sh
+touch {sentinel!s}
+echo '"browser_download_url": "file://{existing}"'
+""")
+    fake_curl.chmod(0o755)
+
+    env = {
+        **os.environ,
+        "SHIPYARD_INSTALL_DIR": str(install_dir),
+        "SHIPYARD_VERSION": "v0.46.0",
+        "PATH": f"{shim_dir}:{os.environ.get('PATH', '')}",
+        "SHIPYARD_SKIP_SMOKE": "1",
+    }
+    env.pop("SHIPYARD_SKIP_DOWNLOAD", None)
+    env.pop("SHIPYARD_FORCE_REINSTALL", None)
+
+    result = subprocess.run(
+        ["bash", str(INSTALL_SH)],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"idempotent install failed: stdout={result.stdout!r} "
+        f"stderr={result.stderr!r}"
+    )
+    # Announcement so the operator sees the elision.
+    assert "Already at v0.46.0" in result.stdout or \
+           "skipping download" in result.stdout.lower()
+    # Sentinel proves curl was never invoked.
+    assert not sentinel.exists(), (
+        "curl should not have been invoked when the binary is "
+        "already at the target version"
+    )
+
+
+def test_install_sh_force_reinstall_overrides_idempotency(tmp_path: Path) -> None:
+    # Escape hatch: SHIPYARD_FORCE_REINSTALL=1 re-downloads even when
+    # the binary is already at the target.
+    install_dir = tmp_path / "bin"
+    install_dir.mkdir()
+    existing = install_dir / "shipyard"
+    existing.write_text("#!/bin/sh\necho 'shipyard, version 0.46.0'\n")
+    existing.chmod(0o755)
+
+    # The "release asset" the shim points at must have a filename
+    # that matches install.sh's ARTIFACT regex (shipyard-<os>-<arch>).
+    # Use the local binary renamed to that shape.
+    asset_src = tmp_path / "shipyard-macos-arm64"
+    asset_src.write_text("#!/bin/sh\necho 'shipyard, version 0.46.0'\n")
+    asset_src.chmod(0o755)
+
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+    fake_curl = shim_dir / "curl"
+    sentinel = tmp_path / "curl-called"
+    fake_curl.write_text(f"""#!/bin/sh
+touch {sentinel!s}
+echo '"browser_download_url": "file://{asset_src}"'
+""")
+    fake_curl.chmod(0o755)
+
+    env = {
+        **os.environ,
+        "SHIPYARD_INSTALL_DIR": str(install_dir),
+        "SHIPYARD_VERSION": "v0.46.0",
+        "SHIPYARD_FORCE_REINSTALL": "1",
+        "PATH": f"{shim_dir}:{os.environ.get('PATH', '')}",
+        "SHIPYARD_SKIP_SMOKE": "1",
+    }
+    env.pop("SHIPYARD_SKIP_DOWNLOAD", None)
+
+    result = subprocess.run(
+        ["bash", str(INSTALL_SH)],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"--force-reinstall failed: stdout={result.stdout!r} "
+        f"stderr={result.stderr!r}"
+    )
+    assert sentinel.exists(), (
+        "SHIPYARD_FORCE_REINSTALL=1 must re-download even when "
+        "version matches"
+    )
+
+
+def test_install_sh_idempotency_skipped_for_latest(tmp_path: Path) -> None:
+    # VERSION_LABEL=latest requires a network round-trip to know
+    # what "latest" resolves to, so short-circuit doesn't apply.
+    # This test proves curl still gets called when targeting latest
+    # even when the existing binary "looks recent."
+    install_dir = tmp_path / "bin"
+    install_dir.mkdir()
+    existing = install_dir / "shipyard"
+    existing.write_text("#!/bin/sh\necho 'shipyard, version 0.46.0'\n")
+    existing.chmod(0o755)
+
+    asset_src = tmp_path / "shipyard-macos-arm64"
+    asset_src.write_text("#!/bin/sh\necho 'shipyard, version 0.46.0'\n")
+    asset_src.chmod(0o755)
+
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+    fake_curl = shim_dir / "curl"
+    sentinel = tmp_path / "curl-called"
+    fake_curl.write_text(f"""#!/bin/sh
+touch {sentinel!s}
+echo '"browser_download_url": "file://{asset_src}"'
+""")
+    fake_curl.chmod(0o755)
+
+    env = {
+        **os.environ,
+        "SHIPYARD_INSTALL_DIR": str(install_dir),
+        "PATH": f"{shim_dir}:{os.environ.get('PATH', '')}",
+        "SHIPYARD_SKIP_SMOKE": "1",
+    }
+    env.pop("SHIPYARD_SKIP_DOWNLOAD", None)
+    env.pop("SHIPYARD_VERSION", None)  # defaults to latest
+    env.pop("SHIPYARD_FORCE_REINSTALL", None)
+
+    result = subprocess.run(
+        ["bash", str(INSTALL_SH)],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"latest install failed: stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    assert sentinel.exists(), (
+        "VERSION_LABEL=latest must consult the network — "
+        "can't short-circuit without resolving 'latest'"
+    )
+
+
 def test_install_sh_falls_back_to_bare_macho_when_no_dmg(tmp_path: Path) -> None:
     # Backward compat: if a tag has no .dmg asset (older releases,
     # forks without the local-sign script, etc.) install.sh must
