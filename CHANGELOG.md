@@ -3,6 +3,12 @@
 All notable changes to Shipyard are documented here. Each entry links
 to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
+<a id="v0420"></a>
+## [0.42.0] - 2026-04-23
+
+- doctor: macOS Gatekeeper + quarantine + codesign smoke (#216) ([#217](https://github.com/danielraffel/Shipyard/pull/217))
+- cloud: handoff subgroup — generalize runner re-routing to any GH Actions run (#77 MVP) ([#215](https://github.com/danielraffel/Shipyard/pull/215))
+
 <a id="v0410"></a>
 ## [0.41.0] - 2026-04-23
 
@@ -416,6 +422,7 @@ to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
 - feat/shipyard phases 1 4 ([#1](https://github.com/danielraffel/Shipyard/pull/1))
 
+[0.42.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.42.0
 [0.41.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.41.0
 [0.40.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.40.0
 [0.39.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.39.0
