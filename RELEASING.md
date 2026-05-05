@@ -73,47 +73,12 @@ Run that after the auto-tag appears. The release workflow will pick up the exist
 
 ### How to cut a macOS release
 
-CI handles Linux + Windows. For the macOS `.dmg`:
-
-```bash
-# One-time setup — either .env or shell rc.
-export SHIPYARD_NOTARIZE_APPLE_ID=<apple-id-email>
-export SHIPYARD_NOTARIZE_TEAM_ID=<team-id>              # 10-char from developer.apple.com/account
-export SHIPYARD_NOTARIZE_APP_PASSWORD=<app-specific>    # appleid.apple.com → Sign-In and Security
-export SHIPYARD_SIGNING_IDENTITY=<SHA1-or-CN>           # `security find-identity -v -p codesigning`
-
-# After release.yml workflow publishes non-macOS assets:
-./scripts/release-macos-local.sh --tag vX.Y.Z --upload
-```
-
-The script is 8 steps:
-
-1. Fail fast on missing env vars (before the Rust release build).
-2. Build via `cargo build --release --locked --bin shipyard`.
-3. Re-sign outer Mach-O with `--options runtime --timestamp`.
-4. Package the signed Mach-O into a `.dmg` (`hdiutil create`, volname "Shipyard").
-5. Sign the DMG itself.
-6. Submit to Apple, wait for `status: Accepted`, then `xcrun stapler staple` and `xcrun stapler validate`.
-7. **Local launch test** — mount the stapled DMG read-only, run `<binary> --version`. Refuses to upload if this fails. Distinguishes exit 3 (local launch broke) from exit 4 (download path broke).
-8. **End-to-end verification after upload** — runs the local `install.sh` against the just-uploaded tag. Downloads the dmg, mounts, extracts, launches. Exit 4 if this fails, with a warning that the upload already happened and needs manual deletion.
-
-### Lesson codified
-
-We shipped v0.42.0 and v0.43.0 with the same class of breakage because we declared "works" based on partial verification. The release script now enforces what we should have been doing all along: **the only success criterion is `--version` printing after a fresh install.sh → mount → extract → launch flow**. If any step in that chain fails, the release fails, regardless of what `codesign --verify` or `spctl --assess` say.
-
-### Why the repo secrets stay
-
-The five secrets below are kept in the repo even though CI doesn't use them today — they're needed for:
-
-- ~~Future Rosetta-hosted local cross-builds for x64~~ (retired by #256 — Intel dropped as of v0.50.0; arm64 only)
-- Forks that may re-enable CI signing for their own environments (tracked in #226)
-- The `.dmg` pipeline above reuses `SHIPYARD_SIGNING_IDENTITY` conceptually (the cert is in the local keychain rather than a GH secret, but the same cert)
-
-Five secrets on the repo (all `gh secret set NAME`):
-
-### How to cut a macOS release
-
-CI still handles Linux + Windows. For the macOS binary:
+Tag pushes create a draft GitHub release with Linux and Windows
+artifacts. The macOS job builds and launch-smokes the Rust binary, but
+does not upload an unsigned artifact unless the optional CI signing
+experiment is explicitly enabled. The maintainer-local path remains the
+primary macOS release path because it proves the exact DMG on the Mac
+that will use it.
 
 ```bash
 # One-time setup — either .env file or shell rc.
@@ -122,8 +87,8 @@ export SHIPYARD_NOTARIZE_TEAM_ID=<team-id>              # 10-char from developer
 export SHIPYARD_NOTARIZE_APP_PASSWORD=<app-specific>    # appleid.apple.com → Sign-In and Security
 export SHIPYARD_SIGNING_IDENTITY=<SHA1-or-CN>           # `security find-identity -v -p codesigning`
 
-# After the release.yml workflow publishes the non-macOS assets:
-./scripts/release-macos-local.sh --tag vX.Y.Z --upload
+# After release.yml creates the draft release:
+./scripts/release-macos-local.sh --tag vX.Y.Z --upload --rollback-tag vPREVIOUS
 ```
 
 The script runs the full pipeline on the local Mac:
@@ -134,34 +99,40 @@ The script runs the full pipeline on the local Mac:
 4. Packages the signed binary into a `.dmg`, signs the DMG, submits it via `xcrun notarytool submit --wait`, and staples the accepted ticket.
 5. **Runs `<binary> --version` from the mounted DMG locally.** If this fails, the script exits and does NOT upload. This is the whole point — the Mac running the script is the same Mac that will need to launch the binary tomorrow.
 6. On launch success: uploads via `gh release upload --clobber`, updates `checksums.sha256`, verifies public asset visibility, and runs the `install.sh` E2E.
+7. With `--rollback-tag`, verifies baseline install, upgrade to the new release, and rollback to the previous release in an isolated temp install directory.
 
 Running without `--upload` is the diagnostic mode (used to confirm the local signing path actually works on a given Mac). Script-helper tests under `scripts/test_*.py` ensure missing creds / bad flags / bash syntax errors all surface before the expensive build step.
 
-### Why the repo secrets are still listed below
+### Optional CI macOS signing
 
-The CI signing steps have been removed from `.github/workflows/release.yml` (build-only for macOS, no signing / notarizing / uploading). The five secrets below are kept in the repo for:
+CI signing is dormant unless the repository variable
+`CI_MACOS_SIGNING_ENABLED=true` is set. When enabled, the macOS release
+job imports a Developer ID identity into an ephemeral keychain, resolves
+the identity by Team ID, and runs `scripts/release-macos-local.sh
+--ci-mode --upload`.
 
-- ~~The x64 slice once we add Rosetta-hosted local cross-builds~~ (retired; see above)
-- Future `.dmg` stapling pipeline (task #52 — the long-term answer that eliminates Apple's online-check dependency entirely)
-- Forks that might want to re-enable CI signing for their own environments
-
-Five secrets on the repo (all `gh secret set NAME`):
+Required CI secret names:
 
 | Secret | What |
 |---|---|
-| `APPLE_ID` | Apple ID email (same one used for Developer ID certificate) |
-| `TEAM_ID` | 10-char Team ID from [developer.apple.com/account](https://developer.apple.com/account) |
-| `APP_SPECIFIC_PASSWORD` | App-specific password generated at [appleid.apple.com](https://appleid.apple.com) → Sign-In and Security → App-Specific Passwords |
-| `SIGNING_CERT_P12_BASE64` | `base64 -i DeveloperID.p12` of your exported Developer ID Application cert + private key |
-| `SIGNING_CERT_PASSWORD` | Export password for the .p12 |
+| `MACOS_NOTARIZE_APPLE_ID` | Apple ID email used for notarization |
+| `MACOS_NOTARIZE_TEAM_ID` | 10-char Team ID from developer.apple.com/account |
+| `MACOS_NOTARIZE_APP_PASSWORD` | App-specific Apple ID password |
+| `MACOS_SIGN_P12_BASE64` | Base64-encoded Developer ID Application cert + private key |
+| `MACOS_SIGN_P12_PASSWORD` | Export password for the `.p12` |
 
-When the CI signing experiment is enabled, the release workflow's macOS job imports the cert into a temp keychain, resolves the Developer ID Application identity by **Team ID**, builds the Rust binary, signs and notarizes the `.dmg`, and uploads it to the draft release. The maintainer's local `scripts/release-macos-local.sh` path remains the primary verification path because it performs the same install.sh E2E on the Mac that will use the binary.
+If the variable is unset, the macOS CI job is build-health-only. Forks
+and pull requests from external contributors are not blocked by signing
+credentials.
 
-The gate is all-five-present (not just `APPLE_ID`). A partial rotation — say a new `APPLE_ID` pasted in but the new `SIGNING_CERT_P12_BASE64` not yet uploaded — used to run the signing path and fail mid-release on `base64 -d`. Now the step cleanly no-ops in that state and the ad-hoc fallback publishes normally.
+### Lesson codified
 
-When the secrets aren't set, the CI sign+notarize job is skipped. Forks and pull requests from external contributors aren't blocked.
-
-A bare Mach-O can't be `stapler staple`'d — Gatekeeper verifies notarization online at first launch instead. That requires network, which every CI / user machine has. Accepted tradeoff vs wrapping the CLI in a no-op `.app` bundle just for stapling.
+We shipped v0.42.0 and v0.43.0 with the same class of breakage because
+we declared "works" based on partial verification. The release script
+now enforces the actual success criterion: `install.sh` downloads the
+DMG, mounts it, extracts the binary, and `shipyard --version` launches.
+If any step in that chain fails, the release fails regardless of what
+`codesign --verify` or `spctl --assess` said earlier.
 
 ## Preferred runner provider
 
@@ -199,12 +170,17 @@ gh variable delete DEFAULT_RUNNER_PROVIDER_WINDOWS --repo danielraffel/Shipyard
 
 ## Default path: automatic on merge
 
-Normal releases are automatic. You don't call any script.
+Normal releases are automatic through draft creation. The macOS DMG
+publish step still follows the signed release runbook above unless CI
+macOS signing is explicitly enabled.
 
 1. Open a PR via `shipyard pr` (or `shipyard ship`).
 2. CI runs `.github/workflows/version-skill-check.yml`, which confirms the right bump(s) are present via `scripts/version_bump_check.py` + `scripts/skill_sync_check.py`. Merge on green.
 3. On push to `main`, `.github/workflows/auto-release.yml` diffs `Cargo.toml`'s package version against the previous push. If it moved, the workflow creates a `v<x.y.z>` tag.
-4. The existing tag-triggered `release.yml` builds binaries on 5 platforms and publishes the GitHub Release.
+4. The existing tag-triggered `release.yml` builds Linux, Windows, and
+   macOS ARM64 release candidates, creates a draft GitHub Release, and
+   leaves macOS signing/upload to the runbook unless CI macOS signing is
+   explicitly enabled.
 
 Plugin-version bumps (`.claude-plugin/plugin.json`) are intentionally **not** tagged — plugin files are delivered from git, not from the binary. Bumping the plugin version still requires a PR and goes through the same gate, but it doesn't cut a binary release.
 
@@ -254,9 +230,10 @@ The script:
 3. Tags the commit (`v0.1.1`)
 4. Pushes the tag
 5. The tag push triggers `.github/workflows/release.yml` which:
-   - Builds binaries on macOS ARM64, Windows x64, Linux x64, and Linux ARM64
-   - Creates a GitHub Release with binaries + SHA256 checksums
-   - Uses GitHub-hosted runners by default; Namespace via manual dispatch
+   - Builds Linux x64, Linux ARM64, Windows x64, and macOS ARM64 release candidates
+   - Uploads non-macOS binaries plus SHA256 checksums to a draft GitHub Release
+   - Leaves macOS signing/upload to `scripts/release-macos-local.sh` unless CI macOS signing is explicitly enabled
+   - Uses the configured runner provider, with Namespace as the preferred default
 
 ## Monitoring a release
 
