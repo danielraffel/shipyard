@@ -1,210 +1,202 @@
-# Rust Cutover And Rollback
+# Rust Shipyard Release And Rollback
 
-This page records the operational checklist for the first Rust-backed
-Shipyard release. It is intentionally conservative: do not replace a
-working Python install, publish a release, or update consumer pins until
-the final go/no-go has been approved.
+Shipyard is Rust-backed by default as of `v0.51.0`. The current
+post-cutover release is `v0.51.1`, which includes the `cloud retarget`
+cancellation-denial diagnostics from issue `#265`.
 
-## Current Cutover Candidate
+This page is now an operator runbook: how to validate the installed
+binary, how release artifacts are produced, how to test live webhook
+delivery safely, and how to roll back if the Rust CLI or daemon
+regresses.
 
-- Migration worktree: `/Users/danielraffel/Code/shipyard-mainline-rust-cutover`
-- Branch: `rust-mainline-cutover`
-- Prepared commits: `f368a22` (`Migrate Shipyard CLI to Rust`) and
-  `66b2dcd` (`Document Rust cutover runbook`)
-- Python parity baseline: `d1999c69085f5b8c8c8672cb3943be3ccc59ed66`
-- Rust version: `shipyard 0.51.0`
+## Current Release Shape
 
-The daily fallback remains the installed Python binary until cutover:
+- `shipyard` and `sy` install to `~/.local/bin`.
+- Current macOS releases are Apple Silicon only:
+  `shipyard-macos-arm64.dmg`.
+- Linux x64, Linux arm64, and Windows x64 ship as native standalone
+  binaries.
+- macOS artifacts must be Developer-ID signed, notarized, stapled into
+  a DMG, mounted, extracted, and launch-tested before the GitHub release
+  is published.
+- The release stays draft until all expected public assets and
+  `checksums.sha256` are present and install E2E has passed.
 
-```sh
-/Users/danielraffel/.local/bin/shipyard --version
-```
+## Validate The Installed CLI
 
-Expected pre-cutover output:
-
-```text
-shipyard, version 0.46.0
-```
-
-## Required Go/No-Go Gates
-
-Run these before opening or merging the migration PR:
+Run these after install, upgrade, rollback, or daemon refresh:
 
 ```sh
-python3 scripts/compare_cli_surface.py \
-  --python-bin /Users/danielraffel/Code/shipyard/.venv/bin/shipyard \
-  --rust-bin target/release/shipyard \
-  --allow-rust-only paths
+shipyard --version
+sy --version
+shipyard --json doctor
+shipyard --json doctor --release-chain
+shipyard wait release v0.51.1 --repo danielraffel/Shipyard --timeout 60 --json
+codesign --verify --deep --strict "$(command -v shipyard)"
+```
 
+Expected healthy state:
+
+- `shipyard --version` and `sy --version` report the same release.
+- `doctor.ready` is `true`.
+- `daemon-version` says the daemon and CLI versions match.
+- `doctor --release-chain` reports `release_chain.version:
+  checkout-ok` when `RELEASE_BOT_TOKEN` is configured.
+- `wait release` observes the expected release assets from
+  `danielraffel/Shipyard`, not from the current checkout's inferred
+  repo. Pass `--repo` explicitly when running from a sidecar repo.
+
+## Release Gates
+
+Before publishing a new Shipyard CLI release, run the local gates that
+match the change:
+
+```sh
 python3 -m unittest discover -s scripts -p 'test_*.py'
 cargo fmt -- --check
 cargo clippy --all-targets --locked -- -D warnings
 cargo test --all-targets --locked
 cargo llvm-cov --locked --summary-only --fail-under-lines 75
+python3 -m pytest tools/sandbox-e2e/ -q
+```
 
+For release candidates, also validate the package/install path in an
+isolated sandbox:
+
+```sh
 SHIPYARD_BINARY_FOR_TEST="$PWD/target/release/shipyard" \
-SHIPYARD_PYTHON_REPO_FOR_TEST=/Users/danielraffel/Code/shipyard \
-SHIPYARD_PYTHON_FOR_TEST=/Users/danielraffel/Code/shipyard/.venv/bin/python \
-  /Users/danielraffel/Code/shipyard/.venv/bin/python -m pytest tools/sandbox-e2e/ -q
+  python3 -m pytest tools/sandbox-e2e/ -q
 ```
 
-Expected result from the latest rehearsal:
+The Rust cutover rehearsal passed CLI surface parity, 82%+ line
+coverage, local unit/script gates, sandbox E2E, signed macOS rehearsal,
+GUI validation, release-chain doctor, and live webhook validation before
+`v0.51.0` was merged.
 
-- CLI surface compare: `missing_from_rust: []`
-- Rust tests: `583` passing
-- Coverage: `82.44%` line coverage
-- Script tests: `63` passing
-- Sandbox E2E: `38` passing with Python parity enabled
+## macOS Release
 
-## Release Rehearsal
+The default tag push creates a draft release with non-macOS artifacts.
+The macOS DMG is then produced by either the local maintainer path or
+the optional CI signing path.
 
-Build and sign a no-upload macOS artifact:
-
-```sh
-cargo build --release --locked --bin shipyard
-
-scripts/release-macos-local.sh \
-  --tag v0.51.0-rust-finalwindow-20260505-0550 \
-  --skip-build \
-  --binary target/release/shipyard \
-  --dist-dir target/release-rehearsal \
-  --env-file /Users/danielraffel/Code/PlunderTube/.env
-```
-
-The latest rehearsal produced:
-
-```text
-target/release-rehearsal/v0.51.0-rust-finalwindow-20260505-0550/shipyard-macos-arm64.dmg
-```
-
-The DMG was signed, notarized, stapled, validated, mounted, and
-launch-smoked as `shipyard 0.51.0`. No upload was performed.
-
-## Release-Chain Doctor
-
-The Rust migration branch adds `workflow_dispatch` to
-`.github/workflows/auto-release.yml` so `shipyard doctor --release-chain`
-can verify the release-bot checkout path.
-
-Before this migration is merged, live Python `main` does not have that
-trigger. A pre-merge run can therefore fail with GitHub HTTP `422`
-(`Workflow does not have 'workflow_dispatch' trigger`) even though the
-prepared migration branch contains the required workflow change. Treat
-that as a pre-merge validation limitation, not as a Rust runtime failure.
-
-After the migration lands on `main`, run:
-
-```sh
-shipyard --json doctor --release-chain
-```
-
-Expected result after merge: `ready: true`, `release_chain.ok: true`,
-and `RELEASE_BOT_TOKEN` configured.
-
-## GUI Validation
-
-Validate the macOS GUI against the exact Rust artifact selected for
-cutover:
-
-```sh
-SHIPYARD_GUI_TEST_RUST_BINARY=/tmp/shipyard-gui-finalwindow-XfMulU/shipyard \
-  xcodebuildmcp macos test \
-  --project-path ShipyardMenuBar.xcodeproj \
-  --scheme ShipyardMenuBar
-```
-
-Latest result against the signed final-window artifact: `19` passed,
-`1` skipped, `0` failed on My Mac macOS `26.4.1`.
-
-If Xcode stalls before test execution in `SWBBuildService` or `clang`,
-record that as an Xcode build-system caveat. Do not classify it as a
-Rust runtime failure unless the Rust binary is actually executed and
-fails.
-
-## Webhook And Funnel Gate
-
-Non-mutating preflight is safe anytime:
-
-```sh
-python3 scripts/validate_webhook_tunnel_live.py \
-  --binary target/release/shipyard \
-  --json
-```
-
-Full live delivery is a machine-level Tailscale Funnel takeover. Run it
-only in an approved window:
-
-```sh
-python3 scripts/validate_webhook_tunnel_live.py \
-  --binary target/release/shipyard \
-  --apply \
-  --allow-funnel-reset \
-  --json
-```
-
-The validator resets Serve/Funnel only for an owned validation run and
-cleans up transient GitHub hooks. If the daily Python daemon currently
-owns Funnel, stop it deliberately, run the Rust gate, then either restore
-Python or proceed with the approved cutover.
-
-## Release And Install
-
-Do not use `--upload` until the release tag, rollback tag, and monitoring
-window are agreed:
+Local signing remains the primary release path:
 
 ```sh
 scripts/release-macos-local.sh \
   --tag vX.Y.Z \
   --upload \
   --rollback-tag vPREVIOUS \
-  --env-file /Users/danielraffel/Code/PlunderTube/.env
+  --env-file /path/to/release.env
 ```
 
-The release script keeps GitHub releases draft until expected assets are
-present and install E2E succeeds. A failed install E2E returns a just-
-published release to draft.
+Required environment:
 
-## Rollback
+- `SHIPYARD_NOTARIZE_APPLE_ID`
+- `SHIPYARD_NOTARIZE_TEAM_ID`
+- `SHIPYARD_NOTARIZE_APP_PASSWORD`
+- `SHIPYARD_SIGNING_IDENTITY`
 
-Rollback if Rust doctor, GUI selected-CLI resolution, daemon IPC,
-webhook/Funnel, installer E2E, or a consumer gate fails.
+The script builds or accepts a supplied binary, signs the Mach-O,
+packages a DMG, signs and notarizes the DMG, staples the ticket,
+mounts the DMG, runs `shipyard --version`, uploads the macOS artifact,
+merges checksums, verifies public asset visibility, and runs
+install/upgrade/rollback E2E when a rollback tag is provided.
 
-1. Stop the Rust daemon:
+The optional CI path is gated by `CI_MACOS_SIGNING_ENABLED=true` and
+requires the `MACOS_SIGN_*` / `MACOS_NOTARIZE_*` secret set. CI signing
+uses an ephemeral keychain and the same `release-macos-local.sh
+--ci-mode` orchestration. If CI signing is not enabled, the macOS job is
+build-health-only and does not upload an unsigned artifact.
 
-   ```sh
-   shipyard daemon stop
-   ```
+## Webhook And Funnel Validation
 
-2. Reinstall the recorded previous Python Shipyard release.
-3. Confirm the fallback binary:
+Non-mutating preflight is safe anytime:
 
-   ```sh
-   /Users/danielraffel/.local/bin/shipyard --version
-   shipyard --json doctor
-   ```
+```sh
+python3 scripts/validate_webhook_tunnel_live.py \
+  --repo danielraffel/Shipyard \
+  --binary "$(command -v shipyard)" \
+  --json
+```
 
-4. Point the GUI selected CLI path back to the Python binary if needed.
-5. Revert or supersede consumer pin PRs targeting the Rust release.
-6. If release upload already happened and install E2E failed, keep the
-   release in draft until the failure is understood.
+Full live validation creates a temporary GitHub webhook and may reset the
+machine-global Tailscale Serve/Funnel route. Run it only when that short
+interruption is acceptable:
 
-## Consumer Pin Updates
+```sh
+python3 scripts/validate_webhook_tunnel_live.py \
+  --repo danielraffel/Shipyard \
+  --binary "$(command -v shipyard)" \
+  --apply \
+  --allow-funnel-reset \
+  --json
+```
 
-Do not update Pulp or other consumers until the Rust release is published
-and stable.
+The validator understands the App Store Tailscale build and probes
+`/Applications/Tailscale.app/Contents/MacOS/Tailscale` when PATH shims
+are unavailable. A healthy non-mutating pass proves `gh`, `curl`,
+GitHub hook read access, DNS, Funnel permission, and current Funnel
+status without changing the route.
 
-When approved, update consumers through the CLI rather than hand-editing:
+## GUI And Consumers
+
+The macOS GUI should use the selected CLI path as the source of truth.
+When the selected CLI supports `shipyard --json paths`, the GUI can
+derive daemon socket, pid, and state paths from that response. Older
+Python binaries without `paths` need the legacy production socket
+fallback.
+
+Do not update Pulp or other consumer pins as part of a Shipyard release
+PR. After the release is published and stable, update consumers through:
 
 ```sh
 shipyard pin show
 shipyard pin bump --to vX.Y.Z
 ```
 
-Keep those PRs isolated and validate each consumer with its normal
-Shipyard gate.
+Keep consumer pin PRs isolated from unrelated docs or source changes.
+
+## Rollback
+
+Rollback if the new release fails doctor, daemon IPC, GUI selected-CLI
+resolution, webhook/Funnel validation, installer E2E, or a consumer
+gate.
+
+1. Stop the daemon:
+
+   ```sh
+   shipyard daemon stop
+   ```
+
+2. Reinstall the last known-good release, or restore a preserved local
+   backup binary:
+
+   ```sh
+   SHIPYARD_VERSION=vPREVIOUS \
+     curl -fsSL https://generouscorp.com/Shipyard/install.sh | bash
+   ```
+
+3. Confirm the restored binary:
+
+   ```sh
+   shipyard --version
+   shipyard --json doctor
+   ```
+
+4. Restart the daemon only after the restored CLI is healthy.
+5. Point the GUI selected CLI path back to the restored binary if needed.
+6. Revert or supersede any consumer pin PRs that targeted the bad
+   release.
+7. If a just-published GitHub release failed install E2E, return it to
+   draft or delete the bad asset before users can install it.
 
 ## Deferred Features
 
-Issue `#265` and issue `#266` are intentionally post-cutover unless they
-land in Python before merge. The cutover goal is parity and stability,
-not new feature scope.
+Issue `#265` shipped in `v0.51.1`. Its additive-dispatch extension is
+still intentionally not implemented because a standalone dispatch may
+not satisfy the same stale PR-event required check context.
+
+Issue `#266` remains the next deferred post-cutover candidate:
+`SHIPYARD_PR_RUNNING=1` for supervised `shipyard pr` child processes and
+clean GraphQL rate-limit backoff. Keep it separate from release
+stability work.

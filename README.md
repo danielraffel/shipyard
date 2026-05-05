@@ -117,9 +117,9 @@ It calls your build commands and cares about one thing: did they pass?
 - [Release automation](RELEASING.md) — `shipyard release-bot setup`,
   `doctor --release-chain`, and the PAT + secret setup for the auto-
   release tag → binaries chain.
-- [Rust cutover and rollback](docs/cutover.md) — final go/no-go gates,
-  signed-artifact rehearsal, GUI validation, webhook/Funnel validation,
-  and rollback steps for the Rust migration.
+- [Rust release and rollback](docs/cutover.md) — post-cutover release
+  validation, signed macOS packaging, webhook/Funnel validation, GUI and
+  consumer notes, and rollback steps.
 - [Mid-flight runner retargeting](docs/cloud-retarget.md) — switch one
   target's runner provider on an open PR without tearing down the
   other targets' jobs.
@@ -150,7 +150,9 @@ Shipyard validates and ships itself. The config is in
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs tests on
 macOS, Linux, and Windows on every push. The release workflow at
 [`.github/workflows/release.yml`](.github/workflows/release.yml) builds
-binaries on 5 platforms when a version is tagged.
+Linux, Windows, and macOS ARM64 release candidates when a version is
+tagged; the macOS DMG is signed/notarized and published through the
+release runbook.
 
 ## FAQ
 
