@@ -3,6 +3,13 @@
 All notable changes to Shipyard are documented here. Each entry links
 to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
+<a id="v0510"></a>
+## [0.51.0] - 2026-05-04
+
+- rust mainline cutover ([#267](https://github.com/danielraffel/Shipyard/pull/267))
+- sandbox-e2e: address #260 Codex P1 + P2 ([#264](https://github.com/danielraffel/Shipyard/pull/264))
+- shipyard run: scope drift-guard banner to enforceable targets (#262 Codex P2) ([#263](https://github.com/danielraffel/Shipyard/pull/263))
+
 <a id="v0500"></a>
 ## [0.50.0] - 2026-04-25
 
@@ -481,6 +488,7 @@ to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
 - feat/shipyard phases 1 4 ([#1](https://github.com/danielraffel/Shipyard/pull/1))
 
+[0.51.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.51.0
 [0.50.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.50.0
 [0.49.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.49.0
 [0.48.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.48.0
