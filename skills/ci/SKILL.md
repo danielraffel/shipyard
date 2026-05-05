@@ -175,8 +175,16 @@ shipyard cloud retarget --pr 224 --target macos --provider namespace --apply
 
 What it does:
 1. Finds the PR's latest workflow run.
-2. Cancels the **one job** matching `--target` on the old provider (substring match on the job name, e.g. `macos` matches `macOS (ARM64) [github-hosted]`).
+2. Cancels the **one job** matching `--target` on the old provider (substring match on the job name, e.g. `macos` matches `macOS (ARM64) [github-hosted]`). If every active job in the run matches that target, Shipyard can safely fall back to cancelling the whole run.
 3. Dispatches a fresh workflow run with the new provider.
+
+Cancellation failures are fail-closed. If GitHub denies or cannot find the
+job/run, Shipyard does **not** dispatch a replacement. It reports
+`event=cancel_failed`, classifies the failure (`auth`, `scope`, `not_found`,
+`unsupported`, `transient`, `unknown`), includes the run/job URLs, and prints
+manual recovery steps. Do not treat a standalone `workflow_dispatch` as an
+equivalent fallback unless the workflow/check integration is known to satisfy
+the same required PR check context.
 
 **Known limitation (read before running):** step 3 starts a new workflow run, so targets other than the one you retargeted will also re-run in that new run. Their *prior* pass/fail statuses persist on the PR's check rollup, and pulp-style `resolve-provider` matrix workflows reuse caches — so the net effect is "flip the lane" without losing ground on the other lanes, even though they technically re-execute.
 
