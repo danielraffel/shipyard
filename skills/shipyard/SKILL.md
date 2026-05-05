@@ -87,6 +87,18 @@ Read `references/platforms.md` when work touches Tailscale, live mode,
 signing, packaging, Namespace/GitHub Actions runners, Windows SSH/PowerShell,
 or cross-platform sandbox E2E behavior.
 
+## Cloud Retargeting
+
+`shipyard cloud retarget --apply` is intentionally fail-closed. It cancels
+matching GitHub Actions jobs first, uses whole-run cancellation only when every
+active job in the run matches the target, and does not dispatch a replacement
+if cancellation cannot be proven complete. When handling `event=cancel_failed`,
+preserve the classification (`auth`, `scope`, `not_found`, `unsupported`,
+`transient`, `unknown`), run/job URLs, manual recovery steps, and
+branch-protection warning; do not collapse HTTP 404/not-found into an
+`actions:write` scope hint unless the raw error also indicates auth or
+permission trouble.
+
 ## Cutover Discipline
 
 Cutover is a human decision, not an implementation side effect. Before asking

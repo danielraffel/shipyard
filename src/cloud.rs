@@ -155,6 +155,10 @@ impl GitHubError {
         }
     }
 
+    pub(crate) fn message(&self) -> &str {
+        &self.message
+    }
+
     fn command_failed(args: &[String], status: Option<i32>, stderr: &[u8]) -> Self {
         let stderr = String::from_utf8_lossy(stderr).trim().to_owned();
         let status = status.map_or_else(|| "signal".to_owned(), |code| code.to_string());

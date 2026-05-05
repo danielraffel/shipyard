@@ -35,15 +35,20 @@ A few Shipyard commands (`cloud retarget`, `cloud handoff`, anything
 that cancels + re-dispatches a GitHub Actions workflow run) need a
 `gh` token with the **`workflow` scope** — GitHub's short name for
 `actions:write` on a classic PAT, or **Actions: Read and write** on a
-fine-grained token. Without it you'll hit:
+fine-grained token. Without it you'll hit a classified cancellation
+failure before Shipyard dispatches a replacement:
 
 ```
-error: Couldn't cancel the matching job(s). Your gh token may lack
-`actions:write` scope.
+Couldn't cancel every matching job for PR #224 target=mac; no replacement dispatch was sent.
+Cancellation failed for job 71460714958 (macOS (ARM64) [github-hosted]): scope HTTP 403.
+Auth recovery: run `gh auth refresh -h github.com -s workflow`, or grant Actions: Read and write on the token/App identity.
 ```
 
 `shipyard doctor` probes for this; fix it at install time so the
-first retarget attempt doesn't surprise you.
+first retarget attempt doesn't surprise you. If the classification is
+`not_found` instead of `scope`, the failure usually means GitHub could
+not see or cancel that job anymore; open the run URL Shipyard prints,
+cancel manually if needed, then re-run the retarget command.
 
 ### Interactive gh login (most common)
 

@@ -283,14 +283,27 @@ inspection. `shipyard cleanup --ship-state` ages these out (see T12).
 ### T9 — `cloud retarget` mid-flight
 
 - **From:** `STATE_IN_FLIGHT`
-- **To:** `STATE_IN_FLIGHT` — but the `ShipState` file is **not updated**.
+- **To:** `STATE_IN_FLIGHT` with the existing target's `DispatchedRun`
+  replaced after successful cancellation + redispatch.
 - **Trigger:** `shipyard cloud retarget --pr <n> --target <lane> --provider <prov> --apply`
-- **Writes:** **None.** The apply path cancels the matching live job via `gh run` (cli.py:2101) and dispatches the new workflow via `workflow_dispatch` (cli.py:2116). It never loads, mutates, or saves `ShipState`.
-- **⚠ Known bug — Bug B3.** Retarget dispatches a new workflow but leaves the `DispatchedRun` rows unchanged. The watch loop sees the old `DispatchedRun(target, provider=old, run_id=old_id)` alongside a new GH Actions run for the same target but on a different provider. `_update_ship_state_from_job` won't fire for the retargeted lane unless the fresh dispatch flows through `_execute_job` (it does not). Phase B test: retarget + watch + assert that either (a) the `DispatchedRun` is updated in state, or (b) the watch surfaces the drift to the operator. Neither happens today.
+- **Writes:** Cancels matching live job(s) through the GitHub Actions job-cancel
+  endpoint. If every active job in the run matches the target, Shipyard may
+  safely fall back to cancelling the whole run. After cancellation is proven,
+  it dispatches the new workflow and saves the updated `ShipState` with the
+  target row replaced.
+- **Bug B3 fixed.** Retarget no longer leaves stale `DispatchedRun` rows after
+  a successful dispatch; the saved row carries the new provider and run id.
 - **Failure modes**
-  - Cancel partial success: retarget proceeds to dispatch. Stale lane consumes cloud quota but does not block merge.
-  - Cancel total failure: retarget aborts at cli.py:2108 **before** dispatching. Old job keeps running; no new lane.
-  - Dispatch failure after cancel success: old job is cancelled, no new lane persisted — the target is effectively gone from the in-flight dispatch set.
+  - Cancel partial success: retarget aborts **before** dispatch, reports
+    `event=cancel_failed`, includes any `cancelled_job_ids`, and leaves
+    `stale_old_blocker_status="unknown_cancel_failed"`.
+  - Cancel total failure: retarget aborts **before** dispatch and classifies the
+    failure (`auth`, `scope`, `not_found`, `unsupported`, `transient`,
+    `unknown`) with manual recovery steps.
+  - Whole-run fallback succeeds: retarget proceeds to dispatch and reports
+    `run_cancel_fallback_used=true`; `stale_old_blocker_status="cleared"`.
+  - Dispatch failure after cancel success: old job/run is cancelled, but no new
+    lane is persisted; retry after inspecting GitHub Actions state.
 
 ### T10 — `cloud add-lane` mid-flight
 
@@ -346,7 +359,7 @@ inspection. `shipyard cleanup --ship-state` ages these out (see T12).
 | `gh pr view` (idempotency for `auto-merge`) | T5 (no-state branch only) | auth / network | On failure the command falls through to `pr-not-found`. Not reached when the state file is present.                |
 | `workflow_dispatch`                    | T2, T9, T10         | 404 / 5xx / rate-limit       | Add-lane: exits before mutation. Retarget: if dispatch fails after cancel succeeded, the old lane is gone and no new lane exists. `ship` path goes through `CloudExecutor` inside `_execute_job`. |
 | `find_dispatched_run`                  | T2, T10             | timeout                      | DispatchedRun persisted with `pending-<target>` sentinel. **No backfill path exists.**                              |
-| `gh run cancel` (retarget)             | T9                  | race / auth                  | If cancel fails completely, retarget aborts before dispatch. Partial cancellation proceeds to dispatch → stale old job runs alongside new.                                   |
+| GitHub Actions cancel (retarget)       | T9                  | race / auth / scope / unsupported / not-found | If cancellation is not proven complete, retarget aborts before dispatch with `event=cancel_failed`. Partial cancellation no longer dispatches additively. Whole-run fallback is used only when every active job matches the target. |
 | `gh pr merge`                          | T5                  | branch protection / auth / already-merged | `ship`: unwrapped, propagates. `auto-merge`: wrapped, exits 1 with `merge-failed`. "Already merged" from a failed-archive retry is currently reported as `merge-failed`, not idempotent success (see T5). |
 | SSH backend probe                      | T2 (preflight)      | network / auth / host_key     | Pre-#100: silent hang. Post-#100: exit 3 with classified error inside 10s.                                           |
 | `git rev-parse HEAD` (branch/SHA)      | T1, T7              | worktree gone                 | `ship` aborts at cli.py:2582 before drift detection if branch or SHA is unavailable.                                 |

@@ -59,7 +59,8 @@ shipyard cloud retarget --pr 224 --target mac --provider namespace --apply
 
 1. Cancels the **one** matching in-progress job (`macOS (ARM64) [github-
    hosted]`). Other targets on the same run (Linux, Windows) keep
-   running.
+   running. If every active job in the run matches the target,
+   Shipyard may safely fall back to cancelling the whole run.
 2. Dispatches a fresh workflow_dispatch with `runner_provider=namespace`.
 
 `--target` uses substring + case-insensitive matching against the job
@@ -103,27 +104,41 @@ Or run in parallel with `xargs -P` for faster propagation.
 
 ## Authentication
 
-Cancelling a workflow run uses `gh api -X POST
-/repos/:owner/:repo/actions/runs/:id/cancel` (the run-level endpoint
-GitHub exposes; `gh run cancel` wraps the same path). It needs the
-**`workflow` scope** on the PAT `gh` is authenticated with — GitHub's
-short name for `actions:write` on classic PATs, or **Actions: Read
-and write** on fine-grained tokens.
+Retargeting starts with GitHub's job-cancel endpoint:
+`gh api -X POST /repos/:owner/:repo/actions/jobs/:job_id/cancel`.
+When all active jobs in a run match the target, Shipyard can fall back
+to the run-cancel endpoint:
+`gh api -X POST /repos/:owner/:repo/actions/runs/:run_id/cancel`.
+Both need the **`workflow` scope** on the PAT `gh` is authenticated
+with — GitHub's short name for `actions:write` on classic PATs, or
+**Actions: Read and write** on fine-grained tokens.
 
-If your gh token lacks that scope, `cloud retarget` reports a clear
-message and exits 1 without attempting the dispatch half:
+If cancellation fails, `cloud retarget` exits 1 without attempting
+the dispatch half. The error distinguishes auth/scope failures from
+GitHub job lookup races such as HTTP 404, and prints the run URL plus
+the command to retry after manual cancellation:
 
 ```
-error: Couldn't cancel the matching job(s). Your gh token may lack
-`actions:write` scope.
+Couldn't cancel every matching job for PR #224 target=mac; no replacement dispatch was sent.
+Run: https://github.com/danielraffel/pulp/actions/runs/24458654321
+Cancellation failed for job 71460714958 (macOS (ARM64) [github-hosted]): not_found HTTP 404.
+Open https://github.com/danielraffel/pulp/actions/runs/24458654321 and cancel the stale target job or run manually.
+After GitHub shows the stale target is no longer active, re-run: shipyard cloud retarget --pr 224 --target mac --provider namespace --apply
 ```
 
-The fix is a one-liner for the common case: `gh auth refresh
--h github.com -s workflow`. For fine-grained tokens and
+For auth/scope failures, the common fix is `gh auth refresh -h
+github.com -s workflow`. For fine-grained tokens and
 GitHub-App-backed identities (bots, `RELEASE_BOT_TOKEN`,
 `pulp-release-bot`, etc.), see [docs/install.md § First-run
 auth](install.md#first-run-auth) for where the scope actually lives
-per identity shape.
+per identity shape. Shipyard does **not** suggest a scope refresh for
+HTTP 404/not-found failures unless the raw GitHub error also points to
+auth or permissions.
+
+Shipyard intentionally does not dispatch a replacement additively when
+cancellation fails. A standalone `workflow_dispatch` may not satisfy
+the same stale PR-event required check context, so additive dispatch is
+reserved for a future explicit mode.
 
 `shipyard doctor` probes for the scope under the `Core` section
 (`gh-scope`); if it shows `✗`, you know to run the refresh before
@@ -132,10 +147,25 @@ the next retarget.
 ## JSON mode
 
 `--json` emits a single envelope per invocation — `event: plan` on
-dry-run, `event: applied` on `--apply`. Suitable for piping into
-`jq` or an agent's stdin. Schema includes `matching_jobs`,
-`cancelled_job_ids` (apply only), and the new `dispatch` plan
-summary.
+dry-run, `event: applied` on successful `--apply`, or
+`event: cancel_failed` when cancellation fails before dispatch.
+Suitable for piping into `jq` or an agent's stdin. Schema includes
+`matching_jobs` with GitHub job URLs, `cancelled_job_ids` on apply
+attempts, and the new dispatch plan summary.
+
+`cancel_failed` additionally includes:
+
+- `cancel_failures` with job/run id, URL, HTTP status when detected,
+  raw message, and classification: `auth`, `scope`, `not_found`,
+  `unsupported`, `transient`, or `unknown`.
+- `manual_cancel_url` and `manual_recovery_steps`.
+- `run_cancel_fallback_used` and `stale_old_blocker_status` so agents
+  can tell whether Shipyard cleared the old run or stopped before
+  dispatch.
+- `additive_dispatch_supported: false` plus a branch-protection note
+  explaining why local diagnostics such as `shipyard run --targets
+  <target>` do not replace the GitHub required check context by
+  themselves.
 
 ## Adding a lane mid-flight
 
