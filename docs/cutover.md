@@ -9,7 +9,8 @@ the final go/no-go has been approved.
 
 - Migration worktree: `/Users/danielraffel/Code/shipyard-mainline-rust-cutover`
 - Branch: `rust-mainline-cutover`
-- Prepared commit: `f368a22` (`Migrate Shipyard CLI to Rust`)
+- Prepared commits: `f368a22` (`Migrate Shipyard CLI to Rust`) and
+  `66b2dcd` (`Document Rust cutover runbook`)
 - Python parity baseline: `d1999c69085f5b8c8c8672cb3943be3ccc59ed66`
 - Rust version: `shipyard 0.51.0`
 
@@ -63,7 +64,7 @@ Build and sign a no-upload macOS artifact:
 cargo build --release --locked --bin shipyard
 
 scripts/release-macos-local.sh \
-  --tag v0.51.0-rust-rehearsal \
+  --tag v0.51.0-rust-finalwindow-20260505-0550 \
   --skip-build \
   --binary target/release/shipyard \
   --dist-dir target/release-rehearsal \
@@ -73,11 +74,32 @@ scripts/release-macos-local.sh \
 The latest rehearsal produced:
 
 ```text
-target/release-rehearsal/v0.51.0-rust-rehearsal/shipyard-macos-arm64.dmg
+target/release-rehearsal/v0.51.0-rust-finalwindow-20260505-0550/shipyard-macos-arm64.dmg
 ```
 
 The DMG was signed, notarized, stapled, validated, mounted, and
 launch-smoked as `shipyard 0.51.0`. No upload was performed.
+
+## Release-Chain Doctor
+
+The Rust migration branch adds `workflow_dispatch` to
+`.github/workflows/auto-release.yml` so `shipyard doctor --release-chain`
+can verify the release-bot checkout path.
+
+Before this migration is merged, live Python `main` does not have that
+trigger. A pre-merge run can therefore fail with GitHub HTTP `422`
+(`Workflow does not have 'workflow_dispatch' trigger`) even though the
+prepared migration branch contains the required workflow change. Treat
+that as a pre-merge validation limitation, not as a Rust runtime failure.
+
+After the migration lands on `main`, run:
+
+```sh
+shipyard --json doctor --release-chain
+```
+
+Expected result after merge: `ready: true`, `release_chain.ok: true`,
+and `RELEASE_BOT_TOKEN` configured.
 
 ## GUI Validation
 
@@ -85,14 +107,14 @@ Validate the macOS GUI against the exact Rust artifact selected for
 cutover:
 
 ```sh
-SHIPYARD_GUI_TEST_RUST_BINARY=/Users/danielraffel/Code/shipyard-mainline-rust-cutover/target/release/shipyard \
+SHIPYARD_GUI_TEST_RUST_BINARY=/tmp/shipyard-gui-finalwindow-XfMulU/shipyard \
   xcodebuildmcp macos test \
   --project-path ShipyardMenuBar.xcodeproj \
   --scheme ShipyardMenuBar
 ```
 
-Latest result: `19` passed, `1` skipped, `0` failed on My Mac
-macOS `26.4.1`.
+Latest result against the signed final-window artifact: `19` passed,
+`1` skipped, `0` failed on My Mac macOS `26.4.1`.
 
 If Xcode stalls before test execution in `SWBBuildService` or `clang`,
 record that as an Xcode build-system caveat. Do not classify it as a
