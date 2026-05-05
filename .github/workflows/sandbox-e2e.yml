@@ -1,117 +1,93 @@
-# Sandbox E2E — isolated end-to-end tests for the Shipyard CLI.
-# See tools/sandbox-e2e/README.md for what this covers and why.
-# Tracked in Shipyard#248. Sibling harness: pulp#732 / pulp#736.
-#
-# Strategy: install the package in a venv via `pip install -e .` (the
-# fastest path to "we have a runnable shipyard binary") and let the
-# sandbox harness's discovery logic find the entrypoint script
-# (~/.local/bin or the venv's bin/), or fall through to the
-# python-wrapper fallback if the entrypoint isn't on PATH.
-#
-# Why no PyInstaller --onefile here:
-#   * The release workflow already exercises that build path on tags.
-#   * For PR gating we want the CLI behavior under test, not the
-#     packaging behavior. The harness's python-wrapper fallback runs
-#     the *same* `shipyard.cli:main` entrypoint the binary does, so
-#     unknown-subcommand semantics, JSON output, daemon socket paths,
-#     etc. are all identical.
-#
-# `continue-on-error: true` on the install step keeps the harness
-# scenarios that don't need a binary (surface enumeration,
-# contamination-audit smoke) running even when packaging is broken.
-
-name: sandbox-e2e
+name: Sandbox E2E
 
 on:
-  pull_request:
-    paths:
-      - "src/shipyard/**"
-      - "commands/**"
-      - ".claude-plugin/**"
-      - "tools/sandbox-e2e/**"
-      - "install.sh"
-      - "pyproject.toml"
-      - ".github/workflows/sandbox-e2e.yml"
   push:
     branches: [main]
-    paths:
-      - "src/shipyard/**"
-      - "commands/**"
-      - ".claude-plugin/**"
-      - "tools/sandbox-e2e/**"
-      - "install.sh"
-      - "pyproject.toml"
-      - ".github/workflows/sandbox-e2e.yml"
-  # Let release workflows call this as a pre-publish gate.
-  workflow_call:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      runner_provider:
+        description: Runner provider for sandbox jobs
+        required: false
+        default: namespace
+        type: choice
+        options:
+          - namespace
+          - github-hosted
+      linux_runner_selector_json:
+        description: Optional JSON string/array for Linux runs-on
+        required: false
+        default: ""
+        type: string
+      macos_arm64_runner_selector_json:
+        description: Optional JSON string/array for macOS ARM64 runs-on
+        required: false
+        default: ""
+        type: string
 
-permissions:
-  contents: read
+concurrency:
+  group: sandbox-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
-  sandbox-e2e:
-    name: sandbox-e2e (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+  resolve-runners:
+    name: Resolve runners
+    runs-on: ubuntu-latest
+    outputs:
+      matrix_json: ${{ steps.resolve.outputs.matrix_json }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - id: resolve
+        env:
+          REQUESTED_PROVIDER: ${{ inputs.runner_provider || vars.DEFAULT_RUNNER_PROVIDER || 'namespace' }}
+          EXPLICIT_LINUX_RUNNER_SELECTOR_JSON: ${{ inputs.linux_runner_selector_json || '' }}
+          EXPLICIT_MACOS_ARM64_RUNNER_SELECTOR_JSON: ${{ inputs.macos_arm64_runner_selector_json || '' }}
+          NAMESPACE_LINUX_RUNS_ON_JSON: ${{ vars.NAMESPACE_LINUX_RUNS_ON_JSON }}
+          NAMESPACE_MACOS_ARM64_RUNS_ON_JSON: ${{ vars.NAMESPACE_MACOS_ARM64_RUNS_ON_JSON }}
+        run: python3 scripts/ci_matrix.py --workflow sandbox-e2e --github-output
+
+  sandbox:
+    needs: resolve-runners
+    name: ${{ matrix.name }} [${{ matrix.provider }}]
+    runs-on: ${{ fromJSON(matrix.runs_on_json) }}
     strategy:
       fail-fast: false
-      matrix:
-        os: [macos-latest, ubuntu-latest]
+      matrix: ${{ fromJSON(needs.resolve-runners.outputs.matrix_json) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - name: Install Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: Install build deps
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release --locked --bin shipyard
+
+      - name: Install pytest
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install pytest
+          python3 -m venv .venv-sandbox
+          .venv-sandbox/bin/python -m pip install pytest
 
-      - name: Install Shipyard from source (best-effort)
-        id: install
-        # The harness can run with the python-wrapper fallback even if
-        # this fails, so don't gate the whole job on packaging
-        # success — but do report the failure.
-        continue-on-error: true
-        run: |
-          set -o pipefail
-          python -m pip install -e .
-          # Resolve the entrypoint and stash it for the harness so we
-          # don't depend on the discovery code finding the venv's bin/
-          # dir for us.
-          if entrypoint="$(python -c 'import shutil; p = shutil.which("shipyard"); print(p) if p else exit(1)')"; then
-            echo "bin=$entrypoint" >> "$GITHUB_OUTPUT"
-            echo "Resolved shipyard entrypoint: $entrypoint"
-          else
-            echo "::warning ::shipyard entrypoint not on PATH after pip install — harness will use python-wrapper fallback"
-          fi
-          # Smoke-test: the entrypoint should at least respond to --version
-          shipyard --version || echo "::warning ::shipyard --version failed; will rely on python-wrapper fallback"
-
-      - name: Run sandbox E2E suite
+      - name: Run sandbox E2E
         env:
-          SHIPYARD_BINARY_FOR_TEST: ${{ steps.install.outputs.bin }}
-        run: |
-          # Even if the entrypoint isn't resolvable, the harness's
-          # python-wrapper fallback exercises the exact same Click
-          # entrypoint via `python -m shipyard.cli`. pytest.skip
-          # handles per-test gating where required.
-          pytest tools/sandbox-e2e/ -v --tb=short
+          SHIPYARD_BINARY_FOR_TEST: ${{ github.workspace }}/target/release/shipyard
+        run: .venv-sandbox/bin/python -m pytest tools/sandbox-e2e/
 
       - name: Upload sandbox tempdir on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
-          name: sandbox-e2e-${{ matrix.os }}-logs
-          # Codex P2 on #260: sandbox tempdirs are created via
-          # `tempfile.mkdtemp(...)`, which honors `TMPDIR` /
-          # platform default — on GitHub macOS runners that's
-          # `/private/var/folders/...`, NOT `/tmp/...`. Cover both
-          # locations so failure artifacts actually upload on
-          # macOS instead of silently `if-no-files-found: ignore`.
+          name: sandbox-e2e-${{ matrix.name }}-logs
+          # Sandbox tempdirs come from tempfile.mkdtemp(...), which honors
+          # TMPDIR/platform defaults. GitHub macOS runners use
+          # /private/var/folders/... rather than /tmp, so cover both.
           path: |
             /tmp/shipyard-sandbox-e2e.*/**
             /private/var/folders/**/shipyard-sandbox-e2e.*/**

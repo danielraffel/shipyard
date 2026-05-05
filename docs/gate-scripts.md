@@ -1,6 +1,6 @@
 # Gate script path resolution
 
-`shipyard pr` runs two Python gate scripts before handing off to
+`shipyard pr` runs two repository gate scripts before handing off to
 `shipyard ship`:
 
 - `skill_sync_check.py` — hard-fails when a mapped path was touched

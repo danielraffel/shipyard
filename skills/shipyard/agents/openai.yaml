@@ -1,0 +1,4 @@
+interface:
+  display_name: "Shipyard"
+  short_description: "Shipyard Rust cutover and operations guardrails"
+  default_prompt: "Use $shipyard to work on Shipyard Rust parity, validation, or cutover without disturbing production Shipyard."

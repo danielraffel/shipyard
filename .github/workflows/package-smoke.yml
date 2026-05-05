@@ -1,0 +1,92 @@
+name: Package Smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner_provider:
+        description: Runner provider for package smoke jobs
+        required: false
+        default: namespace
+        type: choice
+        options:
+          - namespace
+          - github-hosted
+      linux_runner_selector_json:
+        description: Optional JSON string/array for Linux runs-on
+        required: false
+        default: ""
+        type: string
+      macos_arm64_runner_selector_json:
+        description: Optional JSON string/array for macOS ARM64 runs-on
+        required: false
+        default: ""
+        type: string
+      windows_runner_selector_json:
+        description: Optional JSON string/array for Windows runs-on
+        required: false
+        default: ""
+        type: string
+
+concurrency:
+  group: package-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  resolve-runners:
+    name: Resolve runners
+    runs-on: ubuntu-latest
+    outputs:
+      matrix_json: ${{ steps.resolve.outputs.matrix_json }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - id: resolve
+        env:
+          REQUESTED_PROVIDER: ${{ inputs.runner_provider || vars.DEFAULT_RUNNER_PROVIDER || 'namespace' }}
+          EXPLICIT_LINUX_RUNNER_SELECTOR_JSON: ${{ inputs.linux_runner_selector_json || '' }}
+          EXPLICIT_MACOS_ARM64_RUNNER_SELECTOR_JSON: ${{ inputs.macos_arm64_runner_selector_json || '' }}
+          EXPLICIT_WINDOWS_RUNNER_SELECTOR_JSON: ${{ inputs.windows_runner_selector_json || '' }}
+          NAMESPACE_LINUX_RUNS_ON_JSON: ${{ vars.NAMESPACE_LINUX_RUNS_ON_JSON }}
+          NAMESPACE_MACOS_ARM64_RUNS_ON_JSON: ${{ vars.NAMESPACE_MACOS_ARM64_RUNS_ON_JSON }}
+          NAMESPACE_WINDOWS_RUNS_ON_JSON: ${{ vars.NAMESPACE_WINDOWS_RUNS_ON_JSON }}
+        run: python3 scripts/ci_matrix.py --workflow package-smoke --github-output
+
+  package:
+    needs: resolve-runners
+    name: ${{ matrix.name }} [${{ matrix.provider }}]
+    runs-on: ${{ fromJSON(matrix.runs_on_json) }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.resolve-runners.outputs.matrix_json) }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release --locked --bin shipyard
+
+      - name: Package artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          ${{ matrix.python }} scripts/package_release.py \
+            --skip-build \
+            --binary "${{ matrix.binary }}" \
+            --target "${{ matrix.package_target }}" \
+            --tag ci-smoke \
+            --dist-dir artifacts/package \
+            ${{ matrix.package_args }}
+
+      - name: Upload package smoke artifacts
+        uses: actions/upload-artifact@v5
+        with:
+          name: package-smoke-${{ matrix.package_target }}
+          path: artifacts/package/ci-smoke/*

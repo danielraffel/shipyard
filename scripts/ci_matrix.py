@@ -1,0 +1,224 @@
+#!/usr/bin/env python3
+"""Resolve GitHub Actions runner matrices for Shipyard Rust workflows.
+
+Namespace is the default provider because these workflows are intended to move
+quickly while the Rust port is under active parity validation. Workflow inputs
+and repository variables can override the defaults without editing YAML.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Mapping
+
+
+VALID_PROVIDERS = ("namespace", "github-hosted")
+
+
+@dataclass(frozen=True)
+class RunnerTarget:
+    key: str
+    display_name: str
+    env_suffix: str
+    github_hosted_label: str
+    namespace_label: str | None
+
+
+TARGETS: dict[str, RunnerTarget] = {
+    "linux": RunnerTarget(
+        key="linux",
+        display_name="Linux",
+        env_suffix="LINUX",
+        github_hosted_label="ubuntu-latest",
+        namespace_label="namespace-profile-generouscorp",
+    ),
+    "linux-arm64": RunnerTarget(
+        key="linux-arm64",
+        display_name="Linux ARM64",
+        env_suffix="LINUX_ARM64",
+        github_hosted_label="ubuntu-24.04-arm",
+        namespace_label=None,
+    ),
+    "macos-arm64": RunnerTarget(
+        key="macos-arm64",
+        display_name="macOS ARM64",
+        env_suffix="MACOS_ARM64",
+        github_hosted_label="macos-15",
+        namespace_label="namespace-profile-generouscorp-macos",
+    ),
+    "windows": RunnerTarget(
+        key="windows",
+        display_name="Windows",
+        env_suffix="WINDOWS",
+        github_hosted_label="windows-latest",
+        namespace_label="namespace-profile-generouscorp-windows",
+    ),
+}
+
+
+WORKFLOW_TARGETS = {
+    "ci": ("linux", "macos-arm64", "windows"),
+    "sandbox-e2e": ("linux", "macos-arm64"),
+    "package-smoke": ("linux", "macos-arm64", "windows"),
+    "release": ("macos-arm64", "linux", "linux-arm64", "windows"),
+}
+
+
+PACKAGE_ROWS = {
+    "linux": {
+        "package_target": "linux-x64",
+        "binary": "target/release/shipyard",
+        "python": "python3",
+        "package_args": "",
+    },
+    "linux-arm64": {
+        "package_target": "linux-arm64",
+        "binary": "target/release/shipyard",
+        "python": "python3",
+        "package_args": "",
+    },
+    "macos-arm64": {
+        "package_target": "macos-arm64",
+        "binary": "target/release/shipyard",
+        "python": "python3",
+        "package_args": "--dmg --ci-mode",
+    },
+    "windows": {
+        "package_target": "windows-x64",
+        "binary": "target/release/shipyard.exe",
+        "python": "python",
+        "package_args": "",
+    },
+}
+
+
+def _env(env: Mapping[str, str], name: str) -> str:
+    return (env.get(name) or "").strip()
+
+
+def _load_selector(raw: str, *, target: RunnerTarget, source: str) -> str:
+    try:
+        decoded = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(
+            f"{source} for {target.display_name} is not valid JSON: {exc}"
+        ) from exc
+    if not isinstance(decoded, (str, list)):
+        raise SystemExit(
+            f"{source} for {target.display_name} must decode to a string or "
+            "array accepted by GitHub Actions runs-on."
+        )
+    return json.dumps(decoded, separators=(",", ":"))
+
+
+def requested_provider(env: Mapping[str, str]) -> str:
+    provider = _env(env, "REQUESTED_PROVIDER") or "namespace"
+    if provider not in VALID_PROVIDERS:
+        raise SystemExit(
+            f"Unsupported runner provider {provider!r}; expected one of "
+            f"{', '.join(VALID_PROVIDERS)}."
+        )
+    return provider
+
+
+def resolve_runs_on(target_key: str, env: Mapping[str, str] = os.environ) -> dict[str, str]:
+    target = TARGETS[target_key]
+    provider = requested_provider(env)
+    explicit_env = f"EXPLICIT_{target.env_suffix}_RUNNER_SELECTOR_JSON"
+    namespace_env = f"NAMESPACE_{target.env_suffix}_RUNS_ON_JSON"
+
+    explicit = _env(env, explicit_env)
+    if explicit:
+        selector = _load_selector(explicit, target=target, source=explicit_env)
+    elif provider == "github-hosted":
+        selector = json.dumps(target.github_hosted_label)
+    else:
+        namespace = _env(env, namespace_env)
+        if namespace:
+            selector = _load_selector(
+                namespace,
+                target=target,
+                source=namespace_env,
+            )
+        elif target.namespace_label is not None:
+            selector = json.dumps(target.namespace_label)
+        else:
+            provider = "github-hosted"
+            selector = json.dumps(target.github_hosted_label)
+
+    return {
+        "key": target.key,
+        "name": target.display_name,
+        "provider": provider,
+        "runs_on_json": selector,
+    }
+
+
+def workflow_matrix(workflow: str, env: Mapping[str, str] = os.environ) -> dict[str, list[dict[str, str]]]:
+    try:
+        target_keys = WORKFLOW_TARGETS[workflow]
+    except KeyError as exc:
+        raise SystemExit(f"Unsupported workflow {workflow!r}") from exc
+
+    rows = []
+    for target_key in target_keys:
+        row = resolve_runs_on(target_key, env)
+        if workflow in {"package-smoke", "release"}:
+            row.update(PACKAGE_ROWS[target_key])
+            row["name"] = f"{row['name']} package"
+        rows.append(row)
+    return {"include": rows}
+
+
+def workflow_outputs(workflow: str, env: Mapping[str, str] = os.environ) -> dict[str, str]:
+    outputs = {"matrix_json": json.dumps(workflow_matrix(workflow, env), separators=(",", ":"))}
+    for target_key in TARGETS:
+        row = resolve_runs_on(target_key, env)
+        output_key = target_key.replace("-", "_")
+        outputs[f"{output_key}_runs_on_json"] = row["runs_on_json"]
+        outputs[f"{output_key}_provider"] = row["provider"]
+    return outputs
+
+
+def write_outputs(outputs: Mapping[str, str], path: Path) -> None:
+    with path.open("a", encoding="utf-8") as handle:
+        for key, value in outputs.items():
+            handle.write(f"{key}={value}\n")
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument(
+        "--workflow",
+        choices=sorted(WORKFLOW_TARGETS),
+        required=True,
+        help="Workflow matrix to emit.",
+    )
+    parser.add_argument(
+        "--github-output",
+        action="store_true",
+        help="Append outputs to $GITHUB_OUTPUT instead of printing JSON.",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    outputs = workflow_outputs(args.workflow)
+    if args.github_output:
+        output_path = os.environ.get("GITHUB_OUTPUT")
+        if not output_path:
+            raise SystemExit("--github-output requires GITHUB_OUTPUT")
+        write_outputs(outputs, Path(output_path))
+    else:
+        print(outputs["matrix_json"])
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

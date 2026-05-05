@@ -461,6 +461,9 @@ def _extract_version_from_text(text: str, vf: VersionFile) -> str | None:
     if vf.kind == "python_dunder_version":
         m = re.search(r'^\s*__version__\s*=\s*"([^"]+)"', text, re.MULTILINE)
         return m.group(1) if m else None
+    if vf.kind == "regex" and vf.pattern:
+        m = re.search(vf.pattern, text)
+        return m.group(1) if m else None
     return None
 
 

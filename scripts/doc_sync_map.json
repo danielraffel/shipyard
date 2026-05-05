@@ -1,13 +1,18 @@
 {
   "schema_version": 1,
-  "_comment": "Doc-sync gate: when any of the mapped code paths are touched in a diff, the corresponding doc must also be updated in the same diff. Bypass via `Doc-Update: skip doc=<path> reason=\"...\"` on the tip commit. Mechanism mirrors skill_sync_check.py but targets free-form docs instead of skills/<name>/SKILL.md.",
+  "_comment": "Doc-sync gate: when mapped Rust implementation paths are touched, the corresponding docs must also be updated in the same diff. Bypass via `Doc-Update: skip doc=<path> reason=\"...\"` on the tip commit.",
 
   "docs": {
     "docs/ship-state-machine.md": {
-      "description": "Ship state machine audit (#101). Must update when transitions, schema, or external dependencies change.",
+      "description": "Ship state machine audit. Must update when transitions, schema, or external dependencies change.",
       "paths": [
-        "src/shipyard/core/ship_state.py",
-        "src/shipyard/ship/**"
+        "src/ship_state.rs",
+        "src/ship.rs",
+        "src/app/ship_state_cmd.rs",
+        "src/app/ship_cmd.rs",
+        "src/app/watch_cmd.rs",
+        "src/app/auto_merge_cmd.rs",
+        "src/app/cloud_cmd.rs"
       ]
     }
   }
