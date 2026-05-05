@@ -117,6 +117,9 @@ It calls your build commands and cares about one thing: did they pass?
 - [Release automation](RELEASING.md) — `shipyard release-bot setup`,
   `doctor --release-chain`, and the PAT + secret setup for the auto-
   release tag → binaries chain.
+- [Rust cutover and rollback](docs/cutover.md) — final go/no-go gates,
+  signed-artifact rehearsal, GUI validation, webhook/Funnel validation,
+  and rollback steps for the Rust migration.
 - [Mid-flight runner retargeting](docs/cloud-retarget.md) — switch one
   target's runner provider on an open PR without tearing down the
   other targets' jobs.
