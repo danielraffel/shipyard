@@ -14,8 +14,8 @@ use super::{
     wait_cmd::parse_github_repo_slug,
 };
 use crate::cloud::{
-    CloudDispatchOverrides, CloudDispatchPlan, GitHubActions, QueuedRun, WorkflowDefinition,
-    WorkflowJob, default_workflow_key, discover_workflows, lane_is_required,
+    CloudDispatchOverrides, CloudDispatchPlan, GitHubActions, GitHubError, QueuedRun,
+    WorkflowDefinition, WorkflowJob, default_workflow_key, discover_workflows, lane_is_required,
     resolve_cloud_dispatch_plan, resolve_cloud_dispatch_plan_with_overrides,
 };
 use crate::cloud_records::{CloudRecordStore, CloudRunRecord};
@@ -702,7 +702,12 @@ fn retarget_data(
     data.insert("run_id".to_owned(), Value::from(context.run_id));
     data.insert(
         "matching_jobs".to_owned(),
-        serde_json::to_value(&context.matching_jobs).expect("jobs serialize"),
+        serde_json::to_value(jobs_with_urls(
+            &context.dispatch_repo,
+            context.run_id,
+            &context.matching_jobs,
+        ))
+        .expect("jobs serialize"),
     );
     data.insert(
         "new_provider".to_owned(),
@@ -721,18 +726,133 @@ struct RetargetApplyRequest<'a> {
     data: BTreeMap<String, Value>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CancelFailureKind {
+    Auth,
+    Scope,
+    NotFound,
+    Unsupported,
+    Transient,
+    Unknown,
+}
+
+impl CancelFailureKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Auth => "auth",
+            Self::Scope => "scope",
+            Self::NotFound => "not_found",
+            Self::Unsupported => "unsupported",
+            Self::Transient => "transient",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CancelFailure {
+    job_id: Option<u64>,
+    job_name: Option<String>,
+    job_url: Option<String>,
+    run_id: Option<u64>,
+    run_url: Option<String>,
+    kind: CancelFailureKind,
+    http_status: Option<u16>,
+    message: String,
+}
+
+impl CancelFailure {
+    fn for_job(repo: &str, run_id: u64, job: &WorkflowJob, error: &GitHubError) -> Self {
+        let message = error.message().to_owned();
+        Self {
+            job_id: Some(job.database_id),
+            job_name: Some(job.name.clone()),
+            job_url: Some(github_job_url(repo, run_id, job.database_id)),
+            run_id: None,
+            run_url: None,
+            kind: classify_cancel_message(&message),
+            http_status: http_status_from_message(&message),
+            message,
+        }
+    }
+
+    fn for_run(repo: &str, run_id: u64, error: &GitHubError) -> Self {
+        let message = error.message().to_owned();
+        Self {
+            job_id: None,
+            job_name: None,
+            job_url: None,
+            run_id: Some(run_id),
+            run_url: Some(github_run_url(repo, run_id)),
+            kind: classify_cancel_message(&message),
+            http_status: http_status_from_message(&message),
+            message,
+        }
+    }
+
+    fn target_label(&self) -> String {
+        if let Some(job_id) = self.job_id {
+            let name = self
+                .job_name
+                .as_deref()
+                .filter(|name| !name.is_empty())
+                .unwrap_or("unnamed job");
+            return format!("job {job_id} ({name})");
+        }
+        if let Some(run_id) = self.run_id {
+            return format!("run {run_id}");
+        }
+        "cancellation target".to_owned()
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct CancelSummary {
+    cancelled_job_ids: Vec<u64>,
+    failures: Vec<CancelFailure>,
+    used_run_fallback: bool,
+}
+
+impl CancelSummary {
+    fn can_dispatch(&self, matching_jobs: &[WorkflowJob]) -> bool {
+        if matching_jobs.is_empty() {
+            return self.failures.is_empty();
+        }
+        if !self.failures.is_empty() {
+            return false;
+        }
+        let cancelled: std::collections::BTreeSet<_> =
+            self.cancelled_job_ids.iter().copied().collect();
+        matching_jobs
+            .iter()
+            .all(|job| cancelled.contains(&job.database_id))
+    }
+}
+
 fn apply_retarget<W: Write>(
     mut request: RetargetApplyRequest<'_>,
     json: bool,
     stdout: &mut W,
 ) -> Result<ExitCode, CliFailure> {
-    let cancelled_job_ids = cancel_matching_jobs(
+    let cancel_summary = cancel_matching_jobs(
         request.actions,
         &request.context.dispatch_repo,
         request.context.run_id,
         &request.context.active_jobs,
         &request.context.matching_jobs,
-    )?;
+    );
+    if !cancel_summary.can_dispatch(&request.context.matching_jobs) {
+        return render_retarget_cancel_failed(
+            request.args,
+            &request.context,
+            request.data,
+            &cancel_summary,
+            json,
+            stdout,
+        );
+    }
+    let used_run_fallback = cancel_summary.used_run_fallback;
+    let cancelled_job_ids = cancel_summary.cancelled_job_ids;
     let (new_run_id, _) = dispatch_and_discover(
         request.actions,
         &request.context.dispatch_repo,
@@ -764,6 +884,17 @@ fn apply_retarget<W: Write>(
         serde_json::to_value(&cancelled_job_ids).expect("cancelled ids serialize"),
     );
     request.data.insert(
+        "run_cancel_fallback_used".to_owned(),
+        Value::Bool(used_run_fallback),
+    );
+    request
+        .data
+        .insert("stale_old_blocker_remains".to_owned(), Value::Bool(false));
+    request.data.insert(
+        "stale_old_blocker_status".to_owned(),
+        Value::from("cleared"),
+    );
+    request.data.insert(
         "new_dispatch".to_owned(),
         serde_json::to_value(&request.context.plan).expect("plan serialize"),
     );
@@ -774,6 +905,231 @@ fn apply_retarget<W: Write>(
         )
     })?;
     Ok(ExitCode::SUCCESS)
+}
+
+fn render_retarget_cancel_failed<W: Write>(
+    args: &CloudRetargetArgs,
+    context: &RetargetContext,
+    mut data: BTreeMap<String, Value>,
+    summary: &CancelSummary,
+    json: bool,
+    stdout: &mut W,
+) -> Result<ExitCode, CliFailure> {
+    add_cancel_failed_data(&mut data, args, context, summary);
+    render_cloud_event(stdout, json, "cloud.retarget", data, || {
+        cancel_failed_human_message(args, context, summary)
+    })?;
+    Ok(ExitCode::from(1))
+}
+
+fn add_cancel_failed_data(
+    data: &mut BTreeMap<String, Value>,
+    args: &CloudRetargetArgs,
+    context: &RetargetContext,
+    summary: &CancelSummary,
+) {
+    let run_url = github_run_url(&context.dispatch_repo, context.run_id);
+    data.insert("event".to_owned(), Value::from("cancel_failed"));
+    data.insert("dry_run".to_owned(), Value::Bool(false));
+    data.insert("run_url".to_owned(), Value::from(run_url.clone()));
+    data.insert("manual_cancel_url".to_owned(), Value::from(run_url));
+    data.insert(
+        "cancelled_job_ids".to_owned(),
+        serde_json::to_value(&summary.cancelled_job_ids).expect("cancelled ids serialize"),
+    );
+    data.insert(
+        "cancel_failures".to_owned(),
+        serde_json::to_value(cancel_failure_rows(summary)).expect("cancel failures serialize"),
+    );
+    data.insert(
+        "manual_recovery_steps".to_owned(),
+        serde_json::to_value(manual_recovery_steps(args, context, summary))
+            .expect("recovery steps serialize"),
+    );
+    data.insert("additive_dispatch_supported".to_owned(), Value::Bool(false));
+    data.insert(
+        "additive_dispatch_warning".to_owned(),
+        Value::from(additive_dispatch_warning()),
+    );
+    data.insert(
+        "branch_protection_note".to_owned(),
+        Value::from(branch_protection_note()),
+    );
+    data.insert(
+        "run_cancel_fallback_attempted".to_owned(),
+        Value::Bool(active_jobs_all_match(
+            &context.active_jobs,
+            &context.matching_jobs,
+        )),
+    );
+    data.insert(
+        "run_cancel_fallback_used".to_owned(),
+        Value::Bool(summary.used_run_fallback),
+    );
+    data.insert("stale_old_blocker_remains".to_owned(), Value::Null);
+    data.insert(
+        "stale_old_blocker_status".to_owned(),
+        Value::from("unknown_cancel_failed"),
+    );
+}
+
+fn cancel_failure_rows(summary: &CancelSummary) -> Vec<BTreeMap<String, Value>> {
+    summary
+        .failures
+        .iter()
+        .map(|failure| {
+            let mut row = BTreeMap::new();
+            row.insert(
+                "target".to_owned(),
+                Value::from(if failure.job_id.is_some() {
+                    "job"
+                } else {
+                    "run"
+                }),
+            );
+            if let Some(job_id) = failure.job_id {
+                row.insert("job_id".to_owned(), Value::from(job_id));
+            }
+            if let Some(name) = &failure.job_name {
+                row.insert("job_name".to_owned(), Value::from(name.clone()));
+            }
+            if let Some(url) = &failure.job_url {
+                row.insert("job_url".to_owned(), Value::from(url.clone()));
+            }
+            if let Some(run_id) = failure.run_id {
+                row.insert("run_id".to_owned(), Value::from(run_id));
+            }
+            if let Some(url) = &failure.run_url {
+                row.insert("run_url".to_owned(), Value::from(url.clone()));
+            }
+            if let Some(status) = failure.http_status {
+                row.insert("http_status".to_owned(), Value::from(status));
+            }
+            row.insert(
+                "classification".to_owned(),
+                Value::from(failure.kind.as_str()),
+            );
+            row.insert("reason".to_owned(), Value::from(failure.kind.as_str()));
+            row.insert("message".to_owned(), Value::from(failure.message.clone()));
+            row
+        })
+        .collect()
+}
+
+fn cancel_failed_human_message(
+    args: &CloudRetargetArgs,
+    context: &RetargetContext,
+    summary: &CancelSummary,
+) -> String {
+    let mut lines = vec![format!(
+        "Couldn't cancel every matching job for PR #{} target={}; no replacement dispatch was sent.",
+        args.pr, args.target
+    )];
+    lines.push(format!(
+        "Run: {}",
+        github_run_url(&context.dispatch_repo, context.run_id)
+    ));
+    if !summary.cancelled_job_ids.is_empty() {
+        lines.push(format!(
+            "Already cancelled job ids: {}",
+            join_ids(&summary.cancelled_job_ids)
+        ));
+    }
+    for failure in &summary.failures {
+        let status = failure
+            .http_status
+            .map(|status| format!(" HTTP {status}"))
+            .unwrap_or_default();
+        lines.push(format!(
+            "Cancellation failed for {}: {}{}.",
+            failure.target_label(),
+            failure.kind.as_str(),
+            status
+        ));
+    }
+    if needs_auth_recovery(summary) {
+        lines.push("Auth recovery: run `gh auth refresh -h github.com -s workflow`, or grant Actions: Read and write on the token/App identity.".to_owned());
+    }
+    lines.extend(manual_recovery_steps(args, context, summary));
+    lines.push(additive_dispatch_warning().to_owned());
+    lines.join("\n")
+}
+
+fn manual_recovery_steps(
+    args: &CloudRetargetArgs,
+    context: &RetargetContext,
+    summary: &CancelSummary,
+) -> Vec<String> {
+    let mut steps = Vec::new();
+    steps.push(format!(
+        "Open {} and cancel the stale target job or run manually.",
+        github_run_url(&context.dispatch_repo, context.run_id)
+    ));
+    steps.push(format!(
+        "After GitHub shows the stale target is no longer active, re-run: {}",
+        retarget_apply_command(args)
+    ));
+    if needs_auth_recovery(summary) {
+        steps.push(
+            "If this is an auth/scope failure, refresh gh with `gh auth refresh -h github.com -s workflow` or grant Actions: Read and write on the token/App identity."
+                .to_owned(),
+        );
+    }
+    steps.push(branch_protection_note().to_owned());
+    steps
+}
+
+fn needs_auth_recovery(summary: &CancelSummary) -> bool {
+    summary.failures.iter().any(|failure| {
+        matches!(
+            failure.kind,
+            CancelFailureKind::Auth | CancelFailureKind::Scope
+        )
+    })
+}
+
+fn additive_dispatch_warning() -> &'static str {
+    "Shipyard did not dispatch additively because cancellation failed; a fresh workflow_dispatch may not satisfy the stale PR-event required check context."
+}
+
+fn branch_protection_note() -> &'static str {
+    "Local diagnostics such as `shipyard run --targets <target>` can prove the lane locally, but they do not replace the GitHub required check context unless the workflow/check integration is updated."
+}
+
+fn retarget_apply_command(args: &CloudRetargetArgs) -> String {
+    let mut parts = vec![
+        "shipyard".to_owned(),
+        "cloud".to_owned(),
+        "retarget".to_owned(),
+        "--pr".to_owned(),
+        args.pr.to_string(),
+        "--target".to_owned(),
+        shell_quote(&args.target),
+        "--provider".to_owned(),
+        shell_quote(&args.provider),
+    ];
+    if let Some(workflow) = &args.workflow {
+        parts.extend(["--workflow".to_owned(), shell_quote(workflow)]);
+    }
+    parts.push("--apply".to_owned());
+    parts.join(" ")
+}
+
+fn shell_quote(value: &str) -> String {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/'))
+    {
+        return value.to_owned();
+    }
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn join_ids(ids: &[u64]) -> String {
+    ids.iter()
+        .map(u64::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -993,32 +1349,37 @@ fn cancel_matching_jobs(
     run_id: u64,
     active_jobs: &[WorkflowJob],
     matching_jobs: &[WorkflowJob],
-) -> Result<Vec<u64>, CliFailure> {
+) -> CancelSummary {
+    let mut summary = CancelSummary::default();
     if matching_jobs.is_empty() {
-        return Ok(Vec::new());
+        return summary;
     }
-    let mut cancelled = Vec::new();
     for job in matching_jobs {
-        if actions
-            .cancel_workflow_job(dispatch_repo, job.database_id)
-            .is_ok()
-        {
-            cancelled.push(job.database_id);
+        match actions.cancel_workflow_job(dispatch_repo, job.database_id) {
+            Ok(()) => summary.cancelled_job_ids.push(job.database_id),
+            Err(error) => {
+                summary
+                    .failures
+                    .push(CancelFailure::for_job(dispatch_repo, run_id, job, &error));
+            }
         }
     }
-    if cancelled.is_empty()
-        && active_jobs_all_match(active_jobs, matching_jobs)
-        && actions.cancel_workflow_run(dispatch_repo, run_id).is_ok()
-    {
-        return Ok(matching_jobs.iter().map(|job| job.database_id).collect());
+    if summary.cancelled_job_ids.is_empty() && active_jobs_all_match(active_jobs, matching_jobs) {
+        match actions.cancel_workflow_run(dispatch_repo, run_id) {
+            Ok(()) => {
+                summary.used_run_fallback = true;
+                summary.failures.clear();
+                summary.cancelled_job_ids =
+                    matching_jobs.iter().map(|job| job.database_id).collect();
+            }
+            Err(error) => {
+                summary
+                    .failures
+                    .push(CancelFailure::for_run(dispatch_repo, run_id, &error));
+            }
+        }
     }
-    if cancelled.is_empty() {
-        return Err(CliFailure::new(
-            1,
-            "Couldn't cancel the matching job(s). Your gh token may lack `actions:write` scope. Cancel manually in the UI, then re-run this with --apply to redispatch.",
-        ));
-    }
-    Ok(cancelled)
+    summary
 }
 
 fn active_jobs_all_match(active_jobs: &[WorkflowJob], matching_jobs: &[WorkflowJob]) -> bool {
@@ -1030,6 +1391,93 @@ fn active_jobs_all_match(active_jobs: &[WorkflowJob], matching_jobs: &[WorkflowJ
     let matching_ids: std::collections::BTreeSet<_> =
         matching_jobs.iter().map(|job| job.database_id).collect();
     active_ids == matching_ids
+}
+
+fn jobs_with_urls(repo: &str, run_id: u64, jobs: &[WorkflowJob]) -> Vec<BTreeMap<String, Value>> {
+    jobs.iter()
+        .map(|job| {
+            let mut row = BTreeMap::new();
+            row.insert("database_id".to_owned(), Value::from(job.database_id));
+            row.insert("name".to_owned(), Value::from(job.name.clone()));
+            row.insert(
+                "url".to_owned(),
+                Value::from(github_job_url(repo, run_id, job.database_id)),
+            );
+            row
+        })
+        .collect()
+}
+
+fn github_run_url(repo: &str, run_id: u64) -> String {
+    format!("https://github.com/{repo}/actions/runs/{run_id}")
+}
+
+fn github_job_url(repo: &str, run_id: u64, job_id: u64) -> String {
+    format!("{}/job/{job_id}", github_run_url(repo, run_id))
+}
+
+fn classify_cancel_message(message: &str) -> CancelFailureKind {
+    let status = http_status_from_message(message);
+    let lower = message.to_lowercase();
+    if status == Some(401)
+        || lower.contains("not logged in")
+        || lower.contains("authentication")
+        || lower.contains("bad credentials")
+        || lower.contains("requires authentication")
+    {
+        return CancelFailureKind::Auth;
+    }
+    if status == Some(429)
+        || status.is_some_and(|code| (500..=599).contains(&code))
+        || lower.contains("rate limit")
+        || lower.contains("timed out")
+        || lower.contains("timeout")
+        || lower.contains("connection reset")
+        || lower.contains("connection refused")
+    {
+        return CancelFailureKind::Transient;
+    }
+    if status == Some(403)
+        || lower.contains("actions:write")
+        || lower.contains("workflow scope")
+        || lower.contains("workflow' scope")
+        || lower.contains("resource not accessible by integration")
+        || lower.contains("permission")
+    {
+        return CancelFailureKind::Scope;
+    }
+    if status == Some(404) || lower.contains("not found") {
+        return CancelFailureKind::NotFound;
+    }
+    if lower.contains("unsupported")
+        || lower.contains("cannot cancel")
+        || lower.contains("can't cancel")
+        || lower.contains("already completed")
+        || lower.contains("not in progress")
+    {
+        return CancelFailureKind::Unsupported;
+    }
+    CancelFailureKind::Unknown
+}
+
+fn http_status_from_message(message: &str) -> Option<u16> {
+    let lower = message.to_lowercase();
+    for marker in ["http/2.0 ", "http/2 ", "http/1.1 ", "http "] {
+        let Some(index) = lower.find(marker) else {
+            continue;
+        };
+        let tail = &lower[index + marker.len()..];
+        let digits = tail
+            .chars()
+            .skip_while(|ch| !ch.is_ascii_digit())
+            .take_while(char::is_ascii_digit)
+            .take(3)
+            .collect::<String>();
+        if digits.len() == 3 {
+            return digits.parse().ok();
+        }
+    }
+    None
 }
 
 fn append_lane_run(
@@ -1203,15 +1651,18 @@ mod tests {
     use serde_json::Value;
 
     use super::{
-        RetargetContext, active_jobs_all_match, add_lane, add_lane_payload, append_lane_run,
-        cancel_matching_jobs, current_git_branch, detect_repo_slug, error, handoff_list_stuck,
-        handoff_repo_mismatch_message, parse_threshold_secs, render_cloud_event,
-        resolve_expected_sha, resolve_lane_plan, resolve_repo_slug, retarget, retarget_data,
-        retarget_payload, stuck_runs, valid_sha, workflow_file_from_run_path, workflow_for_file,
+        CancelFailure, CancelFailureKind, CancelSummary, RetargetContext, active_jobs_all_match,
+        add_cancel_failed_data, add_lane, add_lane_payload, append_lane_run,
+        cancel_failed_human_message, cancel_matching_jobs, classify_cancel_message,
+        current_git_branch, detect_repo_slug, error, handoff_list_stuck,
+        handoff_repo_mismatch_message, http_status_from_message, parse_threshold_secs,
+        render_cloud_event, resolve_expected_sha, resolve_lane_plan, resolve_repo_slug, retarget,
+        retarget_data, retarget_payload, stuck_runs, valid_sha, workflow_file_from_run_path,
+        workflow_for_file,
     };
     use crate::app::cli::{CloudAddLaneArgs, CloudRetargetArgs};
     use crate::cloud::{
-        CloudDispatchPlan, GitHubActions, QueuedRun, WorkflowDefinition, WorkflowJob,
+        CloudDispatchPlan, GitHubActions, GitHubError, QueuedRun, WorkflowDefinition, WorkflowJob,
     };
     use crate::config::{LoadedConfig, LocalOverlaySource};
     use crate::ship_state::{ShipState, ShipStateStore};
@@ -1420,10 +1871,11 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let actions = GitHubActions::new(temp.path());
 
-        let cancelled =
-            cancel_matching_jobs(&actions, "owner/repo", 123, &[], &[]).expect("cancel noop");
+        let summary = cancel_matching_jobs(&actions, "owner/repo", 123, &[], &[]);
 
-        assert!(cancelled.is_empty());
+        assert!(summary.cancelled_job_ids.is_empty());
+        assert!(summary.failures.is_empty());
+        assert!(summary.can_dispatch(&[]));
     }
 
     #[test]
@@ -1446,6 +1898,108 @@ mod tests {
         ];
         assert!(!active_jobs_all_match(&unrelated, &matching));
         assert!(!active_jobs_all_match(&[], &matching));
+    }
+
+    #[test]
+    fn cancel_error_classification_keeps_scope_and_not_found_distinct() {
+        assert_eq!(
+            http_status_from_message("gh api failed: Not Found (HTTP 404)"),
+            Some(404)
+        );
+        assert_eq!(http_status_from_message("HTTP/2 403 Forbidden"), Some(403));
+        assert_eq!(
+            classify_cancel_message("gh api failed: Not Found (HTTP 404)"),
+            CancelFailureKind::NotFound
+        );
+        assert_eq!(
+            classify_cancel_message("gh api failed: Forbidden (HTTP 403)"),
+            CancelFailureKind::Scope
+        );
+        assert_eq!(
+            classify_cancel_message("gh api failed: Bad credentials (HTTP 401)"),
+            CancelFailureKind::Auth
+        );
+        assert_eq!(
+            classify_cancel_message("gh api failed: secondary rate limit (HTTP 403)"),
+            CancelFailureKind::Transient
+        );
+        assert_eq!(
+            classify_cancel_message("gh api failed: cannot cancel completed job"),
+            CancelFailureKind::Unsupported
+        );
+    }
+
+    #[test]
+    fn cancel_failed_payload_includes_manual_recovery_without_false_scope_hint() {
+        let args = retarget_args();
+        let context = retarget_context_fixture();
+        let error = GitHubError::new("gh api failed: Not Found (HTTP 404)");
+        let summary = CancelSummary {
+            cancelled_job_ids: Vec::new(),
+            failures: vec![CancelFailure::for_job(
+                &context.dispatch_repo,
+                context.run_id,
+                &context.matching_jobs[0],
+                &error,
+            )],
+            used_run_fallback: false,
+        };
+        let mut data = retarget_data(&args, &context, true);
+
+        add_cancel_failed_data(&mut data, &args, &context, &summary);
+
+        assert_eq!(data["event"], "cancel_failed");
+        assert_eq!(data["dry_run"], false);
+        assert_eq!(
+            data["manual_cancel_url"],
+            "https://github.com/danielraffel/pulp/actions/runs/1234"
+        );
+        assert_eq!(data["cancel_failures"][0]["job_id"], 555);
+        assert_eq!(data["cancel_failures"][0]["classification"], "not_found");
+        assert_eq!(data["cancel_failures"][0]["http_status"], 404);
+        assert_eq!(
+            data["cancel_failures"][0]["job_url"],
+            "https://github.com/danielraffel/pulp/actions/runs/1234/job/555"
+        );
+        assert_eq!(data["stale_old_blocker_remains"], Value::Null);
+        assert_eq!(data["stale_old_blocker_status"], "unknown_cancel_failed");
+        assert_eq!(data["additive_dispatch_supported"], false);
+        let steps = data["manual_recovery_steps"]
+            .as_array()
+            .expect("recovery steps");
+        assert!(steps.iter().all(|step| {
+            !step
+                .as_str()
+                .unwrap_or_default()
+                .contains("gh auth refresh")
+        }));
+    }
+
+    #[test]
+    fn cancel_failed_payload_adds_scope_recovery_only_for_auth_or_scope_errors() {
+        let args = retarget_args();
+        let context = retarget_context_fixture();
+        let error =
+            GitHubError::new("gh api failed: Resource not accessible by integration (HTTP 403)");
+        let summary = CancelSummary {
+            cancelled_job_ids: vec![777],
+            failures: vec![CancelFailure::for_job(
+                &context.dispatch_repo,
+                context.run_id,
+                &context.matching_jobs[0],
+                &error,
+            )],
+            used_run_fallback: false,
+        };
+        let mut data = retarget_data(&args, &context, true);
+
+        add_cancel_failed_data(&mut data, &args, &context, &summary);
+        let human = cancel_failed_human_message(&args, &context, &summary);
+
+        assert_eq!(data["cancel_failures"][0]["classification"], "scope");
+        assert!(human.contains("gh auth refresh -h github.com -s workflow"));
+        assert!(human.contains("Already cancelled job ids: 777"));
+        assert!(human.contains("no replacement dispatch was sent"));
     }
 
     #[test]
@@ -1567,21 +2121,7 @@ mod tests {
     #[test]
     fn retarget_data_includes_context_and_matching_jobs() {
         let args = retarget_args();
-        let context = RetargetContext {
-            workflow_key: "ci".to_owned(),
-            plan: dispatch_plan(),
-            dispatch_repo: "danielraffel/pulp".to_owned(),
-            head_ref: "feature/test".to_owned(),
-            run_id: 1234,
-            active_jobs: vec![WorkflowJob {
-                database_id: 555,
-                name: "windows / test".to_owned(),
-            }],
-            matching_jobs: vec![WorkflowJob {
-                database_id: 555,
-                name: "windows / test".to_owned(),
-            }],
-        };
+        let context = retarget_context_fixture();
 
         let data = retarget_data(&args, &context, false);
 
@@ -1592,6 +2132,10 @@ mod tests {
         assert_eq!(data["head_ref"], "feature/test");
         assert_eq!(data["run_id"], 1234);
         assert_eq!(data["matching_jobs"][0]["database_id"], 555);
+        assert_eq!(
+            data["matching_jobs"][0]["url"],
+            "https://github.com/danielraffel/pulp/actions/runs/1234/job/555"
+        );
         assert_eq!(data["new_provider"], "namespace");
     }
 
@@ -1688,6 +2232,24 @@ mod tests {
             provider: "namespace".to_owned(),
             dispatch_fields,
             sources: BTreeMap::new(),
+        }
+    }
+
+    fn retarget_context_fixture() -> RetargetContext {
+        RetargetContext {
+            workflow_key: "ci".to_owned(),
+            plan: dispatch_plan(),
+            dispatch_repo: "danielraffel/pulp".to_owned(),
+            head_ref: "feature/test".to_owned(),
+            run_id: 1234,
+            active_jobs: vec![WorkflowJob {
+                database_id: 555,
+                name: "windows / test".to_owned(),
+            }],
+            matching_jobs: vec![WorkflowJob {
+                database_id: 555,
+                name: "windows / test".to_owned(),
+            }],
         }
     }
 

@@ -2640,6 +2640,9 @@ mod tests {
         assert_eq!(value["command"], "cloud.retarget");
         assert_eq!(value["event"], "applied");
         assert_eq!(value["new_run_id"], "222");
+        assert_eq!(value["run_cancel_fallback_used"], false);
+        assert_eq!(value["stale_old_blocker_remains"], false);
+        assert_eq!(value["stale_old_blocker_status"], "cleared");
         let state = store.get(23).expect("state");
         assert_eq!(state.dispatched_runs.len(), 1);
         assert_eq!(state.dispatched_runs[0].target, "macos");
