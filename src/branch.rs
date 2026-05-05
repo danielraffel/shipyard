@@ -373,34 +373,44 @@ exit 99
     fn create_branch_on_remote_uses_remote_base_sha_for_push_refspec() {
         let temp = TempDir::new().expect("tempdir");
         let trace = temp.path().join("trace");
+        let base_sha = "abcdef1234567890abcdef1234567890abcdef12";
         let git = write_script(
             temp.path(),
             "git-create",
             &format!(
                 r#"#!/bin/sh
 printf '%s\n' "$*" >> '{}'
-if [ "$1" = "ls-remote" ] && [ "$3" = "--heads" ]; then
+case "$*" in
+"ls-remote --exit-code --heads origin release/1.0")
   exit 2
-fi
-if [ "$1" = "ls-remote" ] && [ "$3" = "origin" ]; then
-  printf 'abcdef1234567890\trefs/heads/main\n'
+  ;;
+"ls-remote --exit-code origin refs/heads/main")
+  printf '{}\trefs/heads/main\n'
   exit 0
-fi
-if [ "$1" = "push" ]; then
+  ;;
+"push origin {}:refs/heads/release/1.0")
   exit 0
-fi
+  ;;
+esac
 exit 99
 "#,
-                trace.display()
+                trace.display(),
+                base_sha,
+                base_sha
             ),
         );
 
         let result = create_branch_on_remote(temp.path(), "release/1.0", "main", Some(&git));
 
-        assert_eq!(result.status, BranchApplyStatus::Created);
+        assert_eq!(
+            result.status,
+            BranchApplyStatus::Created,
+            "{}",
+            result.message
+        );
         assert!(result.message.contains("abcdef12"));
         let trace = fs::read_to_string(trace).expect("trace");
-        assert!(trace.contains("push origin abcdef1234567890:refs/heads/release/1.0"));
+        assert!(trace.contains(&format!("push origin {base_sha}:refs/heads/release/1.0")));
     }
 
     #[test]
