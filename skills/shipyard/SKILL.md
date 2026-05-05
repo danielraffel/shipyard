@@ -7,20 +7,21 @@ description: Shipyard operations guardrails. Use when working in /Users/danielra
 
 ## Core Rule
 
-Preserve the user's active Shipyard install until they explicitly approve a
-replacement or release install. Do not replace
-`/Users/danielraffel/.local/bin/shipyard`, change Pulp pins, reset Tailscale
-Funnel, or merge GUI cutover support without a clear go/no-go.
+Preserve the user's active Shipyard install and rollback path. Rust Shipyard is
+the daily implementation as of `v0.51.0` / `v0.51.1`, but do not replace
+`/Users/danielraffel/.local/bin/shipyard`, remove preserved backups, change
+Pulp pins, reset Tailscale Funnel, or merge GUI cutover support without a clear
+go/no-go for that operation.
 
 ## First Steps
 
 1. Confirm the active repo and dirty state with `git status --short`.
 2. Use RepoPrompt for code analysis across Shipyard, historical shipyard-rust,
    and the macOS GUI before declaring parity or implementation gaps.
-3. Read the current planning packet before making cutover claims:
-   `planning/cutover-go-no-go.md`, `planning/parity-matrix.md`,
-   `planning/feature-audit.md`, `planning/quality-gates.md`,
-   `planning/mainline-migration-plan.md`, and `docs/plan/README.md`.
+3. Read the current planning packet before making release/cutover claims:
+   `planning/post-cutover-status.md`, `planning/go-no-go-completion-audit.md`,
+   `planning/upstream-drift.md`, `planning/documentation-backlog.md`, and
+   `docs/plan/README.md`.
 4. Use `--mode isolated`, temporary install directories, and sandbox HOME/PATH
    roots for rehearsals that must not touch the active production state.
 
@@ -68,11 +69,19 @@ The live webhook gate is intentionally dangerous because it resets the local
 Funnel config:
 
 ```sh
-scripts/validate_webhook_tunnel_live.py --apply --allow-funnel-reset --json
+scripts/validate_webhook_tunnel_live.py \
+  --repo danielraffel/Shipyard \
+  --binary "$(command -v shipyard)" \
+  --apply \
+  --allow-funnel-reset \
+  --json
 ```
 
-Run that only in an approved window where interrupting the current Python
-Shipyard live mode is acceptable.
+Run that only in an approved window where briefly taking over the
+machine-global Tailscale Serve/Funnel route is acceptable. The validator knows
+about the App Store Tailscale binary at
+`/Applications/Tailscale.app/Contents/MacOS/Tailscale`; do not assume a
+`tailscale` PATH shim exists.
 
 ## macOS GUI
 
@@ -101,8 +110,8 @@ permission trouble.
 
 ## Cutover Discipline
 
-Cutover is a human decision, not an implementation side effect. Before asking
-for go/no-go, ensure:
+Release/cutover is a human decision, not an implementation side effect. Before
+asking for go/no-go, ensure:
 
 - Drift tracker has no untriaged upstream changes.
 - CLI surface comparison is clean.
