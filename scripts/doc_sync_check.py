@@ -6,9 +6,9 @@ range (base..head), check that every doc whose mapped paths were
 touched also has the doc itself updated in the same range — or has a
 `Doc-Update: skip doc=<path> reason="..."` trailer on the tip commit.
 
-Map lives at `scripts/doc_sync_map.json`. Initially maps
-`docs/ship-state-machine.md` to `src/shipyard/core/ship_state.py`
-and `src/shipyard/ship/**`, per #101 Phase C.
+Map lives at `scripts/doc_sync_map.json`. It maps
+`docs/ship-state-machine.md` to the Rust state-machine and command
+modules, per #101 Phase C.
 
 Modes
     report — hard-fail (exit 1) on any finding. CI uses this.

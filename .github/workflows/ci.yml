@@ -8,203 +8,112 @@ on:
   workflow_dispatch:
     inputs:
       runner_provider:
-        description: "Runner provider"
+        description: Runner provider for CI jobs
         required: false
-        default: "namespace"
+        default: namespace
         type: choice
         options:
-          - github-hosted
           - namespace
+          - github-hosted
+      linux_runner_selector_json:
+        description: Optional JSON string/array for Linux runs-on
+        required: false
+        default: ""
+        type: string
+      macos_arm64_runner_selector_json:
+        description: Optional JSON string/array for macOS ARM64 runs-on
+        required: false
+        default: ""
+        type: string
+      windows_runner_selector_json:
+        description: Optional JSON string/array for Windows runs-on
+        required: false
+        default: ""
+        type: string
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
   resolve-runners:
+    name: Resolve runners
     runs-on: ubuntu-latest
     outputs:
-      linux: ${{ steps.resolve.outputs.linux }}
-      macos: ${{ steps.resolve.outputs.macos }}
-      windows: ${{ steps.resolve.outputs.windows }}
+      matrix_json: ${{ steps.resolve.outputs.matrix_json }}
+      linux_runs_on_json: ${{ steps.resolve.outputs.linux_runs_on_json }}
+      linux_provider: ${{ steps.resolve.outputs.linux_provider }}
     steps:
+      - uses: actions/checkout@v5
+
       - id: resolve
-        # Runner provider resolution per-target, in priority order:
-        #   1. workflow_dispatch input — one-shot override, covers all
-        #      targets in the run.
-        #   2. Per-target repo variable — `DEFAULT_RUNNER_PROVIDER_LINUX`,
-        #      `DEFAULT_RUNNER_PROVIDER_MACOS`,
-        #      `DEFAULT_RUNNER_PROVIDER_WINDOWS`. Lets us route one
-        #      platform around a provider outage without losing speed
-        #      on the other two. #193 (Namespace Windows saturated
-        #      2026-04-23) is the concrete motivation.
-        #   3. Global repo variable `DEFAULT_RUNNER_PROVIDER`.
-        #   4. Hardcoded fallback `github-hosted` — safe for forks
-        #      (vars don't propagate across fork boundaries).
-        # See RELEASING.md § "Preferred runner provider" for the
-        # rationale.
         env:
-          INPUT_PROVIDER: ${{ inputs.runner_provider }}
-          DEFAULT_ALL: ${{ vars.DEFAULT_RUNNER_PROVIDER }}
-          DEFAULT_LINUX: ${{ vars.DEFAULT_RUNNER_PROVIDER_LINUX }}
-          DEFAULT_MACOS: ${{ vars.DEFAULT_RUNNER_PROVIDER_MACOS }}
-          DEFAULT_WINDOWS: ${{ vars.DEFAULT_RUNNER_PROVIDER_WINDOWS }}
-        run: |
-          resolve_provider() {
-            # $1 = target-specific repo-variable value (possibly empty).
-            local target_var="$1"
-            if [ -n "${INPUT_PROVIDER:-}" ]; then echo "${INPUT_PROVIDER}"; return; fi
-            if [ -n "${target_var:-}" ]; then echo "${target_var}"; return; fi
-            if [ -n "${DEFAULT_ALL:-}" ]; then echo "${DEFAULT_ALL}"; return; fi
-            echo "github-hosted"
-          }
-
-          P_LINUX=$(resolve_provider "${DEFAULT_LINUX}")
-          P_MACOS=$(resolve_provider "${DEFAULT_MACOS}")
-          P_WINDOWS=$(resolve_provider "${DEFAULT_WINDOWS}")
-          echo "resolved providers: linux=$P_LINUX macos=$P_MACOS windows=$P_WINDOWS"
-
-          [ "$P_LINUX" = "namespace" ] \
-            && echo "linux=\"namespace-profile-generouscorp\"" >> "$GITHUB_OUTPUT" \
-            || echo "linux=\"ubuntu-latest\"" >> "$GITHUB_OUTPUT"
-
-          # Route macOS to Namespace's own M-series pool
-          # (namespace-profile-generouscorp-macos) when P_MACOS=namespace.
-          # The earlier assumption that "Namespace piggybacks on
-          # GitHub's macOS fleet" turned out to be wrong: Namespace
-          # runs its own macOS infrastructure with far shorter queue
-          # times than GH-hosted `macos-15`, which routinely stalls
-          # PRs 10-30 min during business hours. `release.yml`
-          # already routes macOS to namespace correctly; this brings
-          # PR checks into alignment.
-          [ "$P_MACOS" = "namespace" ] \
-            && echo "macos=\"namespace-profile-generouscorp-macos\"" >> "$GITHUB_OUTPUT" \
-            || echo "macos=\"macos-15\"" >> "$GITHUB_OUTPUT"
-
-          [ "$P_WINDOWS" = "namespace" ] \
-            && echo "windows=\"namespace-profile-generouscorp-windows\"" >> "$GITHUB_OUTPUT" \
-            || echo "windows=\"windows-latest\"" >> "$GITHUB_OUTPUT"
+          REQUESTED_PROVIDER: ${{ inputs.runner_provider || vars.DEFAULT_RUNNER_PROVIDER || 'namespace' }}
+          EXPLICIT_LINUX_RUNNER_SELECTOR_JSON: ${{ inputs.linux_runner_selector_json || '' }}
+          EXPLICIT_MACOS_ARM64_RUNNER_SELECTOR_JSON: ${{ inputs.macos_arm64_runner_selector_json || '' }}
+          EXPLICIT_WINDOWS_RUNNER_SELECTOR_JSON: ${{ inputs.windows_runner_selector_json || '' }}
+          NAMESPACE_LINUX_RUNS_ON_JSON: ${{ vars.NAMESPACE_LINUX_RUNS_ON_JSON }}
+          NAMESPACE_MACOS_ARM64_RUNS_ON_JSON: ${{ vars.NAMESPACE_MACOS_ARM64_RUNS_ON_JSON }}
+          NAMESPACE_WINDOWS_RUNS_ON_JSON: ${{ vars.NAMESPACE_WINDOWS_RUNS_ON_JSON }}
+        run: python3 scripts/ci_matrix.py --workflow ci --github-output
 
   test:
     needs: resolve-runners
+    name: ${{ matrix.name }} [${{ matrix.provider }}]
+    runs-on: ${{ fromJSON(matrix.runs_on_json) }}
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - key: linux
-            name: Linux (x64)
-            runs_on: ${{ needs.resolve-runners.outputs.linux }}
-          - key: macos
-            name: macOS (ARM64)
-            runs_on: ${{ needs.resolve-runners.outputs.macos }}
-          - key: windows
-            name: Windows (x64)
-            runs_on: ${{ needs.resolve-runners.outputs.windows }}
-    name: ${{ matrix.name }}
-    runs-on: ${{ fromJSON(matrix.runs_on) }}
+      matrix: ${{ fromJSON(needs.resolve-runners.outputs.matrix_json) }}
     steps:
       - uses: actions/checkout@v5
 
-      - name: Set up Python
-        uses: actions/setup-python@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
-          python-version: "3.12"
+          components: rustfmt, clippy
 
-      - name: Install dependencies
-        run: pip install --break-system-packages .[dev]
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all --check
 
       - name: Run tests
-        run: pytest
+        run: cargo test --all-targets --locked
 
-      - name: Lint
-        run: ruff check src/
+      - name: Run clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
 
-      - name: Type check
-        if: runner.os != 'Windows'
-        run: mypy src/
-
-  binary-smoke:
-    # 0.22.5 — PR-gating smoke test against the actual PyInstaller
-    # --onefile artifact. Unit tests run against the dev install and
-    # don't catch bundling bugs like:
-    #   * LookupError: unknown encoding: idna   (0.22.3)
-    #   * read_daemon_status hello-race         (0.22.4)
-    # Both shipped to users before this job existed.
-    #
-    # We specifically test at the BUNDLING level, not the business
-    # level. CI runners don't have Tailscale, so the daemon's full
-    # happy path can't be exercised here — but PyInstaller bundling
-    # bugs (missing codecs, missing stdlib modules, zipapp extraction
-    # races) manifest BEFORE any Tailscale check. So: run
-    # `daemon run` briefly and grep for Python-level errors
-    # (LookupError, ModuleNotFoundError, PYI-*:ERROR, etc.). A clean
-    # "Tailscale Funnel isn't available" exit is acceptable here and
-    # proves the bundle itself is sound.
+  coverage:
     needs: resolve-runners
-    name: Binary smoke (PyInstaller bundle health)
-    runs-on: ${{ fromJSON(matrix.runs_on) }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # Mirror the macOS/linux routing the main test job uses so
-          # Binary-smoke macOS doesn't get stuck in the GH-hosted
-          # `macos-15` queue while the resolver is pointing everyone
-          # else at Namespace. Windows isn't in this matrix (no
-          # Windows-specific PyInstaller smoke today).
-          - os: linux
-            runs_on: ${{ needs.resolve-runners.outputs.linux }}
-          - os: macos
-            runs_on: ${{ needs.resolve-runners.outputs.macos }}
-    steps:
-      - uses: actions/checkout@v5
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-      - name: Install deps + pyinstaller
-        run: pip install --break-system-packages .[dev] pyinstaller
-      - name: Build --onefile binary
-        run: pyinstaller --onefile --name shipyard src/shipyard/cli.py
-      - name: --version sanity
-        run: ./dist/shipyard --version
-      - name: --help command loads (parser wires up)
-        run: ./dist/shipyard --help > /dev/null
-      - name: daemon subcommands load (module imports work)
-        run: ./dist/shipyard daemon --help > /dev/null
-      - name: daemon run — no Python bundling errors
-        run: |
-          set +e
-          ./dist/shipyard daemon run --repo owner/repo > out.log 2>&1 &
-          PID=$!
-          sleep 4
-          kill $PID 2>/dev/null || true
-          wait $PID 2>/dev/null
-          echo "--- daemon run output ---"
-          cat out.log
-          echo "--- /daemon run output ---"
-          # Python-level bundling errors = regressions we MUST catch.
-          # Business-level errors (no Tailscale, no Funnel) are fine
-          # in CI — the binary loaded, imported, parsed args cleanly.
-          if grep -qE "LookupError|ModuleNotFoundError|ImportError|PYI-[0-9]+:ERROR|FileNotFoundError.*base_library" out.log; then
-            echo "::error::PyInstaller bundle is broken — see log above"
-            exit 1
-          fi
-          echo "Bundle sound: no Python-level import/codec errors."
-
-  state-machine:
-    # #101 Phase C — dedicated lane so ship-state-machine failures are
-    # visually distinct from the full-suite run. Fast (ubuntu-only, no
-    # cross-platform matrix) because these tests are pure Python and
-    # don't exercise platform-specific code paths.
-    name: Ship state machine
-    runs-on: ubuntu-latest
+    name: Coverage >= 75% [${{ needs.resolve-runners.outputs.linux_provider }}]
+    runs-on: ${{ fromJSON(needs.resolve-runners.outputs.linux_runs_on_json) }}
     steps:
       - uses: actions/checkout@v5
 
-      - name: Set up Python
-        uses: actions/setup-python@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
-          python-version: "3.12"
+          components: rustfmt
 
-      - name: Install dependencies
-        run: pip install --break-system-packages .[dev]
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
 
-      - name: Run state-machine tests
-        run: pytest -m state_machine -v
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run coverage gate
+        run: cargo llvm-cov --locked --summary-only --fail-under-lines 75
+
+  packaging-helper:
+    needs: resolve-runners
+    name: Python helper tests [${{ needs.resolve-runners.outputs.linux_provider }}]
+    runs-on: ${{ fromJSON(needs.resolve-runners.outputs.linux_runs_on_json) }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Run packaging helper tests
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'

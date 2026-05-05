@@ -1,23 +1,18 @@
 name: Auto-Release on CLI Version Bump
 
-# Shipyard mirror of pulp's auto-release workflow. On every push to main,
-# diff pyproject.toml's project.version against the previous push range.
-# If it moved, create the matching v<x.y.z> tag; the existing tag-triggered
-# release.yml workflow then builds + publishes the 5-platform binaries.
+# On every push to main, diff Cargo.toml's package.version against the
+# previous push range. If it moved, create the matching v<x.y.z> tag;
+# release.yml then builds draft release assets from the tag.
 #
-# Plugin-version bumps (.claude-plugin/plugin.json) are intentionally NOT
-# tagged: per RELEASING.md, plugin files are delivered from git, not from
-# the binary, so there is no binary release to cut for plugin-only
-# changes. See planning/ralph-prompt-shipyard-versioning.md § Open
-# Question 4 for the decision.
-#
-# Safety properties match pulp's workflow: concurrency group, idempotent-
-# strict tagging (fails loudly on mismatched existing tags), Release: skip
-# trailer suppression, revert detection.
+# The workflow also supports workflow_dispatch so `shipyard doctor
+# --release-chain` can verify that actions/checkout accepts
+# RELEASE_BOT_TOKEN. A manual dispatch with no version movement is a
+# no-op after checkout.
 
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 
 concurrency:
   group: auto-release
@@ -54,7 +49,7 @@ jobs:
           fi
           echo "skip=0" >> "$GITHUB_OUTPUT"
 
-      - name: Read pyproject version at before/after
+      - name: Read Cargo package version at before/after
         id: versions
         if: steps.guard.outputs.skip == '0'
         shell: bash
@@ -65,20 +60,20 @@ jobs:
               before="HEAD~1"
           fi
 
-          extract_pyproject_version() {
+          extract_cargo_version() {
               local ref="$1"
-              git show "${ref}:pyproject.toml" 2>/dev/null \
-                | python3 -c 'import sys, re; m = re.search(r"^\s*version\s*=\s*\"([^\"]+)\"", sys.stdin.read(), re.M); print(m.group(1) if m else "")'
+              git show "${ref}:Cargo.toml" 2>/dev/null \
+                | python3 -c 'import re, sys; text = sys.stdin.read(); m = re.search(r"(?ms)^\[package\].*?^\s*version\s*=\s*\"([^\"]+)\"", text); print(m.group(1) if m else "")'
           }
 
-          v_before=$(extract_pyproject_version "$before" || true)
-          v_after=$(extract_pyproject_version HEAD || true)
+          v_before=$(extract_cargo_version "$before" || true)
+          v_after=$(extract_cargo_version HEAD || true)
 
           echo "before=$v_before" >> "$GITHUB_OUTPUT"
-          echo "after=$v_after"   >> "$GITHUB_OUTPUT"
-          echo "pyproject version: $v_before -> $v_after"
+          echo "after=$v_after" >> "$GITHUB_OUTPUT"
+          echo "Cargo package version: $v_before -> $v_after"
 
-      - name: Create tag if CLI version moved
+      - name: Create tag if Rust CLI version moved
         if: steps.guard.outputs.skip == '0'
         shell: bash
         env:
@@ -89,24 +84,15 @@ jobs:
           set -euo pipefail
 
           if [ -z "$V_AFTER" ] || [ "$V_BEFORE" = "$V_AFTER" ]; then
-              echo "CLI version unchanged — no tagging."
+              echo "Rust CLI version unchanged - no tagging."
               exit 0
           fi
 
-          # The tag-triggered release.yml expects tags of the form v<x.y.z>.
           tag="v${V_AFTER}"
 
-          git config user.name  "shipyard-release-bot"
+          git config user.name "shipyard-release-bot"
           git config user.email "shipyard-release-bot@users.noreply.github.com"
 
-          # Idempotent-strict: if tag already exists at HEAD, no-op; at a
-          # different SHA, fail loudly. Never overwrite.
-          #
-          # `git ls-remote --tags origin <tag>` returns the TAG OBJECT SHA
-          # for annotated tags (the default created by this workflow via
-          # `git tag -a`), not the referenced commit SHA. Dereference via
-          # `<tag>^{}` before comparing to HEAD; fall back to the raw SHA
-          # for lightweight tags (no ^{} entry).
           if git ls-remote --tags origin "$tag" | grep -q .; then
               remote_target=$(git ls-remote --tags origin "${tag}^{}" | awk '{print $1}')
               if [ -z "$remote_target" ]; then
@@ -114,7 +100,7 @@ jobs:
               fi
               local_sha=$(git rev-parse HEAD)
               if [ "$remote_target" = "$local_sha" ]; then
-                  echo "tag $tag already at $local_sha — no-op"
+                  echo "tag $tag already at $local_sha - no-op"
                   exit 0
               fi
               echo "ERROR: tag $tag exists at $remote_target but HEAD is $local_sha" >&2

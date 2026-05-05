@@ -20,7 +20,7 @@ set -euo pipefail
 #
 # Steps:
 #   0. Pre-release version-bump gate (fails fast if bumps are missing)
-#   1. Bump pyproject.toml and __init__.py
+#   1. Bump Cargo.toml package.version
 #   2. Commit the bump
 #   3. Tag and push — triggers release.yml binary build
 
@@ -50,8 +50,18 @@ if [ "${RELEASE_SKIP_VERSION_CHECK:-0}" != "1" ]; then
   fi
 fi
 
-# Get current version from pyproject.toml
-CURRENT=$(grep '^version = ' pyproject.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+# Get current version from Cargo.toml's [package] table.
+CURRENT=$(python3 - <<'PY'
+import re
+from pathlib import Path
+
+text = Path("Cargo.toml").read_text(encoding="utf-8")
+match = re.search(r'(?ms)^\[package\].*?^version\s*=\s*"([^"]+)"', text)
+if not match:
+    raise SystemExit("could not read Cargo.toml package.version")
+print(match.group(1))
+PY
+)
 echo "Current version: $CURRENT"
 
 # Calculate new version
@@ -75,18 +85,33 @@ if [[ ! $REPLY =~ ^[Yy]$ ]]; then
   exit 0
 fi
 
-# Update version in pyproject.toml
-sed -i '' "s/^version = \"$CURRENT\"/version = \"$NEW\"/" pyproject.toml
+# Update Cargo package version.
+python3 - "$CURRENT" "$NEW" <<'PY'
+import re
+import sys
+from pathlib import Path
 
-# Update version in __init__.py
-sed -i '' "s/__version__ = \"$CURRENT\"/__version__ = \"$NEW\"/" src/shipyard/__init__.py
+current, new = sys.argv[1], sys.argv[2]
+path = Path("Cargo.toml")
+text = path.read_text(encoding="utf-8")
+updated = re.sub(
+    r'(?ms)(^\[package\].*?^version\s*=\s*")' + re.escape(current) + r'(")',
+    lambda match: f"{match.group(1)}{new}{match.group(2)}",
+    text,
+    count=1,
+)
+if updated == text:
+    raise SystemExit("failed to update Cargo.toml package.version")
+path.write_text(updated, encoding="utf-8")
+PY
 
 # Update version in plugin files
 sed -i '' "s/\"version\": \"$CURRENT\"/\"version\": \"$NEW\"/g" .claude-plugin/plugin.json
 sed -i '' "s/\"version\": \"$CURRENT\"/\"version\": \"$NEW\"/g" .claude-plugin/marketplace.json
+cargo generate-lockfile
 
 # Commit and tag
-git add pyproject.toml src/shipyard/__init__.py .claude-plugin/plugin.json .claude-plugin/marketplace.json
+git add Cargo.toml Cargo.lock .claude-plugin/plugin.json .claude-plugin/marketplace.json
 git commit -m "Release v${NEW}"
 git tag -a "v${NEW}" -m "Shipyard v${NEW}"
 

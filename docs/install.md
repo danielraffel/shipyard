@@ -113,43 +113,41 @@ Intel Macs (x86_64) are not supported from v0.50.0 onward. Apple Silicon only. O
 
 ## Build from source
 
-Two patterns depending on what you want.
+### Isolated dev build
 
-### A. Isolated dev install (recommended for active development)
-
-Your dev build lives in a venv; the system `shipyard` at
-`~/.local/bin/shipyard` is unaffected. Activate the venv to use your
-dev build, deactivate to use the system one.
+Your dev build lives in the checkout under `target/`; the system
+`shipyard` at `~/.local/bin/shipyard` is unaffected unless you copy or
+install it there.
 
 ```bash
 git clone https://github.com/danielraffel/Shipyard.git
 cd Shipyard
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
-pytest                         # verify everything works
+cargo build --release --locked
+target/release/shipyard --version
 ```
 
-Or with `uv`:
+Run the main local gates before relying on a source build:
 
 ```bash
-uv sync --extra dev
-uv run pytest
+cargo test --all-targets --locked
+cargo clippy --all-targets --locked -- -D warnings
+python3 -m unittest discover -s scripts -p 'test_*.py'
 ```
 
-### B. "My dev build is my system shipyard"
+### Make a source build your system `shipyard`
 
 If you want your local checkout to take over at
-`~/.local/bin/shipyard` (same location `install.sh` uses), use
-[`pipx`](https://pipx.pypa.io):
+`~/.local/bin/shipyard` (same location `install.sh` uses), copy the
+release binary and refresh the `sy` symlink:
 
 ```bash
-pipx install .
-pipx install . --force         # re-install after changes
+mkdir -p ~/.local/bin
+cp target/release/shipyard ~/.local/bin/shipyard
+ln -sf ~/.local/bin/shipyard ~/.local/bin/sy
 ```
 
-Or `pip install --user .` achieves the same on most systems. Both
-land at `~/.local/bin/shipyard`, so the Claude Code plugin + any
-project pinners treat your dev build as the canonical install.
+Only do this intentionally: Claude Code, Codex, the macOS GUI, and
+project pinners all treat `~/.local/bin/shipyard` as canonical.
 
 ## Optional dependencies
 

@@ -6,13 +6,13 @@ Guidance for Claude Code (and Codex via `AGENTS.md → CLAUDE.md`) when working 
 
 Shipyard is a cross-platform CI controller: local VMs, SSH hosts, and cloud runners (Namespace / GitHub-hosted) coordinated under one queue-and-evidence model. It is designed so agents, not humans, are the primary users.
 
-The project is Python-packaged (`pyproject.toml`, `src/shipyard/`) and ships a Claude Code plugin (`.claude-plugin/`, `commands/`, `skills/`, `agents/`, `hooks/`) delivered directly from this git repo.
+The project is a Rust CLI (`Cargo.toml`, `src/`) and ships a Claude Code plugin (`.claude-plugin/`, `commands/`, `skills/`, `agents/`, `hooks/`) delivered directly from this git repo.
 
 ## Two independently-versioned surfaces
 
 | Surface        | Where                                            | When it moves                                  |
 |----------------|--------------------------------------------------|------------------------------------------------|
-| CLI binary     | `pyproject.toml` `project.version`, `src/shipyard/__init__.py` `__version__` | `src/shipyard/` changes that affect behavior   |
+| CLI binary     | `Cargo.toml` `[package].version`             | `src/`, release scripts, installer, or workflow changes that affect behavior |
 | Claude plugin  | `.claude-plugin/plugin.json` `version`           | `commands/`, `skills/`, `agents/`, `hooks/`, or `.claude-plugin/` changes |
 
 These are **decoupled by policy** (`RELEASING.md`) — plugin files are delivered from git, not the binary, so a plugin-only change is not a binary release. The gate just ensures each surface's version moves when its own code moves.

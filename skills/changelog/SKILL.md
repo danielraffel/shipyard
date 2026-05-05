@@ -74,4 +74,4 @@ The install step pipes to `bash`, not `sh` — `dash` (Ubuntu's `/bin/sh`) rejec
 
 ## Skill-sync gotcha
 
-Anything under `src/shipyard/changelog/**` or `commands/changelog.md` touches this skill's path map. Update this file in the same PR, or pass `--skip-skill-update changelog --skill-reason "..."` to `shipyard pr` (only when the change is genuinely mechanical).
+Anything under `src/changelog.rs`, `src/app/changelog_cmd.rs`, or `commands/changelog.md` touches this skill's path map. Update this file in the same PR, or pass `--skip-skill-update changelog --skill-reason "..."` to `shipyard pr` (only when the change is genuinely mechanical).

@@ -117,6 +117,9 @@ It calls your build commands and cares about one thing: did they pass?
 - [Release automation](RELEASING.md) — `shipyard release-bot setup`,
   `doctor --release-chain`, and the PAT + secret setup for the auto-
   release tag → binaries chain.
+- [Rust cutover and rollback](docs/cutover.md) — final go/no-go gates,
+  signed-artifact rehearsal, GUI validation, webhook/Funnel validation,
+  and rollback steps for the Rust migration.
 - [Mid-flight runner retargeting](docs/cloud-retarget.md) — switch one
   target's runner provider on an open PR without tearing down the
   other targets' jobs.
@@ -166,11 +169,11 @@ place:
 `PATH` and every install method reaches the same binary. `sy` is a
 symlink that resolves to the same `shipyard` binary.
 
-Contributors building from source have two options — see
-[`docs/install.md`](docs/install.md): an **isolated venv install**
-for active development (dev build in the venv, system `shipyard`
-untouched) or **`pipx install .`** which lands at
-`~/.local/bin/shipyard` and overrides the released version.
+Contributors building from source can run
+`cargo build --release --locked` for an isolated checkout build, or
+intentionally copy `target/release/shipyard` to `~/.local/bin/shipyard`
+when they want the source build to become the system install. See
+[`docs/install.md`](docs/install.md).
 
 Project pinners that want a specific version should use
 `SHIPYARD_VERSION="v0.22.1" bash install.sh` — it lands at the same
@@ -255,7 +258,7 @@ Not in v1. Tailscale Funnel is the only tunnel backend shipped currently; others
 
 ### My macOS app says "shipyard CLI not found on PATH"
 
-Live mode requires the `shipyard` CLI to be installed on the Mac running the app. Install it (`curl -fsSL https://install.shipyard.sh | sh` or via `pip install shipyard`). If you don't want live mode, you can ignore this — the app will keep working in polling mode.
+Live mode requires the `shipyard` CLI to be installed on the Mac running the app. Install it with `curl -fsSL https://generouscorp.com/Shipyard/install.sh | sh`. If you don't want live mode, you can ignore this — the app will keep working in polling mode.
 
 ### Will pushing without `shipyard ship` break anything I've already shipped?
 

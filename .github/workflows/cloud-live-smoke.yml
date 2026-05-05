@@ -1,0 +1,69 @@
+name: Shipyard Cloud Live Smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner_provider:
+        description: Runner provider requested by Shipyard cloud dispatch
+        required: false
+        default: namespace
+      workflow_runner_provider:
+        description: Runner provider for this smoke workflow job
+        required: false
+        default: namespace
+        type: choice
+        options:
+          - namespace
+          - github-hosted
+      workflow_runner_selector_json:
+        description: Optional JSON string/array for this smoke workflow runs-on
+        required: false
+        default: ""
+        type: string
+      note:
+        description: Free-form validation note
+        required: false
+        default: shipyard-live-smoke
+      sleep_seconds:
+        description: Optional delay for cancellation/handoff validation
+        required: false
+        default: "0"
+
+concurrency:
+  group: shipyard-cloud-live-smoke-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  resolve-runners:
+    name: Resolve runners
+    runs-on: ubuntu-latest
+    outputs:
+      linux_runs_on_json: ${{ steps.resolve.outputs.linux_runs_on_json }}
+      linux_provider: ${{ steps.resolve.outputs.linux_provider }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - id: resolve
+        env:
+          REQUESTED_PROVIDER: ${{ inputs.workflow_runner_provider || vars.DEFAULT_RUNNER_PROVIDER || 'namespace' }}
+          EXPLICIT_LINUX_RUNNER_SELECTOR_JSON: ${{ inputs.workflow_runner_selector_json || '' }}
+          NAMESPACE_LINUX_RUNS_ON_JSON: ${{ vars.NAMESPACE_LINUX_RUNS_ON_JSON }}
+        run: python3 scripts/ci_matrix.py --workflow ci --github-output
+
+  smoke:
+    needs: resolve-runners
+    name: Cloud Live Smoke [${{ needs.resolve-runners.outputs.linux_provider }}]
+    runs-on: ${{ fromJSON(needs.resolve-runners.outputs.linux_runs_on_json) }}
+    steps:
+      - name: Confirm dispatch payload
+        run: |
+          echo "runner_provider=${{ inputs.runner_provider }}"
+          echo "note=${{ inputs.note }}"
+          seconds="${{ inputs.sleep_seconds }}"
+          if ! [[ "$seconds" =~ ^[0-9]+$ ]]; then
+            echo "sleep_seconds must be numeric" >&2
+            exit 2
+          fi
+          if [ "$seconds" -gt 0 ]; then
+            sleep "$seconds"
+          fi

@@ -5,11 +5,12 @@ Phase A deliverable: a hand-written map of every state, every transition,
 and every external dependency in the `shipyard ship` / `shipyard watch` /
 `shipyard auto-merge` flow, written by reading the code end-to-end and
 reviewed by a second pass (Codex via RepoPrompt MCP) that cross-checked
-each claim against `src/shipyard/**` at exact line numbers.
+each claim against the Shipyard implementation at exact line numbers.
 
-Keep this doc in step with `src/shipyard/core/ship_state.py`,
-`src/shipyard/cli.py` (the `ship`, `watch`, `auto-merge`, `cloud add-lane`,
-`cloud retarget`, and `ship-state` subcommands), and `src/shipyard/ship/*.py`.
+Keep this doc in step with `src/ship_state.rs`, `src/ship.rs`,
+`src/app/ship_state_cmd.rs`, `src/app/ship_cmd.rs`,
+`src/app/watch_cmd.rs`, `src/app/auto_merge_cmd.rs`, and
+`src/app/cloud_cmd.rs`.
 
 **Phase B** (transition tests, see below) and **Phase C** (pre-merge
 doc-sync hook, dedicated CI lane) land in follow-up PRs.
@@ -394,17 +395,16 @@ etc.) so failure output maps directly to this doc.
 Both landed in a follow-up PR:
 
 1. **Doc-sync hook.** `scripts/doc_sync_check.py` + `scripts/doc_sync_map.json`
-   enforce that changes to `src/shipyard/core/ship_state.py` or
-   `src/shipyard/ship/**` include an update to this doc. Runs in
+   enforce that changes to mapped Rust ship-state or command modules
+   include an update to this doc. Runs in
    `.githooks/pre-push` (advisory; `SHIPYARD_ENFORCE_PREPUSH=1`
    upgrades to block) and in `.github/workflows/version-skill-check.yml`
    as a hard CI gate. Bypass via a `Doc-Update: skip doc=<path>
    reason="..."` trailer on any commit in the diff range.
-2. **Dedicated state-machine CI lane.** A `state-machine` job in
-   `.github/workflows/ci.yml` runs `pytest -m state_machine -v` on its
-   own — ubuntu-only because the tests are pure Python. A failure
-   shows up as a distinctly-named check in the PR status list, so an
-   operator can tell a state-machine regression from a cross-platform
+2. **Dedicated state-machine coverage.** Rust unit tests exercise the
+   state-machine transitions as part of `cargo test --all-targets --locked`.
+   A failure shows up in the PR status list, so an operator can tell a
+   state-machine regression from a cross-platform
    infra blip at a glance.
 
 When you touch ship-state transition code, either update this doc in

@@ -1,507 +1,727 @@
-"""End-to-end sandbox scenarios for the Shipyard CLI.
-
-Every test here runs in an isolated ``Sandbox`` (see
-``shipyard_sandbox.py``) and must pass the contamination audit at
-teardown — any write to ``~/Library/Application Support/shipyard/``,
-``~/.config/shipyard/``, ``~/.local/state/shipyard/``,
-``~/AppData/Local/shipyard/``, or ``~/.local/bin/`` fails the test.
-
-Scenarios mirror the acceptance criteria on
-`Shipyard #248 <https://github.com/danielraffel/Shipyard/issues/248>`_.
-Grouped by ``@pytest.mark`` so CI can run a fast subset on PR gates and
-the full suite on release tags. See ``pytest.ini`` for marker docs.
-
-The file is named ``test_swap.py`` to keep the harness shape parallel
-to the Pulp sibling at
-`pulp#732 <https://github.com/danielraffel/pulp/issues/732>`_; ignore
-the historical "swap" connotation (Pulp's harness was written during
-a C++→Rust binary swap) — for Shipyard "swap" is just "the file where
-the scenarios live."
-"""
-
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
 from pathlib import Path
 
 import pytest
 
 from shipyard_sandbox import (
-    REQUIRED_STATUS_KEYS,
+    BINARY_NAME,
+    PYTHON_BINARY_NAME,
+    PythonShipyardSource,
     Sandbox,
-    enumerate_shipyard_commands,
-    parse_status_json,
+    parse_advertised_commands,
+    parse_top_level_commands,
 )
 
-
-# -----------------------------------------------------------------------------
-# Shared fixtures / helpers
-# -----------------------------------------------------------------------------
-
-
-#: Subcommand tokens we deliberately don't exercise via ``--help``.
-#: These either invoke destructive flows (caught by Sandbox.run's guard
-#: regardless), or are noise the surface enumerator picks up from
-#: docs prose. Each entry has a one-line reason — adding to this set
-#: should be a deliberate decision, not a quick fix to get green.
-SURFACE_SKIPS: dict[str, str] = {
-    # Destructive (also blocked by Sandbox.run's DESTRUCTIVE_COMMANDS)
-    "ship": "actually merges PRs",
-    "pr": "opens a real GitHub PR",
-    "upgrade": "replaces the running binary",
-    # Long-lived processes
-    "daemon": "the parent group is fine but `daemon run`/`start` block — "
-              "covered by a dedicated daemon-status scenario instead",
-    "watch": "live view, hangs when there's no active ship",
-    "wait": "blocks on a github condition; sub-commands need network",
-    # Network / system probes
-    "release-bot": "guides through GitHub PAT provisioning",
-    "auto-merge": "hits GitHub to attempt a real merge",
-    # Doc-prose tokens that don't correspond to real subcommands
-    "version": "no real `shipyard version` subcommand; this comes from "
-               "prose like 'the Shipyard version pin'",
-}
-
-
-@pytest.fixture(scope="session")
-def shipyard_surface(surface_roots: list[Path]) -> set[str]:
-    """The set of ``shipyard <subcommand>`` tokens advertised by the
-    project's user-facing surface (slash commands, README, docs, CI)."""
-    return enumerate_shipyard_commands(surface_roots)
-
-
-# -----------------------------------------------------------------------------
-# Scenario 1 — Smoke: help banner + version exit non-silent
-# -----------------------------------------------------------------------------
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 @pytest.mark.smoke
-def test_help_banner_exits_zero_with_usage_output(
-    sandbox_with_shipyard: Sandbox,
-) -> None:
-    """``shipyard --help`` must exit 0 and print a usage banner. This
-    is the cheapest possible "is the binary usable at all?" probe."""
-    result = sandbox_with_shipyard.run(["--help"]).expect_success()
-    # Click's banner format: "Usage: shipyard [OPTIONS] COMMAND ..."
-    assert "Usage:" in result.stdout, (
-        f"--help didn't print a usage banner: {result.stdout!r}"
-    )
-    assert "Commands:" in result.stdout, (
-        f"--help didn't list subcommands: {result.stdout!r}"
-    )
+def test_help_banner_exits_zero_with_usage_output(sandbox: Sandbox) -> None:
+    result = sandbox.run(["--help"]).expect_success()
+
+    assert "Usage:" in result.stdout
+    assert "Commands:" in result.stdout
+    assert "shipyard" in result.stdout
 
 
 @pytest.mark.smoke
-def test_version_exits_zero_with_version_string(
-    sandbox_with_shipyard: Sandbox,
-) -> None:
-    """``shipyard --version`` must exit 0 and print a recognisable
-    version string. Catches a release that ships a binary that can't
-    even introspect itself (the v0.15→v0.18 silent-fail class of bug)."""
-    result = sandbox_with_shipyard.run(["--version"]).expect_success()
-    combined = result.stdout + result.stderr
-    assert "shipyard" in combined.lower() or "version" in combined.lower(), (
-        f"--version output doesn't mention shipyard or 'version': "
-        f"{combined!r}"
-    )
+def test_version_exits_zero_with_version_string(sandbox: Sandbox) -> None:
+    result = sandbox.run(["--version"]).expect_success()
 
-
-# -----------------------------------------------------------------------------
-# Scenario 2 — Mandatory regression: unknown subcommand is non-silent
-# -----------------------------------------------------------------------------
-#
-# This is the canonical silent-exit-0 anti-pattern. Pulp shipped a real
-# release where `pulp ship sign` printed "Unknown command: ship" and
-# exited 0, silently breaking every plugin slash-command. The same
-# class of bug could ship in Shipyard if Click's behavior ever drifts
-# (e.g. a bare-`@click.group()` somewhere starts swallowing unknowns).
-# This test guards against that drift.
+    assert "shipyard" in result.combined_output
 
 
 @pytest.mark.smoke
-def test_unknown_subcommand_exits_nonzero_with_stderr(
-    sandbox_with_shipyard: Sandbox,
-) -> None:
-    """An unknown top-level subcommand must (a) exit non-zero AND
-    (b) print something on stderr or stdout. Silent-exit-0 is the
-    failure mode this test exists to prevent."""
-    result = sandbox_with_shipyard.run(["frobnicate-totally-fake"], timeout=30.0)
-    assert result.returncode != 0, (
-        f"unknown subcommand exited 0 — silent-exit anti-pattern. "
-        f"stdout: {result.stdout!r}\nstderr: {result.stderr!r}"
-    )
-    combined = result.stdout + result.stderr
-    assert combined.strip(), (
-        f"unknown subcommand exited {result.returncode} with NO output "
-        f"on either stream — also silent-failure anti-pattern."
-    )
-    assert "frobnicate-totally-fake" in combined or "no such command" in combined.lower(), (
-        f"unknown-subcommand error doesn't name the command or hint "
-        f"at the failure mode: {combined!r}"
-    )
+def test_unknown_subcommand_exits_nonzero_with_output(sandbox: Sandbox) -> None:
+    result = sandbox.run(["frobnicate-totally-fake"])
+
+    assert result.returncode != 0
+    assert result.combined_output.strip()
+    assert "frobnicate-totally-fake" in result.combined_output
 
 
 @pytest.mark.smoke
-def test_unknown_nested_subcommand_exits_nonzero_with_stderr(
-    sandbox_with_shipyard: Sandbox,
-) -> None:
-    """Same contract as the top-level test, but for a nested group
-    (``shipyard config bogus-subcmd``). Click's nested-group dispatch
-    is a different code path so it needs its own probe."""
-    result = sandbox_with_shipyard.run(
-        ["config", "bogus-subcmd-totally-fake"], timeout=30.0
-    )
-    assert result.returncode != 0, (
-        f"unknown nested subcommand exited 0. "
-        f"stdout: {result.stdout!r}\nstderr: {result.stderr!r}"
-    )
-    combined = result.stdout + result.stderr
-    assert combined.strip(), (
-        f"unknown nested subcommand was silent. rc={result.returncode}"
-    )
+def test_unknown_nested_subcommand_exits_nonzero_with_output(sandbox: Sandbox) -> None:
+    result = sandbox.run(["cloud", "bogus-subcmd-totally-fake"])
 
-
-# -----------------------------------------------------------------------------
-# Scenario 3 — Surface enumeration sanity
-# -----------------------------------------------------------------------------
-
-
-def test_shipyard_surface_is_non_empty(shipyard_surface: set[str]) -> None:
-    """Sanity-check the regex extraction itself."""
-    assert shipyard_surface, (
-        "enumerate_shipyard_commands found no shipyard invocations "
-        "anywhere — regex broken or surface roots empty"
-    )
-    # Spot-check tokens we know must be present given the docs we
-    # shipped.
-    for expected in {"status", "doctor", "queue"}:
-        assert expected in shipyard_surface, (
-            f"missing {expected!r} from surface enumeration: "
-            f"{sorted(shipyard_surface)}"
-        )
-
-
-# -----------------------------------------------------------------------------
-# Scenario 4 — Plugin / docs surface: every advertised command is non-silent
-# -----------------------------------------------------------------------------
-
-
-def _exercisable_commands(surface: set[str]) -> list[str]:
-    return sorted(cmd for cmd in surface if cmd not in SURFACE_SKIPS)
+    assert result.returncode != 0
+    assert result.combined_output.strip()
+    assert "bogus-subcmd-totally-fake" in result.combined_output
 
 
 @pytest.mark.surface
-def test_every_advertised_command_help_is_nonsilent(
-    sandbox_with_shipyard: Sandbox,
-    shipyard_surface: set[str],
-) -> None:
-    """Every subcommand the user-facing surface advertises must respond
-    to ``--help`` either by printing usage (rc=0) or by failing loudly
-    (rc!=0 + something on stderr / "no such command" on stdout). The
-    failure mode we're guarding against is the same silent-exit-0 bug
-    as Scenario 2, but this time discovered against the real surface
-    list rather than a synthetic name."""
-    exercisable = _exercisable_commands(shipyard_surface)
-    assert exercisable, "no exercisable commands after exclusions"
+def test_every_advertised_top_level_command_help_is_nonsilent(sandbox: Sandbox) -> None:
+    root = sandbox.run(["--help"]).expect_success()
+    commands = parse_top_level_commands(root.stdout)
 
+    assert {"paths", "pin", "doctor", "cloud", "daemon", "ship-state"}.issubset(commands)
     failures: list[str] = []
-    for cmd in exercisable:
-        result = sandbox_with_shipyard.run([cmd, "--help"], timeout=30.0)
-        if result.returncode == 0:
-            # Happy path — Click printed usage.
-            if not (result.stdout or result.stderr):
-                failures.append(
-                    f"{cmd} --help exited 0 but printed nothing — "
-                    f"silent-success anti-pattern"
-                )
+    for command in sorted(commands):
+        result = sandbox.run([command, "--help"])
+        if result.returncode == 0 and result.combined_output.strip():
             continue
-        # Non-zero is OK iff something explained why.
-        combined = result.stdout + result.stderr
-        if combined.strip():
+        if result.returncode != 0 and result.combined_output.strip():
             continue
         failures.append(
-            f"{cmd} --help exited {result.returncode} with no output "
-            f"on either stream — silent-failure anti-pattern"
+            f"{command} --help returned {result.returncode} with no output"
         )
     assert not failures, "\n".join(failures)
 
 
-# -----------------------------------------------------------------------------
-# Scenario 5 — Config layer: read-only access in an empty sandbox
-# -----------------------------------------------------------------------------
-
-
-@pytest.mark.config
-def test_config_show_in_empty_sandbox_is_nonsilent(
-    sandbox_with_shipyard: Sandbox,
+@pytest.mark.surface
+def test_every_advertised_command_path_help_exits_zero_in_sandbox(
+    sandbox: Sandbox,
 ) -> None:
-    """``shipyard config show`` runs against zero ``.shipyard/`` and
-    zero global config — it must either print an empty/default config
-    or exit non-zero with a "no project config" hint. Silent-exit-0
-    with no output is the failure mode."""
-    result = sandbox_with_shipyard.run(["config", "show"], timeout=30.0)
-    combined = result.stdout + result.stderr
-    assert combined.strip(), (
-        f"config show in an empty sandbox produced no output at all "
-        f"(rc={result.returncode}) — silent-exit pattern"
-    )
+    visited: set[tuple[str, ...]] = set()
+    failures: list[str] = []
+
+    def walk(path: tuple[str, ...]) -> None:
+        if path in visited:
+            return
+        visited.add(path)
+        args = [*path] if path[-1:] == ("help",) else [*path, "--help"]
+        result = sandbox.run(args, timeout=30)
+        if result.returncode != 0 or not result.combined_output.strip():
+            failures.append(
+                f"{' '.join(args) or '--help'} returned "
+                f"{result.returncode} with output={result.combined_output!r}"
+            )
+            return
+        if path[-1:] == ("help",):
+            return
+        if len(path) >= 5:
+            failures.append(f"command tree exceeded expected depth: {' '.join(path)}")
+            return
+        for command in sorted(parse_advertised_commands(result.combined_output)):
+            walk((*path, command))
+
+    walk(())
+
+    expected_paths = {
+        ("cloud", "handoff", "list-stuck"),
+        ("cloud", "handoff", "run"),
+        ("release-bot", "hook", "run"),
+        ("ship-state", "reconcile"),
+        ("targets", "warm", "drain"),
+        ("governance", "status"),
+    }
+    assert expected_paths.issubset(visited)
+    assert not failures, "\n".join(failures)
 
 
-@pytest.mark.config
-def test_config_profiles_in_empty_sandbox_is_nonsilent(
-    sandbox_with_shipyard: Sandbox,
-) -> None:
-    """``shipyard config profiles`` with no profiles defined must
-    print *something* (typically a "no profiles defined" hint) rather
-    than silently exit."""
-    result = sandbox_with_shipyard.run(["config", "profiles"], timeout=30.0)
-    combined = result.stdout + result.stderr
-    assert combined.strip(), (
-        f"config profiles in an empty sandbox was silent. "
-        f"rc={result.returncode}"
-    )
+@pytest.mark.state
+def test_json_paths_resolve_inside_sandbox_home(sandbox: Sandbox) -> None:
+    result = sandbox.run(["--json", "paths"]).expect_success()
+    payload = result.json_stdout()
+
+    assert isinstance(payload, dict)
+    assert payload["mode"] == "isolated"
+    assert payload["binary_name"] == "shipyard"
+    for key in ["global_dir", "state_dir", "daemon_dir", "daemon_socket", "daemon_pid_file"]:
+        value = Path(payload[key])
+        assert value.is_relative_to(sandbox.home_dir), f"{key} escaped sandbox: {value}"
+    assert "shipyard-dev" in payload["state_dir"]
 
 
-# -----------------------------------------------------------------------------
-# Scenario 6 — Queue / targets readback in an empty sandbox
-# -----------------------------------------------------------------------------
+@pytest.mark.state
+def test_ship_state_list_empty_sandbox_is_nonsilent(sandbox: Sandbox) -> None:
+    result = sandbox.run(["ship-state", "list"]).expect_success()
 
-
-@pytest.mark.queue
-def test_queue_in_empty_sandbox_is_nonsilent(
-    sandbox_with_shipyard: Sandbox,
-) -> None:
-    """An empty queue must still produce observable output ("No
-    pending jobs" or similar). Silent-exit on an empty queue is the
-    failure mode that masks "did the queue load at all?" bugs."""
-    result = sandbox_with_shipyard.run(["queue"], timeout=30.0).expect_success()
-    combined = result.stdout + result.stderr
-    assert combined.strip(), (
-        f"queue in an empty sandbox produced no output at all"
-    )
-
-
-@pytest.mark.queue
-def test_targets_list_in_empty_sandbox_is_nonsilent(
-    sandbox_with_shipyard: Sandbox,
-) -> None:
-    """``shipyard targets list`` against zero configured targets must
-    print a hint (typically a header + "No targets" or an empty
-    table). Catches a regression where the renderer crashes on an
-    empty target set."""
-    result = sandbox_with_shipyard.run(["targets", "list"], timeout=30.0)
-    # Empty config can legitimately exit non-zero ("no project
-    # config"); what matters is that it explained itself.
-    combined = result.stdout + result.stderr
-    assert combined.strip(), (
-        f"targets list in an empty sandbox was silent. "
-        f"rc={result.returncode}"
-    )
-
-
-# -----------------------------------------------------------------------------
-# Scenario 7 — Daemon: status doesn't accidentally start the daemon
-# -----------------------------------------------------------------------------
+    assert result.combined_output.strip()
+    assert "No active ship state" in result.combined_output
 
 
 @pytest.mark.daemon
-def test_daemon_status_in_empty_sandbox_does_not_start_daemon(
-    sandbox_with_shipyard: Sandbox,
-) -> None:
-    """``shipyard daemon status`` must be a pure read; it must NOT
-    spawn a long-lived daemon process or open a socket file. The
-    contamination audit at teardown catches accidental writes; here we
-    additionally verify the daemon socket file under the sandbox HOME
-    was never created (which would also imply a server is bound to
-    it)."""
-    result = sandbox_with_shipyard.run(
-        ["daemon", "status"], timeout=30.0
-    )
-    # Status must exit cleanly and report "not running" — but the
-    # exact string varies by version, so just assert non-silent.
-    combined = result.stdout + result.stderr
-    assert combined.strip(), (
-        f"daemon status was silent. rc={result.returncode}"
-    )
+def test_daemon_status_does_not_start_daemon(sandbox: Sandbox) -> None:
+    result = sandbox.run(["--json", "daemon", "status"]).expect_success()
+    payload = result.json_stdout()
 
-    # Belt-and-braces: walk the per-platform daemon socket locations
-    # under the sandbox $HOME and assert nothing was created.
-    sandbox_home = sandbox_with_shipyard.home
-    daemon_socket_locations = [
-        sandbox_home / "Library" / "Application Support" / "shipyard" / "daemon" / "daemon.sock",
-        sandbox_home / ".local" / "state" / "shipyard" / "daemon" / "daemon.sock",
-        sandbox_home / "AppData" / "Local" / "shipyard" / "daemon" / "daemon.sock",
-    ]
-    for sock in daemon_socket_locations:
-        assert not sock.exists(), (
-            f"daemon status accidentally created a socket at {sock} — "
-            f"a server may be running. Stop it manually before "
-            f"re-running tests."
-        )
+    assert isinstance(payload, dict)
+    assert payload["running"] is False
+    assert not (sandbox.home_dir / "Library" / "Application Support" / "shipyard-dev" / "daemon" / "daemon.sock").exists()
 
 
-# -----------------------------------------------------------------------------
-# Scenario 8 — JSON parity: --json status is parseable + has stable keys
-# -----------------------------------------------------------------------------
+@pytest.mark.daemon
+@pytest.mark.skipif(sys.platform == "win32", reason="daemon IPC runtime is Unix-only")
+def test_daemon_refresh_spawns_detached_child_and_reuses_repos(sandbox: Sandbox) -> None:
+    env = {
+        "HOME": str(sandbox.home_dir),
+        "USERPROFILE": str(sandbox.home_dir),
+        "PATH": f"{sandbox.bin_dir}:/usr/bin:/bin:/usr/sbin:/sbin",
+        "XDG_CONFIG_HOME": str(sandbox.home_dir / ".config"),
+        "XDG_STATE_HOME": str(sandbox.home_dir / ".local" / "state"),
+        "XDG_CACHE_HOME": str(sandbox.home_dir / ".cache"),
+        "RUST_BACKTRACE": "1",
+    }
 
+    with tempfile.TemporaryDirectory(prefix="syrd-") as short_state:
+        state_dir = Path(short_state)
 
-@pytest.mark.parity
-def test_json_status_payload_is_well_formed(
-    sandbox_with_shipyard: Sandbox,
-) -> None:
-    """``shipyard --json status`` must be parseable JSON and must
-    include the schema keys that downstream consumers (Pulp's `/status`
-    slash command, the daemon, CI tooling) depend on. A release that
-    drops one of these keys is a breaking change that should land
-    with a release-note bump, not silently."""
-    result = sandbox_with_shipyard.run(
-        ["--json", "status"], timeout=45.0
-    ).expect_success()
-    payload = parse_status_json(result.stdout)
-    missing = [k for k in REQUIRED_STATUS_KEYS if k not in payload]
-    assert not missing, (
-        f"--json status is missing required keys {missing!r}; "
-        f"payload keys: {sorted(payload)}"
-    )
-    # Sanity: the documented schema_version is an integer.
-    assert isinstance(payload["schema_version"], int), (
-        f"schema_version is not an int: {payload['schema_version']!r}"
-    )
+        def run_daemon(args: list[str]) -> dict[str, object]:
+            result = subprocess.run(
+                [
+                    str(sandbox.binary_path),
+                    "--mode",
+                    "isolated",
+                    "--state-dir",
+                    str(state_dir),
+                    "--json",
+                    "daemon",
+                    *args,
+                ],
+                cwd=sandbox.work_dir,
+                env=env,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            return json.loads(result.stdout)
 
+        def wait_for_running() -> dict[str, object]:
+            deadline = time.monotonic() + 3
+            last: dict[str, object] | None = None
+            while time.monotonic() < deadline:
+                last = run_daemon(["status"])
+                if last.get("running") is True:
+                    return last
+                time.sleep(0.1)
+            raise AssertionError(f"daemon did not become reachable: {last}")
 
-# -----------------------------------------------------------------------------
-# Scenario 9 — `pin` outside a consumer repo is non-silent
-# -----------------------------------------------------------------------------
-#
-# `shipyard pin` operates on consumer repos like pulp / spectr that
-# pin a Shipyard version via tools/shipyard.toml. Inside an empty
-# sandbox there's no such file, so `pin show` must fail loudly with a
-# clear hint — the failure mode we're preventing is "exits 0 with no
-# output, leaving the user wondering why the pin didn't change."
+        def seed_registrations(repos: list[str]) -> None:
+            daemon_dir = state_dir / "daemon"
+            daemon_dir.mkdir(parents=True, exist_ok=True)
+            payload = [
+                {"repo": repo, "hook_id": index + 1}
+                for index, repo in enumerate(repos)
+            ]
+            (daemon_dir / "registrations.json").write_text(
+                json.dumps(payload, indent=2),
+                encoding="utf-8",
+            )
+
+        try:
+            seed_registrations(["owner/daemon-refresh"])
+            first = run_daemon(["refresh", "--repo", "owner/daemon-refresh"])
+            assert first["command"] == "daemon:refresh"
+            assert first["stopped_prior"] is False
+            assert first["repos"] == ["owner/daemon-refresh"]
+            assert isinstance(first["new_pid"], int)
+
+            status = wait_for_running()
+            assert status["registered_repos"] == ["owner/daemon-refresh"]
+
+            second = run_daemon(["refresh"])
+            assert second["command"] == "daemon:refresh"
+            assert second["stopped_prior"] is True
+            assert second["repos"] == ["owner/daemon-refresh"]
+            assert isinstance(second["new_pid"], int)
+
+            status = wait_for_running()
+            assert isinstance(status["registered_repos"], list)
+        finally:
+            subprocess.run(
+                [
+                    str(sandbox.binary_path),
+                    "--mode",
+                    "isolated",
+                    "--state-dir",
+                    str(state_dir),
+                    "--json",
+                    "daemon",
+                    "stop",
+                ],
+                cwd=sandbox.work_dir,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
 
 
 @pytest.mark.smoke
-def test_pin_show_outside_consumer_repo_is_nonsilent(
-    sandbox_with_shipyard: Sandbox,
-) -> None:
-    result = sandbox_with_shipyard.run(["pin", "show"], timeout=30.0)
-    combined = result.stdout + result.stderr
-    assert combined.strip(), (
-        f"pin show outside a consumer repo was silent. "
-        f"rc={result.returncode}, this is the silent-failure anti-pattern."
+def test_pin_show_outside_consumer_repo_fails_loudly(sandbox: Sandbox) -> None:
+    result = sandbox.run(["pin", "show"])
+
+    assert result.returncode != 0
+    assert result.combined_output.strip()
+    assert "tools/shipyard.toml" in result.combined_output
+
+
+@pytest.mark.installer
+def test_install_script_dry_run_defaults_to_production_names(sandbox: Sandbox) -> None:
+    result = subprocess.run(
+        ["bash", str(REPO_ROOT / "install.sh")],
+        cwd=sandbox.work_dir,
+        env={
+            "HOME": str(sandbox.home_dir),
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "SHIPYARD_DRY_RUN": "1",
+        },
+        check=True,
+        capture_output=True,
+        text=True,
     )
-    # Should hint at the missing pin file or the right context.
-    assert (
-        "shipyard.toml" in combined.lower()
-        or "consumer" in combined.lower()
-        or "pin" in combined.lower()
-    ), (
-        f"pin show error doesn't hint at the missing pin file or "
-        f"context: {combined!r}"
+
+    assert "ARTIFACT_PREFIX=shipyard" in result.stdout
+    assert "BINARY_NAME=shipyard" in result.stdout
+    assert "ALIAS_NAME=sy" in result.stdout
+    assert "COMPAT_NAME=" not in result.stdout
+
+
+@pytest.mark.installer
+def test_install_script_supports_private_release_repo_token() -> None:
+    content = (REPO_ROOT / "install.sh").read_text(encoding="utf-8")
+
+    assert "SHIPYARD_GITHUB_TOKEN" in content
+    assert "Authorization: Bearer ${GITHUB_TOKEN_VALUE}" in content
+    assert "Accept: application/octet-stream" in content
+    assert "select_asset_url" in content
+    assert "curl_shipyard -sL" in content
+
+
+@pytest.mark.installer
+def test_install_script_intel_mac_guard_is_version_aware(sandbox: Sandbox) -> None:
+    latest = subprocess.run(
+        ["bash", str(REPO_ROOT / "install.sh")],
+        cwd=sandbox.work_dir,
+        env={
+            "HOME": str(sandbox.home_dir),
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "SHIPYARD_DRY_RUN": "1",
+            "SHIPYARD_INSTALL_TEST_UNAME_S": "Darwin",
+            "SHIPYARD_INSTALL_TEST_UNAME_M": "x86_64",
+        },
+        check=False,
+        capture_output=True,
+        text=True,
     )
+    assert latest.returncode == 2
+    assert "Intel Macs (x86_64) are not supported" in latest.stderr
+    assert "SHIPYARD_VERSION=v0.49.0" in latest.stderr
+
+    old_pin = subprocess.run(
+        ["bash", str(REPO_ROOT / "install.sh")],
+        cwd=sandbox.work_dir,
+        env={
+            "HOME": str(sandbox.home_dir),
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "SHIPYARD_DRY_RUN": "1",
+            "SHIPYARD_VERSION": "v0.49.0",
+            "SHIPYARD_INSTALL_TEST_UNAME_S": "Darwin",
+            "SHIPYARD_INSTALL_TEST_UNAME_M": "x86_64",
+        },
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "OS=macos" in old_pin.stdout
+    assert "ARCH=x64" in old_pin.stdout
+    assert "ARTIFACT=shipyard-macos-x64" in old_pin.stdout
+    assert "VERSION_LABEL=v0.49.0" in old_pin.stdout
 
 
-# -----------------------------------------------------------------------------
-# Scenario 10 — Contamination audit smoke
-# -----------------------------------------------------------------------------
-#
-# The ``sandbox`` fixture's teardown calls ``assert_no_contamination``
-# after every test. That's the canonical audit. This explicit test
-# makes the contract visible in reports even when everything else
-# passes quietly, and guards against a future refactor where someone
-# removes the teardown hook.
-
-
-def test_contamination_audit_catches_writes_to_protected_paths(
+@pytest.mark.installer
+def test_install_script_skip_download_preserves_production_binary_names(
     sandbox: Sandbox,
 ) -> None:
-    """Smoke test for the audit itself. Touch a file under a
-    sandboxed extra root, run the audit with that root injected, and
-    confirm it flagged the leak. We never write to the real protected
-    paths during this — that would be a genuine contamination."""
-    fake_root = sandbox.root / "fake-protected"
-    fake_root.mkdir()
-    fake_file = fake_root / "leak.txt"
-    fake_file.write_text("written after the sentinel")
+    install_dir = sandbox.home_dir / "install-bin"
+    install_dir.mkdir()
+    shutil.copy2(sandbox.binary_path, install_dir / BINARY_NAME)
 
-    report = sandbox.audit_contamination(extra_roots=(fake_root,))
-    assert not report.clean, "audit failed to detect a deliberate leak"
-    assert any(
-        str(p).endswith("leak.txt") for p in report.offenders
-    ), f"expected leak.txt in offenders, got {report.offenders}"
+    result = subprocess.run(
+        ["bash", str(REPO_ROOT / "install.sh")],
+        cwd=sandbox.work_dir,
+        env={
+            "HOME": str(sandbox.home_dir),
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "SHIPYARD_INSTALL_DIR": str(install_dir),
+            "SHIPYARD_SKIP_DOWNLOAD": "1",
+        },
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
-
-# -----------------------------------------------------------------------------
-# Scenario 11 — Sandbox.run refuses to invoke destructive subcommands
-# -----------------------------------------------------------------------------
-#
-# Defence-in-depth: even if a future contributor writes
-# `sandbox.run(["ship"])` by mistake, the harness must refuse to
-# actually execute it. The DESTRUCTIVE_COMMANDS guard in
-# ``shipyard_sandbox.py`` is the bulkhead. This test asserts the
-# bulkhead is wired in.
+    assert f"Installed {BINARY_NAME}" in result.stdout
+    assert (install_dir / BINARY_NAME).exists()
+    assert (install_dir / "sy").is_symlink()
 
 
-@pytest.mark.smoke
-def test_sandbox_refuses_to_invoke_ship(
-    sandbox_with_shipyard: Sandbox,
+@pytest.mark.installer
+@pytest.mark.skipif(sys.platform == "win32", reason="uses POSIX shell fakes")
+def test_install_script_adhoc_fallback_recovers_notarized_launch_failure(
+    sandbox: Sandbox,
 ) -> None:
-    with pytest.raises(AssertionError, match="destructive"):
-        sandbox_with_shipyard.run(["ship"])
+    install_dir = sandbox.home_dir / "install-bin-adhoc"
+    install_dir.mkdir()
+    marker = sandbox.work_dir / "adhoc-marker"
+    log = sandbox.work_dir / "codesign.log"
+    binary = install_dir / BINARY_NAME
+    binary.write_text(
+        "#!/bin/sh\n"
+        "if [ -f \"$SHIPYARD_FAKE_ADHOC_MARKER\" ]; then\n"
+        "  echo 'shipyard 0.1.0'\n"
+        "  exit 0\n"
+        "fi\n"
+        "echo 'simulated taskgated rejection' >&2\n"
+        "exit 137\n",
+        encoding="utf-8",
+    )
+    binary.chmod(0o755)
+    fake_codesign = sandbox.bin_dir / "codesign"
+    fake_codesign.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"$*\" >> \"$SHIPYARD_FAKE_CODESIGN_LOG\"\n"
+        "case \"$*\" in\n"
+        "  *'-dv '*) echo 'TeamIdentifier=TEAMID' >&2; exit 0 ;;\n"
+        "  *'--force --sign - '*) touch \"$SHIPYARD_FAKE_ADHOC_MARKER\"; exit 0 ;;\n"
+        "  *'--remove-signature '*) exit 0 ;;\n"
+        "  *) exit 0 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    fake_codesign.chmod(0o755)
+
+    result = subprocess.run(
+        ["bash", str(REPO_ROOT / "install.sh")],
+        cwd=sandbox.work_dir,
+        env={
+            "HOME": str(sandbox.home_dir),
+            "PATH": f"{sandbox.bin_dir}:/usr/bin:/bin:/usr/sbin:/sbin",
+            "SHIPYARD_INSTALL_DIR": str(install_dir),
+            "SHIPYARD_SKIP_DOWNLOAD": "1",
+            "SHIPYARD_INSTALL_TEST_UNAME_S": "Darwin",
+            "SHIPYARD_INSTALL_TEST_UNAME_M": "arm64",
+            "SHIPYARD_FAKE_ADHOC_MARKER": str(marker),
+            "SHIPYARD_FAKE_CODESIGN_LOG": str(log),
+        },
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "WARN: notarized binary would not launch" in result.stderr
+    assert marker.exists()
+    assert "Installed shipyard" in result.stdout
+    codesign_log = log.read_text(encoding="utf-8")
+    assert "--remove-signature" in codesign_log
+    assert "--force --sign -" in codesign_log
 
 
-@pytest.mark.smoke
-def test_sandbox_refuses_to_invoke_pr(
-    sandbox_with_shipyard: Sandbox,
+@pytest.mark.installer
+@pytest.mark.skipif(sys.platform == "win32", reason="uses POSIX shell fakes")
+def test_install_script_can_disable_adhoc_fallback(sandbox: Sandbox) -> None:
+    install_dir = sandbox.home_dir / "install-bin-no-adhoc"
+    install_dir.mkdir()
+    marker = sandbox.work_dir / "adhoc-marker-disabled"
+    binary = install_dir / BINARY_NAME
+    binary.write_text(
+        "#!/bin/sh\n"
+        "echo 'simulated taskgated rejection' >&2\n"
+        "exit 137\n",
+        encoding="utf-8",
+    )
+    binary.chmod(0o755)
+    fake_codesign = sandbox.bin_dir / "codesign"
+    fake_codesign.write_text(
+        "#!/bin/sh\n"
+        "case \"$*\" in\n"
+        "  *'-dv '*) echo 'TeamIdentifier=TEAMID' >&2; exit 0 ;;\n"
+        "  *'--force --sign - '*) touch \"$SHIPYARD_FAKE_ADHOC_MARKER\"; exit 0 ;;\n"
+        "  *) exit 0 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    fake_codesign.chmod(0o755)
+
+    result = subprocess.run(
+        ["bash", str(REPO_ROOT / "install.sh")],
+        cwd=sandbox.work_dir,
+        env={
+            "HOME": str(sandbox.home_dir),
+            "PATH": f"{sandbox.bin_dir}:/usr/bin:/bin:/usr/sbin:/sbin",
+            "SHIPYARD_INSTALL_DIR": str(install_dir),
+            "SHIPYARD_SKIP_DOWNLOAD": "1",
+            "SHIPYARD_INSTALL_TEST_UNAME_S": "Darwin",
+            "SHIPYARD_INSTALL_TEST_UNAME_M": "arm64",
+            "SHIPYARD_NO_ADHOC_FALLBACK": "1",
+            "SHIPYARD_FAKE_ADHOC_MARKER": str(marker),
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert "failed post-install smoke" in result.stderr
+    assert not marker.exists()
+
+
+@pytest.mark.installer
+def test_pin_bump_runs_consumer_install_wrapper_and_verifies_version(
+    sandbox: Sandbox,
 ) -> None:
-    with pytest.raises(AssertionError, match="destructive"):
-        sandbox_with_shipyard.run(["pr"])
+    consumer = sandbox.work_dir / "consumer"
+    tools = consumer / "tools"
+    install_bin = consumer / ".tmp-shipyard-bin"
+    tools.mkdir(parents=True)
+    install_bin.mkdir()
+    (tools / "shipyard.toml").write_text(
+        '[shipyard]\nversion = "v0.0.9"\nrepo = "danielraffel/Shipyard"\n',
+        encoding="utf-8",
+    )
+    installer = tools / "install-shipyard.sh"
+    installer.write_text(
+        "#!/bin/sh\n"
+        "set -eu\n"
+        'cp "$SHIPYARD_BINARY_FOR_TEST" "$SHIPYARD_INSTALL_DIR/shipyard"\n'
+        'chmod +x "$SHIPYARD_INSTALL_DIR/shipyard"\n',
+        encoding="utf-8",
+    )
+    installer.chmod(0o755)
+    subprocess.run(["git", "init", "--quiet", "--initial-branch=main"], cwd=consumer, check=True)
+    subprocess.run(["git", "config", "user.email", "sandbox@example.test"], cwd=consumer, check=True)
+    subprocess.run(["git", "config", "user.name", "Sandbox"], cwd=consumer, check=True)
+    subprocess.run(["git", "add", "."], cwd=consumer, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "seed"], cwd=consumer, check=True)
+    version_output = sandbox.run(["--version"]).expect_success().stdout.strip()
+    target_version = f"v{version_output.rsplit(maxsplit=1)[-1]}"
+
+    result = subprocess.run(
+        [
+            str(sandbox.binary_path),
+            "pin",
+            "bump",
+            "--to",
+            target_version,
+            "--no-pr",
+            "--allow-downgrade",
+            "--allow-redundant",
+        ],
+        cwd=consumer,
+        env={
+            "HOME": str(sandbox.home_dir),
+            "PATH": f"{install_bin}:/usr/bin:/bin:/usr/sbin:/sbin",
+            "SHIPYARD_BINARY_FOR_TEST": str(sandbox.binary_path),
+            "SHIPYARD_INSTALL_DIR": str(install_bin),
+        },
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "--no-pr: edit left in the working tree" in result.stdout
+    assert (
+        f'version = "{target_version}"'
+        in (tools / "shipyard.toml").read_text(encoding="utf-8")
+    )
+    assert (install_bin / "shipyard").exists()
 
 
-@pytest.mark.smoke
-def test_sandbox_refuses_to_invoke_cloud_run(
-    sandbox_with_shipyard: Sandbox,
-) -> None:
-    """``cloud run`` dispatches a real GHA workflow. Read-only
-    ``cloud workflows`` / ``cloud defaults`` / ``cloud status`` are
-    allowed; anything else under ``cloud`` must be refused."""
-    with pytest.raises(AssertionError, match="cloud"):
-        sandbox_with_shipyard.run(["cloud", "run", "build"])
+@pytest.mark.pin
+@pytest.mark.skipif(sys.platform == "win32", reason="uses a POSIX fake gh wrapper")
+def test_pin_bump_opens_pr_through_isolated_git_and_fake_gh(sandbox: Sandbox) -> None:
+    remote = sandbox.work_dir / "consumer-origin.git"
+    consumer = sandbox.work_dir / "consumer-pr"
+    tools = consumer / "tools"
+    gh_args = sandbox.work_dir / "fake-gh-args.txt"
 
+    subprocess.run(
+        ["git", "init", "--bare", "--quiet", "--initial-branch=main", str(remote)],
+        check=True,
+    )
+    consumer.mkdir()
+    subprocess.run(["git", "init", "--quiet", "--initial-branch=main"], cwd=consumer, check=True)
+    subprocess.run(["git", "config", "user.email", "sandbox@example.test"], cwd=consumer, check=True)
+    subprocess.run(["git", "config", "user.name", "Sandbox"], cwd=consumer, check=True)
+    tools.mkdir(parents=True)
+    (tools / "shipyard.toml").write_text(
+        '[shipyard]\nversion = "v0.0.9"\nrepo = "danielraffel/Shipyard"\n',
+        encoding="utf-8",
+    )
+    (tools / "install-shipyard.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=consumer, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "seed"], cwd=consumer, check=True)
+    subprocess.run(["git", "remote", "add", "origin", str(remote)], cwd=consumer, check=True)
+    subprocess.run(["git", "push", "-q", "-u", "origin", "main"], cwd=consumer, check=True)
 
-@pytest.mark.smoke
-def test_sandbox_refuses_to_invoke_auto_merge(
-    sandbox_with_shipyard: Sandbox,
-) -> None:
-    """Codex P1 on #260: ``auto-merge`` reaches ``merge_pr(...)`` in
-    cli.py and merges the named PR if checks are green. A test that
-    accidentally calls it would mutate real GitHub state, exactly
-    what the bulkhead exists to prevent. Pin the refusal."""
-    with pytest.raises(AssertionError, match="destructive"):
-        sandbox_with_shipyard.run(["auto-merge", "999"])
+    fake_gh = sandbox.bin_dir / "gh"
+    fake_gh.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"$@\" > \"$SHIPYARD_FAKE_GH_ARGS\"\n"
+        "echo 'https://github.com/example/consumer/pull/123'\n",
+        encoding="utf-8",
+    )
+    fake_gh.chmod(0o755)
 
+    result = sandbox.run(
+        [
+            "--json",
+            "--cwd",
+            str(consumer),
+            "pin",
+            "bump",
+            "--to",
+            "v0.1.0",
+            "--skip-verify",
+            "--allow-downgrade",
+            "--allow-redundant",
+        ],
+        extra_env={"SHIPYARD_FAKE_GH_ARGS": str(gh_args)},
+    ).expect_success()
+    payload = result.json_stdout()
 
-# -----------------------------------------------------------------------------
-# JSON-flag ergonomics
-# -----------------------------------------------------------------------------
+    assert payload["command"] == "pin"
+    assert payload["result"] == "pr-opened"
+    assert payload["from"] == "v0.0.9"
+    assert payload["to"] == "v0.1.0"
+    assert payload["pr_url"] == "https://github.com/example/consumer/pull/123"
+    assert 'version = "v0.1.0"' in (tools / "shipyard.toml").read_text(encoding="utf-8")
+    assert (
+        subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=consumer,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        == "chore/bump-shipyard-pin-to-v0.1.0"
+    )
+    assert subprocess.run(
+        ["git", "show-ref", "--verify", "refs/heads/chore/bump-shipyard-pin-to-v0.1.0"],
+        cwd=remote,
+        check=False,
+        capture_output=True,
+        text=True,
+    ).returncode == 0
+    gh_text = gh_args.read_text(encoding="utf-8")
+    assert "pr\ncreate\n" in gh_text
+    assert "chore: bump Shipyard pin v0.0.9 -> v0.1.0" in gh_text
 
 
 @pytest.mark.parity
-def test_json_status_returns_parseable_json_under_real_jsondecoder(
-    sandbox_with_shipyard: Sandbox,
+def test_json_ship_state_list_has_contract_keys(sandbox: Sandbox) -> None:
+    result = sandbox.run(["--json", "ship-state", "list"]).expect_success()
+    payload = json.loads(result.stdout)
+
+    assert payload["schema_version"] == 1
+    assert payload["command"] == "ship-state:list"
+    assert payload["states"] == []
+
+
+@pytest.mark.cross_binary
+def test_python_and_rust_empty_ship_state_list_contract_match(
+    sandbox: Sandbox,
+    python_shipyard_source: PythonShipyardSource,
 ) -> None:
-    """Belt-and-braces: not just our forgiving `parse_status_json`
-    helper — strict ``json.loads`` on the raw stdout must succeed.
-    Catches a regression where the renderer prints a banner before the
-    JSON payload, which would silently break downstream consumers
-    parsing stdout with the stdlib ``json`` module."""
-    result = sandbox_with_shipyard.run(
-        ["--json", "status"], timeout=45.0
-    ).expect_success()
-    try:
-        json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        pytest.fail(
-            f"--json status output is not strict-JSON: {exc}\n"
-            f"stdout: {result.stdout!r}"
+    sandbox.stage_python_shipyard(python_shipyard_source)
+
+    rust = sandbox.run(["--json", "ship-state", "list"]).expect_success().json_stdout()
+    python = (
+        sandbox.run(["--json", "ship-state", "list"], binary=PYTHON_BINARY_NAME)
+        .expect_success()
+        .json_stdout()
+    )
+
+    assert python == rust == {
+        "schema_version": 1,
+        "command": "ship-state:list",
+        "states": [],
+    }
+
+
+@pytest.mark.cross_binary
+def test_python_and_rust_daemon_status_contract_match(
+    sandbox: Sandbox,
+    python_shipyard_source: PythonShipyardSource,
+) -> None:
+    sandbox.stage_python_shipyard(python_shipyard_source)
+
+    rust = sandbox.run(["--json", "daemon", "status"]).expect_success().json_stdout()
+    python = (
+        sandbox.run(["--json", "daemon", "status"], binary=PYTHON_BINARY_NAME)
+        .expect_success()
+        .json_stdout()
+    )
+
+    assert python == rust == {
+        "schema_version": 1,
+        "command": "daemon:status",
+        "running": False,
+    }
+
+
+@pytest.mark.cross_binary
+def test_python_and_rust_doctor_safe_shape_match(
+    sandbox: Sandbox,
+    python_shipyard_source: PythonShipyardSource,
+) -> None:
+    sandbox.stage_python_shipyard(python_shipyard_source)
+
+    rust = sandbox.run(["--json", "doctor"], timeout=30).expect_success().json_stdout()
+    python = (
+        sandbox.run(["--json", "doctor"], binary=PYTHON_BINARY_NAME, timeout=30)
+        .expect_success()
+        .json_stdout()
+    )
+
+    for payload in [python, rust]:
+        assert payload["schema_version"] == 1
+        assert payload["command"] == "doctor"
+        assert isinstance(payload["ready"], bool)
+        checks = payload["checks"]
+        assert {"Core", "Cloud providers"}.issubset(checks)
+        assert {"git", "ssh", "shipyard-on-path", "rich-bundle"}.issubset(
+            checks["Core"]
         )
+        assert {"gh", "nsc"}.issubset(checks["Cloud providers"])
+
+
+@pytest.mark.cross_binary
+def test_python_and_rust_pin_show_failure_mentions_consumer_pin(
+    sandbox: Sandbox,
+    python_shipyard_source: PythonShipyardSource,
+) -> None:
+    sandbox.stage_python_shipyard(python_shipyard_source)
+
+    for binary in [PYTHON_BINARY_NAME, BINARY_NAME]:
+        result = sandbox.run(["pin", "show"], binary=binary)
+        assert result.returncode != 0
+        assert "tools/shipyard.toml" in result.combined_output
+
+
+@pytest.mark.bulkhead
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["ship"],
+        ["run"],
+        ["auto-merge", "1"],
+        ["cloud", "add-lane", "--pr", "1", "--target", "linux"],
+        ["cloud", "retarget", "--pr", "1", "--target", "linux", "--provider", "namespace"],
+        ["cloud", "handoff", "run", "123", "--to", "namespace"],
+        ["daemon", "start"],
+        ["daemon", "run"],
+        ["daemon", "refresh"],
+        ["daemon", "stop"],
+        ["wait", "run", "123"],
+        ["watch"],
+        ["--json", "wait", "run", "123"],
+        ["--state-dir", "/tmp/shipyard-sandbox", "daemon", "start"],
+    ],
+)
+def test_destructive_commands_are_blocked_by_harness(
+    sandbox: Sandbox,
+    args: list[str],
+) -> None:
+    with pytest.raises(AssertionError):
+        sandbox.run(args)

@@ -1,27 +1,42 @@
 {
   "$schema": "../../pulp-versioning-v2/tools/scripts/versioning.schema.json",
   "schema_version": 1,
-  "_comment": "Shipyard skill → path-glob map. Only one skill today (ci). Paired with scripts/versioning.json. Every subdir under skills/ MUST have an entry here; skill_sync_check.py fails if one is missing.",
+  "_comment": "Shipyard skill to path-glob map. Every subdir under skills/ must have an entry.",
 
   "skills": {
     "ci": {
       "paths": [
-        "src/shipyard/cli/**",
-        "src/shipyard/runners/**",
-        "src/shipyard/config/**",
-        "src/shipyard/queue/**",
+        "Cargo.toml",
+        "Cargo.lock",
+        "src/**",
         "commands/**",
         "agents/**",
         "hooks/**",
         ".claude-plugin/**",
         ".github/workflows/**",
-        "scripts/release.sh"
+        "scripts/release.sh",
+        "scripts/ci_matrix.py",
+        "scripts/package_release.py",
+        "scripts/release_macos_local.py",
+        "scripts/release-macos-local.sh"
       ]
     },
     "changelog": {
       "paths": [
-        "src/shipyard/changelog/**",
+        "src/changelog.rs",
+        "src/app/changelog_cmd.rs",
         "commands/changelog.md"
+      ]
+    },
+    "shipyard": {
+      "paths": [
+        "src/**",
+        "scripts/**",
+        ".github/workflows/**",
+        "tools/sandbox-e2e/**",
+        "docs/**",
+        "planning/**",
+        "skills/shipyard/**"
       ]
     }
   }

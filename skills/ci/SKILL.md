@@ -638,11 +638,11 @@ When the user says "push a PR", "ship this", "ship it", "we're done", "merge thi
 The orchestration, in order:
 
 1. `skill_sync_check.py --mode=report` — hard-fails if a mapped path was touched without a `SKILL.md` update or a `Skill-Update:` trailer on the tip commit.
-2. `version_bump_check.py --mode=apply` — rewrites `pyproject.toml` + `src/shipyard/__init__.py` for CLI-surface bumps and `.claude-plugin/plugin.json` for plugin-surface bumps. The two version streams are independent per `RELEASING.md`.
+2. `version_bump_check.py --mode=apply` — rewrites `Cargo.toml` for CLI-surface bumps and `.claude-plugin/plugin.json` for plugin-surface bumps. The two version streams are independent per `RELEASING.md`.
 3. `git commit` + `gh pr create` + `shipyard ship`.
 4. On merge, `.github/workflows/auto-release.yml` tags the CLI bump as `v<x.y.z>`. The existing tag-triggered `release.yml` builds the 5-platform binaries and publishes the GitHub Release.
 
-Never run `gh pr create` + release separately. Never run the Python gate scripts by hand.
+Never run `gh pr create` + release separately. Never run the gate scripts by hand.
 
 ### Gate-script path resolution
 
@@ -670,9 +670,9 @@ Both guards are skipped silently when their inputs are unavailable (no `shipyard
 
 ## State-machine lane + doc-sync gate
 
-A dedicated `state-machine` CI job runs `pytest -m state_machine -v` on ubuntu-latest. Failures show up as a distinct check row (not mixed into the cross-platform `test` matrix), so a ship-state regression is visually separable from an infra blip. When writing a test that exercises ship-state transitions, add `pytestmark = pytest.mark.state_machine` at module scope.
+A dedicated Rust test suite exercises ship-state transitions under `cargo test --all-targets --locked`. Failures show up in the cross-platform test matrix and the coverage gate.
 
-A doc-sync gate enforces that `docs/ship-state-machine.md` moves whenever `src/shipyard/core/ship_state.py` or `src/shipyard/ship/**` does. Mechanism is `scripts/doc_sync_check.py` + `scripts/doc_sync_map.json` (mirrors `skill_sync_check.py` but targets free-form docs). Bypass via `Doc-Update: skip doc=<path> reason="..."` trailer.
+A doc-sync gate enforces that `docs/ship-state-machine.md` moves whenever the mapped Rust ship-state or command modules change. Mechanism is `scripts/doc_sync_check.py` + `scripts/doc_sync_map.json` (mirrors `skill_sync_check.py` but targets free-form docs). Bypass via `Doc-Update: skip doc=<path> reason="..."` trailer.
 
 ## Bypass trailers (tip commit)
 
@@ -686,7 +686,7 @@ A doc-sync gate enforces that `docs/ship-state-machine.md` moves whenever `src/s
 
 **`Version-Bump` is authoritative when set.** The override wins against both the path-based heuristic and the conventional-commit subject ceiling. If you want a bug fix to ship as `cli=patch` even though it touches many public-API files, write `Version-Bump: cli=patch reason="bug fix"` — the trailer is the author's explicit accountability, and the reason string is reviewable. Two escape hatches stay in place: `skip` zeroes the level, and an override on a surface that wasn't actually touched is ignored (no rubber-stamping unrelated bumps).
 
-**Gotcha:** anything under `.github/workflows/**`, `.claude-plugin/**`, `commands/**`, `agents/**`, `hooks/**`, `scripts/release.sh`, `src/shipyard/cli/**`, `src/shipyard/runners/**`, or `src/shipyard/config/**` triggers the `ci` skill's path map (`scripts/skill_path_map.json`). Update this SKILL.md in the same PR — or use the `Skill-Update: skip` trailer with a real reason.
+**Gotcha:** anything under `.github/workflows/**`, `.claude-plugin/**`, `commands/**`, `agents/**`, `hooks/**`, `scripts/release.sh`, `scripts/ci_matrix.py`, release packaging scripts, or `src/**` triggers the `ci` skill's path map (`scripts/skill_path_map.json`). Update this SKILL.md in the same PR — or use the `Skill-Update: skip` trailer with a real reason.
 
 **Manual release fallback:** `./scripts/release.sh` still exists for emergencies but is no longer the happy path. Normal releases flow through `shipyard pr` → merge → auto-release workflow.
 

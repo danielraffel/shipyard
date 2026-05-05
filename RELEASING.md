@@ -88,8 +88,8 @@ export SHIPYARD_SIGNING_IDENTITY=<SHA1-or-CN>           # `security find-identit
 
 The script is 8 steps:
 
-1. Fail fast on missing env vars (before the ~60s PyInstaller build).
-2. Build via `pyinstaller --onefile --codesign-identity <...>`.
+1. Fail fast on missing env vars (before the Rust release build).
+2. Build via `cargo build --release --locked --bin shipyard`.
 3. Re-sign outer Mach-O with `--options runtime --timestamp`.
 4. Package the signed Mach-O into a `.dmg` (`hdiutil create`, volname "Shipyard").
 5. Sign the DMG itself.
@@ -128,14 +128,14 @@ export SHIPYARD_SIGNING_IDENTITY=<SHA1-or-CN>           # `security find-identit
 
 The script runs the full pipeline on the local Mac:
 
-1. Fails fast if any env var is missing (before the ~60s PyInstaller build).
-2. Builds via `pyinstaller --onefile --codesign-identity <...>` — identical flags to what CI used to do, only the environment differs.
-3. Re-signs outer Mach-O with `--options runtime --timestamp` (notarytool prerequisites).
-4. Submits to Apple via `xcrun notarytool submit --wait`, asserts `status: Accepted`.
-5. **Runs `<binary> --version` locally.** If this fails (the #219 shape), exits 3 with `codesign --verify`, `spctl --assess`, and `xattr -l` diagnostics, and does NOT upload. This is the whole point — the Mac running the script is the same Mac that will need to launch the binary tomorrow.
-6. On launch success: uploads via `gh release upload --clobber` and updates `checksums.sha256` for the artifact.
+1. Fails fast if any env var is missing (before the Rust release build).
+2. Builds `target/release/shipyard` unless `--skip-build --binary <path>` is supplied.
+3. Signs the Mach-O with `--options runtime --timestamp` (notarytool prerequisites).
+4. Packages the signed binary into a `.dmg`, signs the DMG, submits it via `xcrun notarytool submit --wait`, and staples the accepted ticket.
+5. **Runs `<binary> --version` from the mounted DMG locally.** If this fails, the script exits and does NOT upload. This is the whole point — the Mac running the script is the same Mac that will need to launch the binary tomorrow.
+6. On launch success: uploads via `gh release upload --clobber`, updates `checksums.sha256`, verifies public asset visibility, and runs the `install.sh` E2E.
 
-Running without `--upload` is the diagnostic mode (used to confirm the local signing path actually works on a given Mac). Test coverage in `tests/test_release_macos_local.py` ensures missing creds / bad flags / bash syntax errors all surface before the expensive build step.
+Running without `--upload` is the diagnostic mode (used to confirm the local signing path actually works on a given Mac). Script-helper tests under `scripts/test_*.py` ensure missing creds / bad flags / bash syntax errors all surface before the expensive build step.
 
 ### Why the repo secrets are still listed below
 
@@ -155,20 +155,11 @@ Five secrets on the repo (all `gh secret set NAME`):
 | `SIGNING_CERT_P12_BASE64` | `base64 -i DeveloperID.p12` of your exported Developer ID Application cert + private key |
 | `SIGNING_CERT_PASSWORD` | Export password for the .p12 |
 
-When **all five** are set, the release workflow's macOS matrix jobs import the cert into a temp keychain, resolve the Developer ID Application identity by **Team ID** (via `security find-identity -v -p codesigning | grep "(TEAM_ID)"` — not by subject CN, so forks / org-owned certs / maintainer rotation all work), pass the resulting SHA-1 fingerprint to PyInstaller's `--codesign-identity` so every embedded dylib (notably `Python.framework`) gets signed at collection time, then re-sign the outer Mach-O with `--options runtime --timestamp` and submit to `xcrun notarytool submit --wait`. Users downloading a signed binary get clean execution on macOS 26.3+ with no xattr dance.
+When the CI signing experiment is enabled, the release workflow's macOS job imports the cert into a temp keychain, resolves the Developer ID Application identity by **Team ID**, builds the Rust binary, signs and notarizes the `.dmg`, and uploads it to the draft release. The maintainer's local `scripts/release-macos-local.sh` path remains the primary verification path because it performs the same install.sh E2E on the Mac that will use the binary.
 
 The gate is all-five-present (not just `APPLE_ID`). A partial rotation — say a new `APPLE_ID` pasted in but the new `SIGNING_CERT_P12_BASE64` not yet uploaded — used to run the signing path and fail mid-release on `base64 -d`. Now the step cleanly no-ops in that state and the ad-hoc fallback publishes normally.
 
-**Why PyInstaller has to see the identity, not just the post-build step.** An earlier iteration signed only the outer Mach-O after PyInstaller had already bundled an ad-hoc-signed `Python.framework` inside. dyld's "same Team ID" check then rejected the load at first launch:
-
-```
-code signature … not valid for use in process: mapping process and mapped file
-(non-platform) have different Team IDs
-```
-
-Passing `--codesign-identity` during the PyInstaller build is what makes the inner and outer Team IDs match. The outer re-sign step remains because PyInstaller doesn't add `--options runtime` / `--timestamp` itself, and notarytool requires both.
-
-When the secrets aren't set, the sign+notarize step no-ops and the workflow continues to publish ad-hoc-signed binaries (the current default). Forks and pull requests from external contributors aren't blocked.
+When the secrets aren't set, the CI sign+notarize job is skipped. Forks and pull requests from external contributors aren't blocked.
 
 A bare Mach-O can't be `stapler staple`'d — Gatekeeper verifies notarization online at first launch instead. That requires network, which every CI / user machine has. Accepted tradeoff vs wrapping the CLI in a no-op `.app` bundle just for stapling.
 
@@ -212,7 +203,7 @@ Normal releases are automatic. You don't call any script.
 
 1. Open a PR via `shipyard pr` (or `shipyard ship`).
 2. CI runs `.github/workflows/version-skill-check.yml`, which confirms the right bump(s) are present via `scripts/version_bump_check.py` + `scripts/skill_sync_check.py`. Merge on green.
-3. On push to `main`, `.github/workflows/auto-release.yml` diffs `pyproject.toml`'s version against the previous push. If it moved, the workflow creates a `v<x.y.z>` tag.
+3. On push to `main`, `.github/workflows/auto-release.yml` diffs `Cargo.toml`'s package version against the previous push. If it moved, the workflow creates a `v<x.y.z>` tag.
 4. The existing tag-triggered `release.yml` builds binaries on 5 platforms and publishes the GitHub Release.
 
 Plugin-version bumps (`.claude-plugin/plugin.json`) are intentionally **not** tagged — plugin files are delivered from git, not from the binary. Bumping the plugin version still requires a PR and goes through the same gate, but it doesn't cut a binary release.
@@ -258,12 +249,12 @@ Only when the automatic flow is genuinely unavailable:
 The script:
 
 0. Runs `scripts/version_bump_check.py --mode=report` and refuses to tag if the required bumps aren't present. `RELEASE_SKIP_VERSION_CHECK=1` bypasses this for emergencies; log a reason in the commit trailer.
-1. Bumps the version in `pyproject.toml`, `__init__.py`, and plugin manifests
+1. Bumps the version in `Cargo.toml` and plugin manifests
 2. Commits the version bump
 3. Tags the commit (`v0.1.1`)
 4. Pushes the tag
 5. The tag push triggers `.github/workflows/release.yml` which:
-   - Builds binaries on 5 platforms (macOS ARM64/x64, Windows x64, Linux x64/ARM64)
+   - Builds binaries on macOS ARM64, Windows x64, Linux x64, and Linux ARM64
    - Creates a GitHub Release with binaries + SHA256 checksums
    - Uses GitHub-hosted runners by default; Namespace via manual dispatch
 
@@ -285,12 +276,11 @@ gh workflow run release.yml --repo danielraffel/Shipyard -f runner_provider=name
 
 ## Version locations
 
-The version lives in 4 places (all updated by `release.sh`):
+The binary and plugin versions live in 3 places (all updated by `release.sh`):
 
 | File | Field |
 |------|-------|
-| `pyproject.toml` | `version = "X.Y.Z"` |
-| `src/shipyard/__init__.py` | `__version__ = "X.Y.Z"` |
+| `Cargo.toml` | `[package] version = "X.Y.Z"` |
 | `.claude-plugin/plugin.json` | `"version": "X.Y.Z"` |
 | `.claude-plugin/marketplace.json` | `"version": "X.Y.Z"` |
 

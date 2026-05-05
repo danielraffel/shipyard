@@ -1,0 +1,1796 @@
+#[cfg(unix)]
+use std::collections::BTreeMap;
+use std::fs::{self, OpenOptions};
+#[cfg(unix)]
+use std::io::{BufRead, BufReader, Read, Write};
+#[cfg(unix)]
+use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+#[cfg(unix)]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(unix)]
+use std::sync::mpsc;
+#[cfg(unix)]
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
+#[cfg(unix)]
+use std::time::{SystemTime, UNIX_EPOCH};
+
+#[cfg(unix)]
+use base64::Engine;
+#[cfg(unix)]
+use serde_json::Value;
+
+use crate::daemon_ipc::read_daemon_status;
+#[cfg(unix)]
+use crate::daemon_ipc::{IpcServer, IpcState};
+use crate::identity::RuntimeMode;
+#[cfg(unix)]
+use crate::reconcile::{
+    RECONCILE_INTERVAL_SECONDS, ReconcileReport, ReconcileTransition, ReconcileWindow,
+    reconcile_active_ship_states,
+};
+#[cfg(unix)]
+use crate::registrar::Registrar;
+use crate::ship_state::ShipStateStore;
+#[cfg(unix)]
+use crate::ship_state::{DispatchedRun, ShipState};
+#[cfg(unix)]
+use crate::tunnel::{
+    TailscaleFunnelBackend, TunnelSnapshot, TunnelSupervisorHooks, TunnelSupervisorPolicy,
+    TunnelSupervisorState, supervise_tunnel,
+};
+#[cfg(unix)]
+use crate::webhook::{decode_webhook_event, is_valid_signature};
+
+/// Foreground daemon runtime configuration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DaemonRunConfig {
+    /// Runtime mode used to decide production-vs-sandbox side effects.
+    pub mode: RuntimeMode,
+    /// Root state directory for the selected runtime mode.
+    pub state_dir: PathBuf,
+    /// Repos that the daemon should advertise in status.
+    pub repos: Vec<String>,
+}
+
+/// Detached daemon spawn request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SpawnRequest {
+    /// Binary to execute for the child daemon process.
+    pub binary: PathBuf,
+    /// Runtime mode to preserve across the detached spawn.
+    pub mode: RuntimeMode,
+    /// Explicit global-dir override, primarily for tests.
+    pub global_dir_override: Option<PathBuf>,
+    /// Explicit state-dir override, primarily for tests.
+    pub state_dir_override: Option<PathBuf>,
+    /// Root state directory for the selected runtime mode.
+    pub state_dir: PathBuf,
+    /// Repos that the daemon should advertise in status.
+    pub repos: Vec<String>,
+}
+
+/// Errors returned by the foreground daemon runtime.
+#[derive(Debug)]
+pub enum DaemonRunError {
+    /// Another daemon is already serving the selected state root.
+    AlreadyRunning,
+    /// Underlying filesystem or process-management failure.
+    Io(std::io::Error),
+    /// IPC startup or teardown failure.
+    Protocol(String),
+}
+
+impl std::fmt::Display for DaemonRunError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AlreadyRunning => f.write_str("daemon already running"),
+            Self::Io(error) => write!(f, "{error}"),
+            Self::Protocol(error) => f.write_str(error),
+        }
+    }
+}
+
+impl std::error::Error for DaemonRunError {}
+
+impl From<std::io::Error> for DaemonRunError {
+    fn from(value: std::io::Error) -> Self {
+        Self::Io(value)
+    }
+}
+
+/// Detached spawn failure, including the daemon log tail when available.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DaemonSpawnFailedError(pub String);
+
+impl std::fmt::Display for DaemonSpawnFailedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for DaemonSpawnFailedError {}
+
+/// Resolve the repo list for daemon startup.
+///
+/// Explicit repos win. Otherwise, derive the set from active ship-state
+/// records so the daemon advertises every repo currently represented on
+/// this machine.
+#[must_use]
+pub fn resolve_repos(state_dir: &Path, explicit_repos: &[String]) -> Vec<String> {
+    if !explicit_repos.is_empty() {
+        return normalize_repos(explicit_repos.to_vec());
+    }
+
+    let Ok(store) = ShipStateStore::new(state_dir.join("ship")) else {
+        return Vec::new();
+    };
+    let states = store.list_active();
+    normalize_repos(
+        states
+            .into_iter()
+            .map(|state| state.repo)
+            .filter(|repo| !repo.is_empty())
+            .collect(),
+    )
+}
+
+/// Run the daemon in the foreground until a stop request arrives.
+#[cfg(unix)]
+pub fn run_blocking(config: DaemonRunConfig) -> Result<(), DaemonRunError> {
+    let daemon_dir = config.state_dir.join("daemon");
+    fs::create_dir_all(&daemon_dir)?;
+
+    if read_daemon_status(&config.state_dir).is_some() {
+        return Err(DaemonRunError::AlreadyRunning);
+    }
+    cleanup_stale_runtime_files(&daemon_dir)?;
+
+    let _pid_guard = PidFileGuard::acquire(&daemon_dir.join("daemon.pid"))?;
+    let running = Arc::new(AtomicBool::new(true));
+    let stop_flag = Arc::clone(&running);
+    let last_event_at = Arc::new(Mutex::new(None));
+    let enable_tunnel = std::env::var("SHIPYARD_ENABLE_TUNNEL").ok();
+    let (webhook_tx, webhook_rx) = mpsc::channel::<Value>();
+    let tunnel_runtime = start_tunnel_runtime(
+        &running,
+        &config.state_dir,
+        std::env::var("SHIPYARD_DEV_TUNNEL_URL").ok(),
+        config.mode,
+        enable_tunnel.as_deref(),
+        webhook_tx,
+    )?;
+    let repos = normalize_repos(config.repos);
+    let registrar = Arc::new(Mutex::new(Registrar::new(&config.state_dir)));
+    let registrar_for_status = Arc::clone(&registrar);
+    let ship_dir = config.state_dir.join("ship");
+    let ship_dir_for_list = ship_dir.clone();
+    let last_event_at_for_status = Arc::clone(&last_event_at);
+    let tunnel_for_status = Arc::clone(&tunnel_runtime.snapshot);
+
+    let mut server = IpcServer::new(daemon_dir.join("daemon.sock"), move || {
+        let tunnel = tunnel_for_status
+            .lock()
+            .map_or_else(|_| TunnelSnapshot::inactive(), |guard| guard.clone());
+        IpcState {
+            tunnel_backend: tunnel.backend,
+            tunnel_url: tunnel.url,
+            tunnel_verified_at: tunnel.verified_at,
+            subscribers: 0,
+            last_event_at: last_event_at_for_status
+                .lock()
+                .ok()
+                .and_then(|guard| *guard),
+            registered_repos: registered_repos_snapshot(&registrar_for_status),
+            rate_limit: None,
+        }
+    })
+    .with_stop_request(move || {
+        stop_flag.store(false, Ordering::Release);
+    })
+    .with_ship_state_list_provider(move || ship_state_values(&ship_dir_for_list));
+
+    server
+        .start()
+        .map_err(|error| DaemonRunError::Protocol(error.to_string()))?;
+
+    let (reconcile_tx, reconcile_rx) = mpsc::channel::<ReconcileWorkerResult>();
+    let mut reconcile_window = ReconcileWindow::default();
+    let mut reconcile_in_flight = false;
+    let mut next_reconcile_at = Instant::now() + initial_reconcile_delay();
+    let mut previous_states = BTreeMap::new();
+    let mut active_registration_url = None;
+    while running.load(Ordering::Acquire) {
+        drain_webhook_events(&webhook_rx, &server, &last_event_at);
+        sync_tunnel_registration(
+            &tunnel_runtime,
+            &registrar,
+            &repos,
+            &mut active_registration_url,
+        );
+
+        while let Ok(result) = reconcile_rx.try_recv() {
+            reconcile_in_flight = false;
+            reconcile_window = result.window;
+            publish_reconcile_events(&server, &last_event_at, &result.report);
+        }
+
+        if !reconcile_in_flight && Instant::now() >= next_reconcile_at {
+            reconcile_in_flight = true;
+            next_reconcile_at = Instant::now() + Duration::from_secs(RECONCILE_INTERVAL_SECONDS);
+            start_reconcile_worker(
+                config.state_dir.clone(),
+                reconcile_window.clone(),
+                reconcile_tx.clone(),
+            );
+        }
+
+        let current_states = ship_state_map(&ship_dir);
+        for event in ship_state_delta_events(&previous_states, &current_states) {
+            let timestamp = daemon_timestamp();
+            if let Ok(mut last_event_at) = last_event_at.lock() {
+                *last_event_at = Some(timestamp);
+            }
+            server.broadcast_event(event);
+        }
+        previous_states = current_states;
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    unregister_webhooks(&registrar);
+    tunnel_runtime.stop();
+    server
+        .stop()
+        .map_err(|error| DaemonRunError::Protocol(error.to_string()))?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn drain_webhook_events(
+    webhook_rx: &mpsc::Receiver<Value>,
+    server: &IpcServer,
+    last_event_at: &Arc<Mutex<Option<f64>>>,
+) {
+    while let Ok(event) = webhook_rx.try_recv() {
+        let timestamp = daemon_timestamp();
+        if let Ok(mut last_event_at) = last_event_at.lock() {
+            *last_event_at = Some(timestamp);
+        }
+        server.broadcast_event(event);
+    }
+}
+
+#[cfg(unix)]
+fn sync_tunnel_registration(
+    tunnel_runtime: &TunnelRuntime,
+    registrar: &Arc<Mutex<Registrar>>,
+    repos: &[String],
+    active_registration_url: &mut Option<String>,
+) {
+    let current_registration_url = tunnel_runtime.registration_url();
+    if current_registration_url == *active_registration_url {
+        return;
+    }
+    if let (Some(url), Some(secret)) = (
+        current_registration_url.as_deref(),
+        tunnel_runtime.webhook_secret.as_deref(),
+    ) {
+        register_webhooks(registrar, repos, url, secret);
+    }
+    *active_registration_url = current_registration_url;
+}
+
+#[cfg(unix)]
+struct ReconcileWorkerResult {
+    report: ReconcileReport,
+    window: ReconcileWindow,
+}
+
+#[cfg(unix)]
+fn start_reconcile_worker(
+    state_dir: PathBuf,
+    mut window: ReconcileWindow,
+    sender: mpsc::Sender<ReconcileWorkerResult>,
+) {
+    thread::spawn(move || {
+        let report = reconcile_active_ship_states(&state_dir, &mut window);
+        let _ = sender.send(ReconcileWorkerResult { report, window });
+    });
+}
+
+#[cfg(unix)]
+fn publish_reconcile_events(
+    server: &IpcServer,
+    last_event_at: &Arc<Mutex<Option<f64>>>,
+    report: &ReconcileReport,
+) {
+    for transition in &report.transitions {
+        let timestamp = daemon_timestamp();
+        if let Ok(mut last_event_at) = last_event_at.lock() {
+            *last_event_at = Some(timestamp);
+        }
+        server.broadcast_event(reconcile_healed_event(transition));
+    }
+}
+
+#[cfg(unix)]
+fn reconcile_healed_event(transition: &ReconcileTransition) -> Value {
+    serde_json::json!({
+        "kind": "reconcile_healed",
+        "payload": {
+            "pr": transition.pr,
+            "repo": transition.repo,
+            "target": transition.target,
+            "from_status": transition.from_status,
+            "to_status": transition.to_status,
+        }
+    })
+}
+
+#[cfg(unix)]
+fn initial_reconcile_delay() -> Duration {
+    if cfg!(test) {
+        Duration::from_secs(RECONCILE_INTERVAL_SECONDS)
+    } else {
+        Duration::ZERO
+    }
+}
+
+/// Non-Unix builds do not expose the daemon IPC runtime yet.
+#[cfg(not(unix))]
+pub fn run_blocking(config: DaemonRunConfig) -> Result<(), DaemonRunError> {
+    drop(config);
+    Err(DaemonRunError::Protocol(
+        "daemon runtime is only supported on Unix platforms".to_owned(),
+    ))
+}
+
+/// Spawn the daemon as a detached child process and verify the IPC socket
+/// becomes reachable before reporting success.
+pub fn spawn_detached(request: &SpawnRequest) -> Result<u32, DaemonSpawnFailedError> {
+    let daemon_dir = request.state_dir.join("daemon");
+    fs::create_dir_all(&daemon_dir).map_err(|error| io_spawn_error(&error))?;
+
+    if read_daemon_status(&request.state_dir).is_some() {
+        return Ok(read_pid_file(&daemon_dir.join("daemon.pid")).unwrap_or(0));
+    }
+    cleanup_stale_runtime_files(&daemon_dir).map_err(|error| io_spawn_error(&error))?;
+
+    let log_path = daemon_dir.join("daemon.log");
+    let stdout = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|error| io_spawn_error(&error))?;
+    let stderr = stdout.try_clone().map_err(|error| io_spawn_error(&error))?;
+
+    let mut command = Command::new(&request.binary);
+    command.arg("--mode").arg(request.mode.as_str());
+    if let Some(global_dir) = &request.global_dir_override {
+        command.arg("--global-dir").arg(global_dir);
+    }
+    if let Some(state_dir) = &request.state_dir_override {
+        command.arg("--state-dir").arg(state_dir);
+    }
+    command.arg("daemon").arg("run");
+    for repo in normalize_repos(request.repos.clone()) {
+        command.arg("--repo").arg(repo);
+    }
+    command.stdin(Stdio::null());
+    command.stdout(Stdio::from(stdout));
+    command.stderr(Stdio::from(stderr));
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+
+        command.process_group(0);
+    }
+
+    let child = command.spawn().map_err(|error| io_spawn_error(&error))?;
+    let fallback_pid = child.id();
+    drop(child);
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        if read_daemon_status(&request.state_dir).is_some() {
+            let pid = read_pid_file(&daemon_dir.join("daemon.pid")).unwrap_or(fallback_pid);
+            thread::sleep(Duration::from_millis(300));
+            if pid > 0 && !pid_alive(pid) {
+                return Err(DaemonSpawnFailedError(format!(
+                    "daemon exited immediately after spawn (pid {pid}). Tail of {}:\n{}",
+                    log_path.display(),
+                    read_log_tail(&log_path)
+                )));
+            }
+            if read_daemon_status(&request.state_dir).is_some() {
+                return Ok(pid);
+            }
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    Err(DaemonSpawnFailedError(format!(
+        "daemon exited immediately after spawn. Tail of {}:\n{}",
+        log_path.display(),
+        read_log_tail(&log_path)
+    )))
+}
+
+/// Best-effort daemon shutdown via IPC stop request.
+#[must_use]
+pub fn stop_running(state_dir: &Path) -> bool {
+    let daemon_dir = state_dir.join("daemon");
+    let socket_path = daemon_dir.join("daemon.sock");
+    let pid_path = daemon_dir.join("daemon.pid");
+    let was_running = read_daemon_status(state_dir).is_some();
+    #[cfg(unix)]
+    let pid = read_pid_file(&pid_path);
+
+    if socket_path.exists() {
+        let _ = send_stop_request(&socket_path);
+    }
+
+    if was_running {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            if read_daemon_status(state_dir).is_none() && !socket_path.exists() {
+                let _ = fs::remove_file(&pid_path);
+                return true;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        if read_daemon_status(state_dir).is_none() {
+            let _ = cleanup_stale_runtime_files(&daemon_dir);
+            return true;
+        }
+    }
+
+    #[cfg(unix)]
+    if let Some(pid) = pid.filter(|pid| *pid > 0)
+        && pid_alive(pid)
+        && process_looks_like_shipyard_daemon(pid)
+    {
+        if signal_pid(pid, "-TERM") && wait_until_pid_stops(pid, &pid_path, Duration::from_secs(3))
+        {
+            let _ = cleanup_stale_runtime_files(&daemon_dir);
+            return true;
+        }
+        if pid_alive(pid) {
+            let _ = signal_pid(pid, "-KILL");
+            let _ = wait_until_pid_stops(pid, &pid_path, Duration::from_secs(1));
+        }
+        let _ = cleanup_stale_runtime_files(&daemon_dir);
+        return true;
+    }
+
+    if pid_path.exists() || socket_path.exists() {
+        let _ = cleanup_stale_runtime_files(&daemon_dir);
+    }
+    false
+}
+
+#[cfg(unix)]
+fn ship_state_values(path: &Path) -> Vec<Value> {
+    let Ok(store) = ShipStateStore::new(path.to_path_buf()) else {
+        return Vec::new();
+    };
+    store
+        .list_active()
+        .into_iter()
+        .filter_map(|state| serde_json::to_value(state).ok())
+        .collect()
+}
+
+#[cfg(unix)]
+fn ship_state_map(path: &Path) -> BTreeMap<u64, ShipState> {
+    let Ok(store) = ShipStateStore::new(path.to_path_buf()) else {
+        return BTreeMap::new();
+    };
+    store
+        .list_active()
+        .into_iter()
+        .map(|state| (state.pr, state))
+        .collect()
+}
+
+#[cfg(unix)]
+fn ship_state_delta_events(
+    previous: &BTreeMap<u64, ShipState>,
+    current: &BTreeMap<u64, ShipState>,
+) -> Vec<Value> {
+    let mut events = Vec::new();
+
+    for (pr, state) in current {
+        let previous_state = previous.get(pr);
+        for run in &state.dispatched_runs {
+            if run_changed(previous_state, run) {
+                events.push(workflow_run_event(state, run));
+            }
+        }
+    }
+
+    events
+}
+
+#[cfg(unix)]
+fn run_changed(previous_state: Option<&ShipState>, run: &DispatchedRun) -> bool {
+    let Some(previous_state) = previous_state else {
+        return true;
+    };
+    let previous_run = previous_state
+        .dispatched_runs
+        .iter()
+        .find(|candidate| candidate.target == run.target && candidate.run_id == run.run_id);
+    previous_run != Some(run)
+}
+
+#[cfg(unix)]
+fn workflow_run_event(state: &ShipState, run: &DispatchedRun) -> Value {
+    let normalized_status = workflow_status(&run.status);
+    let action = if normalized_status == "completed" {
+        "completed"
+    } else if normalized_status == "queued" {
+        "requested"
+    } else {
+        "in_progress"
+    };
+
+    serde_json::json!({
+        "kind": "workflow_run",
+        "payload": {
+            "action": action,
+            "run_id": numeric_or_string(&run.run_id),
+            "repo": state.repo,
+            "head_branch": state.branch,
+            "head_sha": state.head_sha,
+            "status": normalized_status,
+            "conclusion": workflow_conclusion(&run.status),
+            "workflow_name": run.target,
+            "html_url": Value::Null,
+        }
+    })
+}
+
+#[cfg(unix)]
+fn workflow_status(status: &str) -> &'static str {
+    match status.to_ascii_lowercase().as_str() {
+        "queued" | "pending" | "requested" => "queued",
+        "completed" | "pass" | "success" | "failed" | "failure" | "fail" | "cancelled"
+        | "canceled" => "completed",
+        _ => "in_progress",
+    }
+}
+
+#[cfg(unix)]
+fn workflow_conclusion(status: &str) -> Option<&'static str> {
+    match status.to_ascii_lowercase().as_str() {
+        "pass" | "success" => Some("success"),
+        "failed" | "failure" | "fail" => Some("failure"),
+        "cancelled" | "canceled" => Some("cancelled"),
+        _ => None,
+    }
+}
+
+#[cfg(unix)]
+fn numeric_or_string(value: &str) -> Value {
+    value
+        .parse::<i64>()
+        .map_or_else(|_| Value::from(value.to_owned()), Value::from)
+}
+
+#[cfg(unix)]
+fn daemon_timestamp() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0.0, |duration| duration.as_secs_f64())
+}
+
+#[cfg(unix)]
+fn daemon_tunnel_config(url_override: Option<String>) -> TunnelSnapshot {
+    let url_override = url_override.filter(|url| !url.trim().is_empty());
+    if let Some(url) = url_override {
+        return TunnelSnapshot::development(url, daemon_timestamp());
+    }
+
+    TunnelSnapshot::inactive()
+}
+
+#[cfg(unix)]
+struct TunnelRuntime {
+    snapshot: Arc<Mutex<TunnelSnapshot>>,
+    webhook: Option<LocalWebhookListener>,
+    webhook_secret: Option<String>,
+    supervisor: Option<thread::JoinHandle<()>>,
+}
+
+#[cfg(unix)]
+impl TunnelRuntime {
+    fn inactive(snapshot: Arc<Mutex<TunnelSnapshot>>) -> Self {
+        Self {
+            snapshot,
+            webhook: None,
+            webhook_secret: None,
+            supervisor: None,
+        }
+    }
+
+    fn registration_url(&self) -> Option<String> {
+        let snapshot = self.snapshot.lock().ok()?.clone();
+        public_webhook_url_for_snapshot(&snapshot)
+    }
+
+    fn stop(self) {
+        if let Some(supervisor) = self.supervisor {
+            let _ = supervisor.join();
+        }
+        if let Some(webhook) = self.webhook {
+            webhook.stop();
+        }
+    }
+}
+
+#[cfg(unix)]
+struct LocalWebhookListener {
+    port: u16,
+    join: thread::JoinHandle<()>,
+}
+
+#[cfg(unix)]
+impl LocalWebhookListener {
+    fn stop(self) {
+        let _ = self.join.join();
+    }
+}
+
+#[cfg(unix)]
+fn start_tunnel_runtime(
+    running: &Arc<AtomicBool>,
+    state_dir: &Path,
+    url_override: Option<String>,
+    mode: RuntimeMode,
+    enable_tunnel: Option<&str>,
+    event_sender: mpsc::Sender<Value>,
+) -> Result<TunnelRuntime, DaemonRunError> {
+    let initial = daemon_tunnel_config(url_override);
+    let has_dev_override = initial.backend == "development";
+    let snapshot = Arc::new(Mutex::new(initial));
+    if has_dev_override || !tunnel_enabled(enable_tunnel, mode) {
+        return Ok(TunnelRuntime::inactive(snapshot));
+    }
+
+    let secret = load_or_create_webhook_secret(state_dir)?;
+    let webhook = start_webhook_listener(running, event_sender, secret.clone())?;
+    let supervisor =
+        spawn_tailscale_tunnel_supervisor(Arc::clone(running), Arc::clone(&snapshot), webhook.port);
+    Ok(TunnelRuntime {
+        snapshot,
+        webhook: Some(webhook),
+        webhook_secret: Some(secret),
+        supervisor: Some(supervisor),
+    })
+}
+
+#[cfg(unix)]
+fn tunnel_enabled(value: Option<&str>, mode: RuntimeMode) -> bool {
+    if cfg!(test) {
+        return false;
+    }
+    value.map_or(mode == RuntimeMode::Shipyard, |value| {
+        parse_tunnel_enabled(Some(value))
+    })
+}
+
+#[cfg(unix)]
+fn parse_tunnel_enabled(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
+#[cfg(unix)]
+const WEBHOOK_BODY_LIMIT: usize = 5 * 1024 * 1024;
+#[cfg(unix)]
+const DELIVERY_DEDUPE_TTL: Duration = Duration::from_mins(5);
+
+#[cfg(unix)]
+fn start_webhook_listener(
+    running: &Arc<AtomicBool>,
+    event_sender: mpsc::Sender<Value>,
+    secret: String,
+) -> Result<LocalWebhookListener, DaemonRunError> {
+    let listener = TcpListener::bind(("127.0.0.1", 0))?;
+    listener.set_nonblocking(true)?;
+    let port = listener.local_addr()?.port();
+    let running = Arc::clone(running);
+    let join = thread::spawn(move || {
+        let mut seen_delivery_ids = BTreeMap::new();
+        while running.load(Ordering::Acquire) {
+            match listener.accept() {
+                Ok((mut stream, _addr)) => {
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                    let response = match read_webhook_request(&mut stream) {
+                        Ok(request) => handle_webhook_request(
+                            &request,
+                            &secret,
+                            &event_sender,
+                            &mut seen_delivery_ids,
+                        ),
+                        Err(response) => response,
+                    };
+                    let _ = write_http_response(&mut stream, &response);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(50));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    Ok(LocalWebhookListener { port, join })
+}
+
+#[cfg(unix)]
+struct WebhookRequest {
+    method: String,
+    path: String,
+    headers: BTreeMap<String, String>,
+    body: Vec<u8>,
+}
+
+#[cfg(unix)]
+struct HttpResponse {
+    status: u16,
+    body: &'static str,
+}
+
+#[cfg(unix)]
+impl HttpResponse {
+    const fn ok() -> Self {
+        Self {
+            status: 200,
+            body: "ok\n",
+        }
+    }
+
+    const fn bad_request() -> Self {
+        Self {
+            status: 400,
+            body: "bad request\n",
+        }
+    }
+
+    const fn unauthorized() -> Self {
+        Self {
+            status: 401,
+            body: "bad signature\n",
+        }
+    }
+
+    const fn not_found() -> Self {
+        Self {
+            status: 404,
+            body: "not found\n",
+        }
+    }
+
+    const fn method_not_allowed() -> Self {
+        Self {
+            status: 405,
+            body: "method not allowed\n",
+        }
+    }
+}
+
+#[cfg(unix)]
+fn read_webhook_request(stream: &mut TcpStream) -> Result<WebhookRequest, HttpResponse> {
+    let mut reader = BufReader::new(stream);
+    let mut request_line = String::new();
+    if reader
+        .read_line(&mut request_line)
+        .map_err(|_| HttpResponse::bad_request())?
+        == 0
+    {
+        return Err(HttpResponse::bad_request());
+    }
+    let mut parts = request_line.split_whitespace();
+    let Some(method) = parts.next() else {
+        return Err(HttpResponse::bad_request());
+    };
+    let Some(path) = parts.next() else {
+        return Err(HttpResponse::bad_request());
+    };
+
+    let mut headers = BTreeMap::new();
+    loop {
+        let mut line = String::new();
+        if reader
+            .read_line(&mut line)
+            .map_err(|_| HttpResponse::bad_request())?
+            == 0
+        {
+            return Err(HttpResponse::bad_request());
+        }
+        if line == "\r\n" || line == "\n" {
+            break;
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            return Err(HttpResponse::bad_request());
+        };
+        headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_owned());
+    }
+
+    let length = headers
+        .get("content-length")
+        .map_or(Ok(0), |value| value.parse::<usize>())
+        .map_err(|_| HttpResponse::bad_request())?;
+    if length > WEBHOOK_BODY_LIMIT {
+        return Err(HttpResponse::bad_request());
+    }
+    let mut body = vec![0_u8; length];
+    if length > 0 {
+        reader
+            .read_exact(&mut body)
+            .map_err(|_| HttpResponse::bad_request())?;
+    }
+
+    Ok(WebhookRequest {
+        method: method.to_owned(),
+        path: path
+            .split_once('?')
+            .map_or(path, |(path, _)| path)
+            .to_owned(),
+        headers,
+        body,
+    })
+}
+
+#[cfg(unix)]
+fn handle_webhook_request(
+    request: &WebhookRequest,
+    secret: &str,
+    event_sender: &mpsc::Sender<Value>,
+    seen_delivery_ids: &mut BTreeMap<String, Instant>,
+) -> HttpResponse {
+    if request.method != "POST" {
+        return HttpResponse::method_not_allowed();
+    }
+    if request.path != "/webhook" && request.path != "/" {
+        return HttpResponse::not_found();
+    }
+    if !is_valid_signature(
+        &request.body,
+        secret,
+        request
+            .headers
+            .get("x-hub-signature-256")
+            .map(String::as_str),
+    ) {
+        return HttpResponse::unauthorized();
+    }
+
+    if let Some(event) = decode_webhook_event(
+        request.headers.get("x-github-event").map(String::as_str),
+        &request.body,
+    ) && should_accept_delivery(
+        request.headers.get("x-github-delivery").map(String::as_str),
+        seen_delivery_ids,
+    ) {
+        let _ = event_sender.send(event.to_wire());
+    }
+    HttpResponse::ok()
+}
+
+#[cfg(unix)]
+fn should_accept_delivery(
+    delivery_id: Option<&str>,
+    seen_delivery_ids: &mut BTreeMap<String, Instant>,
+) -> bool {
+    let Some(delivery_id) = delivery_id.filter(|value| !value.is_empty()) else {
+        return true;
+    };
+    let now = Instant::now();
+    let cutoff = now.checked_sub(DELIVERY_DEDUPE_TTL).unwrap_or(now);
+    seen_delivery_ids.retain(|_, seen_at| *seen_at >= cutoff);
+    if seen_delivery_ids.contains_key(delivery_id) {
+        return false;
+    }
+    seen_delivery_ids.insert(delivery_id.to_owned(), now);
+    true
+}
+
+#[cfg(unix)]
+fn write_http_response(stream: &mut TcpStream, response: &HttpResponse) -> std::io::Result<()> {
+    let status_text = match response.status {
+        200 => "OK",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        _ => "Internal Server Error",
+    };
+    write!(
+        stream,
+        "HTTP/1.1 {} {}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        response.status,
+        status_text,
+        response.body.len(),
+        response.body,
+    )?;
+    stream.flush()
+}
+
+#[cfg(unix)]
+fn load_or_create_webhook_secret(state_dir: &Path) -> Result<String, DaemonRunError> {
+    let path = state_dir.join("daemon").join("webhook-secret");
+    if let Ok(secret) = fs::read_to_string(&path) {
+        let secret = secret.trim().to_owned();
+        if !secret.is_empty() {
+            return Ok(secret);
+        }
+    }
+
+    let mut random = [0_u8; 32];
+    fs::File::open("/dev/urandom")?.read_exact(&mut random)?;
+    let secret = base64::engine::general_purpose::STANDARD.encode(random);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&path, &secret)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(secret)
+}
+
+#[cfg(unix)]
+fn spawn_tailscale_tunnel_supervisor(
+    running: Arc<AtomicBool>,
+    snapshot: Arc<Mutex<TunnelSnapshot>>,
+    local_port: u16,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let mut backend = TailscaleFunnelBackend::default();
+        let policy = TunnelSupervisorPolicy::default();
+        let mut state = TunnelSupervisorState::default();
+        supervise_tunnel(
+            &mut backend,
+            local_port,
+            &policy,
+            &mut state,
+            TunnelSupervisorHooks::new(
+                || !running.load(Ordering::Acquire),
+                |delay| interruptible_sleep(&running, delay),
+                daemon_timestamp,
+                |current| {
+                    if let Ok(mut snapshot) = snapshot.lock() {
+                        *snapshot = current;
+                    }
+                },
+            ),
+        );
+    })
+}
+
+#[cfg(unix)]
+fn interruptible_sleep(running: &Arc<AtomicBool>, delay: Duration) {
+    let deadline = Instant::now() + delay;
+    while running.load(Ordering::Acquire) && Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        thread::sleep(std::cmp::min(remaining, Duration::from_millis(100)));
+    }
+}
+
+#[cfg(unix)]
+fn public_webhook_url_for_snapshot(snapshot: &TunnelSnapshot) -> Option<String> {
+    if snapshot.backend == "inactive" || snapshot.backend == "development" {
+        return None;
+    }
+    let url = snapshot.url.as_deref()?.trim_end_matches('/');
+    if url.is_empty() {
+        None
+    } else {
+        Some(format!("{url}/webhook"))
+    }
+}
+
+#[cfg(unix)]
+fn register_webhooks(
+    registrar: &Arc<Mutex<Registrar>>,
+    repos: &[String],
+    public_url: &str,
+    secret: &str,
+) {
+    let Ok(mut registrar) = registrar.lock() else {
+        return;
+    };
+    for repo in repos {
+        if let Err(error) = registrar.ensure_registered(repo, public_url, secret) {
+            eprintln!("shipyard daemon: failed to register webhook for {repo}: {error}");
+        }
+    }
+}
+
+#[cfg(unix)]
+fn unregister_webhooks(registrar: &Arc<Mutex<Registrar>>) {
+    let Ok(mut registrar) = registrar.lock() else {
+        return;
+    };
+    if let Err(error) = registrar.unregister_all() {
+        eprintln!("shipyard daemon: failed to unregister webhooks: {error}");
+    }
+}
+
+#[cfg(unix)]
+fn registered_repos_snapshot(registrar: &Arc<Mutex<Registrar>>) -> Vec<String> {
+    registrar.lock().map_or_else(
+        |_| Vec::new(),
+        |registrar| registrar.all().keys().cloned().collect(),
+    )
+}
+
+fn send_stop_request(socket_path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::net::UnixStream;
+
+        let mut stream = UnixStream::connect(socket_path)?;
+        stream.set_write_timeout(Some(Duration::from_secs(1)))?;
+        stream.write_all(br#"{"type":"stop"}"#)?;
+        stream.write_all(b"\n")?;
+        stream.flush()
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = socket_path;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "daemon IPC stop isn't supported on this platform yet",
+        ))
+    }
+}
+
+fn cleanup_stale_runtime_files(daemon_dir: &Path) -> std::io::Result<()> {
+    for name in ["daemon.pid", "daemon.sock"] {
+        let path = daemon_dir.join(name);
+        if path.exists() || path.is_symlink() {
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    Ok(())
+}
+
+fn normalize_repos(mut repos: Vec<String>) -> Vec<String> {
+    repos.retain(|repo| !repo.is_empty());
+    repos.sort();
+    repos.dedup();
+    repos
+}
+
+fn read_pid_file(path: &Path) -> Option<u32> {
+    fs::read_to_string(path).ok()?.trim().parse::<u32>().ok()
+}
+
+#[cfg(unix)]
+fn pid_alive(pid: u32) -> bool {
+    Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[cfg(not(unix))]
+fn pid_alive(_pid: u32) -> bool {
+    true
+}
+
+#[cfg(unix)]
+fn process_looks_like_shipyard_daemon(pid: u32) -> bool {
+    let Ok(output) = Command::new("ps")
+        .arg("-p")
+        .arg(pid.to_string())
+        .arg("-o")
+        .arg("args=")
+        .stdin(Stdio::null())
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+
+    let args = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
+    args.contains("shipyard")
+        && args.split_whitespace().any(|part| part == "daemon")
+        && args.split_whitespace().any(|part| part == "run")
+}
+
+#[cfg(unix)]
+fn signal_pid(pid: u32, signal: &str) -> bool {
+    Command::new("kill")
+        .arg(signal)
+        .arg(pid.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[cfg(unix)]
+fn wait_until_pid_stops(pid: u32, pid_path: &Path, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if !pid_alive(pid) || !pid_path.exists() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    !pid_alive(pid) || !pid_path.exists()
+}
+
+fn read_log_tail(path: &Path) -> String {
+    let Ok(bytes) = fs::read(path) else {
+        return String::new();
+    };
+    let tail = if bytes.len() > 2_048 {
+        &bytes[bytes.len() - 2_048..]
+    } else {
+        &bytes
+    };
+    String::from_utf8_lossy(tail).into_owned()
+}
+
+fn io_spawn_error(error: &std::io::Error) -> DaemonSpawnFailedError {
+    DaemonSpawnFailedError(error.to_string())
+}
+
+#[cfg(unix)]
+struct PidFileGuard {
+    path: PathBuf,
+}
+
+#[cfg(unix)]
+impl PidFileGuard {
+    fn acquire(path: &Path) -> Result<Self, DaemonRunError> {
+        let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+        writeln!(file, "{}", std::process::id())?;
+        Ok(Self {
+            path: path.to_path_buf(),
+        })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for PidFileGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(unix)]
+    use std::collections::BTreeMap;
+    #[cfg(unix)]
+    use std::io::{BufRead, BufReader, Read, Write};
+    #[cfg(unix)]
+    use std::net::{Shutdown, TcpStream};
+    #[cfg(unix)]
+    use std::os::unix::net::UnixStream;
+    #[cfg(unix)]
+    use std::process::{Command, ExitCode, Stdio};
+    #[cfg(unix)]
+    use std::sync::Arc;
+    #[cfg(unix)]
+    use std::sync::atomic::{AtomicBool, Ordering};
+    #[cfg(unix)]
+    use std::sync::mpsc;
+    #[cfg(unix)]
+    use std::thread;
+    #[cfg(unix)]
+    use std::time::{Duration, Instant};
+
+    #[cfg(unix)]
+    use chrono::Utc;
+    #[cfg(unix)]
+    use serde_json::Value;
+
+    use super::resolve_repos;
+    #[cfg(unix)]
+    use super::{
+        DaemonRunConfig, DaemonRunError, WebhookRequest, daemon_tunnel_config,
+        handle_webhook_request, load_or_create_webhook_secret, parse_tunnel_enabled, pid_alive,
+        reconcile_healed_event, run_blocking, start_tunnel_runtime, stop_running,
+    };
+    #[cfg(unix)]
+    use crate::daemon_ipc::{read_daemon_ship_state_list, read_daemon_status};
+    #[cfg(unix)]
+    use crate::identity::RuntimeMode;
+    #[cfg(unix)]
+    use crate::reconcile::ReconcileTransition;
+    #[cfg(unix)]
+    use crate::ship_state::DispatchedRun;
+    use crate::ship_state::{ShipState, ShipStateStore};
+    #[cfg(unix)]
+    use crate::webhook::hmac_sha256_hex;
+    #[cfg(unix)]
+    use wait_timeout::ChildExt;
+
+    #[test]
+    fn resolve_repos_prefers_explicit_and_deduplicates() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repos = resolve_repos(
+            temp.path(),
+            &[
+                "z/r".to_owned(),
+                "a/r".to_owned(),
+                "z/r".to_owned(),
+                String::new(),
+            ],
+        );
+
+        assert_eq!(repos, vec!["a/r".to_owned(), "z/r".to_owned()]);
+    }
+
+    #[test]
+    fn resolve_repos_falls_back_to_ship_state_store() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = ShipStateStore::new(temp.path().join("ship")).expect("store");
+        let state = ShipState::new(151, "owner/repo", "feature/x", "main", "a".repeat(40), "p1");
+        store.save(&state).expect("save");
+
+        let repos = resolve_repos(temp.path(), &[]);
+
+        assert_eq!(repos, vec!["owner/repo".to_owned()]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_tunnel_config_defaults_to_inactive() {
+        let tunnel = daemon_tunnel_config(None);
+
+        assert_eq!(tunnel.backend, "inactive");
+        assert_eq!(tunnel.url, None);
+        assert_eq!(tunnel.verified_at, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_tunnel_config_accepts_explicit_dev_override() {
+        let tunnel = daemon_tunnel_config(Some("https://shipyard-dev.local".to_owned()));
+
+        assert_eq!(tunnel.backend, "development");
+        assert_eq!(tunnel.url.as_deref(), Some("https://shipyard-dev.local"));
+        assert!(tunnel.verified_at.is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tunnel_enable_parser_is_explicit_opt_in() {
+        assert!(parse_tunnel_enabled(Some("1")));
+        assert!(parse_tunnel_enabled(Some("true")));
+        assert!(parse_tunnel_enabled(Some("YES")));
+        assert!(!parse_tunnel_enabled(Some("0")));
+        assert!(!parse_tunnel_enabled(Some("false")));
+        assert!(!parse_tunnel_enabled(None));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tunnel_runtime_dev_override_does_not_spawn_real_tunnel() {
+        let running = Arc::new(AtomicBool::new(true));
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (tx, _rx) = mpsc::channel();
+        let runtime = start_tunnel_runtime(
+            &running,
+            temp.path(),
+            Some("https://shipyard-dev.local".to_owned()),
+            RuntimeMode::Isolated,
+            Some("1"),
+            tx,
+        )
+        .expect("runtime");
+        let snapshot = runtime.snapshot.lock().expect("snapshot").clone();
+
+        assert_eq!(snapshot.backend, "development");
+        assert_eq!(snapshot.url.as_deref(), Some("https://shipyard-dev.local"));
+        assert!(runtime.supervisor.is_none());
+        assert!(runtime.webhook.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tunnel_runtime_stays_inactive_without_opt_in() {
+        let running = Arc::new(AtomicBool::new(true));
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (tx, _rx) = mpsc::channel();
+        let runtime = start_tunnel_runtime(
+            &running,
+            temp.path(),
+            None,
+            RuntimeMode::Isolated,
+            Some("false"),
+            tx,
+        )
+        .expect("runtime");
+        let snapshot = runtime.snapshot.lock().expect("snapshot").clone();
+
+        assert_eq!(snapshot.backend, "inactive");
+        assert!(runtime.supervisor.is_none());
+        assert!(runtime.webhook.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn webhook_handler_accepts_signed_event_and_dedupes_delivery() {
+        let (tx, rx) = mpsc::channel();
+        let secret = "dev-secret";
+        let body = br#"{
+            "action":"completed",
+            "repository":{"full_name":"owner/repo"},
+            "workflow_run":{
+                "id":321,
+                "head_branch":"main",
+                "head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "status":"completed",
+                "conclusion":"success",
+                "name":"CI",
+                "html_url":"https://github.com/owner/repo/actions/runs/321"
+            }
+        }"#;
+        let mut seen = BTreeMap::new();
+        let response = handle_webhook_request(
+            &signed_webhook_request(secret, "delivery-1", "workflow_run", body),
+            secret,
+            &tx,
+            &mut seen,
+        );
+
+        assert_eq!(response.status, 200);
+        let event = rx.try_recv().expect("event");
+        assert_eq!(event["kind"], "workflow_run");
+        assert_eq!(event["payload"]["repo"], "owner/repo");
+        assert_eq!(event["payload"]["run_id"], 321);
+
+        let response = handle_webhook_request(
+            &signed_webhook_request(secret, "delivery-1", "workflow_run", body),
+            secret,
+            &tx,
+            &mut seen,
+        );
+
+        assert_eq!(response.status, 200);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn webhook_handler_rejects_wrong_method_path_and_signature() {
+        let (tx, rx) = mpsc::channel();
+        let secret = "dev-secret";
+        let body = br#"{"zen":"Keep it logically awesome."}"#;
+        let mut seen = BTreeMap::new();
+        let mut request = signed_webhook_request(secret, "delivery-1", "ping", body);
+        request.method = "GET".to_owned();
+
+        let response = handle_webhook_request(&request, secret, &tx, &mut seen);
+        assert_eq!(response.status, 405);
+
+        let mut request = signed_webhook_request(secret, "delivery-2", "ping", body);
+        request.path = "/not-webhook".to_owned();
+        let response = handle_webhook_request(&request, secret, &tx, &mut seen);
+        assert_eq!(response.status, 404);
+
+        let mut request = signed_webhook_request(secret, "delivery-3", "ping", body);
+        request
+            .headers
+            .insert("x-hub-signature-256".to_owned(), "sha256=bad".to_owned());
+        let response = handle_webhook_request(&request, secret, &tx, &mut seen);
+        assert_eq!(response.status, 401);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn webhook_listener_serves_signed_http_delivery() {
+        let running = Arc::new(AtomicBool::new(true));
+        let (tx, rx) = mpsc::channel();
+        let secret = "dev-secret";
+        let listener =
+            super::start_webhook_listener(&running, tx, secret.to_owned()).expect("listener");
+        let body = br#"{
+            "action":"published",
+            "repository":{"full_name":"owner/repo"},
+            "release":{
+                "tag_name":"v1.2.3",
+                "draft":false,
+                "prerelease":false,
+                "assets":[{"name":"shipyard.dmg","state":"uploaded","size":42}]
+            }
+        }"#;
+        let signature = hmac_sha256_hex(body, secret);
+        let request = format!(
+            "POST /webhook HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\nX-Hub-Signature-256: sha256={}\r\nX-GitHub-Event: release\r\nX-GitHub-Delivery: delivery-http-1\r\n\r\n",
+            body.len(),
+            signature,
+        );
+        let mut request_bytes = request.into_bytes();
+        request_bytes.extend_from_slice(body);
+        let mut response = String::new();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            let mut stream = TcpStream::connect(("127.0.0.1", listener.port)).expect("connect");
+            stream.write_all(&request_bytes).expect("request");
+            stream.shutdown(Shutdown::Write).expect("shutdown");
+            response.clear();
+            match stream.read_to_string(&mut response) {
+                Ok(_) if response.starts_with("HTTP/1.1 200 OK") => break,
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
+                Err(error) => panic!("response: {error}"),
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+
+        assert!(
+            response.starts_with("HTTP/1.1 200 OK"),
+            "unexpected response: {response:?}"
+        );
+        let event = rx.recv_timeout(Duration::from_secs(1)).expect("event");
+        assert_eq!(event["kind"], "release");
+        assert_eq!(event["payload"]["tag_name"], "v1.2.3");
+        assert_eq!(event["payload"]["assets"][0]["name"], "shipyard.dmg");
+
+        running.store(false, Ordering::Release);
+        listener.stop();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn webhook_secret_is_stable_and_private() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let first = load_or_create_webhook_secret(temp.path()).expect("secret");
+        let second = load_or_create_webhook_secret(temp.path()).expect("secret");
+
+        assert_eq!(first, second);
+        assert!(!first.is_empty());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mode = std::fs::metadata(temp.path().join("daemon").join("webhook-secret"))
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+    }
+
+    #[cfg(unix)]
+    fn signed_webhook_request(
+        secret: &str,
+        delivery_id: &str,
+        event: &str,
+        body: &[u8],
+    ) -> WebhookRequest {
+        let mut headers = BTreeMap::new();
+        headers.insert(
+            "x-hub-signature-256".to_owned(),
+            format!("sha256={}", hmac_sha256_hex(body, secret)),
+        );
+        headers.insert("x-github-delivery".to_owned(), delivery_id.to_owned());
+        headers.insert("x-github-event".to_owned(), event.to_owned());
+        WebhookRequest {
+            method: "POST".to_owned(),
+            path: "/webhook".to_owned(),
+            headers,
+            body: body.to_vec(),
+        }
+    }
+
+    #[cfg(unix)]
+    fn seed_registered_repos(state_dir: &std::path::Path, repos: &[&str]) {
+        let daemon_dir = state_dir.join("daemon");
+        std::fs::create_dir_all(&daemon_dir).expect("daemon dir");
+        let payload = repos
+            .iter()
+            .enumerate()
+            .map(|(index, repo)| {
+                serde_json::json!({
+                    "repo": repo,
+                    "hook_id": u64::try_from(index + 1).expect("hook id"),
+                })
+            })
+            .collect::<Vec<_>>();
+        std::fs::write(
+            daemon_dir.join("registrations.json"),
+            serde_json::to_string_pretty(&payload).expect("registrations json"),
+        )
+        .expect("write registrations");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reconcile_healed_event_matches_python_wire_shape() {
+        let event = reconcile_healed_event(&ReconcileTransition {
+            pr: 42,
+            repo: "owner/repo".to_owned(),
+            target: "macos".to_owned(),
+            from_status: "failed".to_owned(),
+            to_status: "completed".to_owned(),
+        });
+
+        assert_eq!(event["kind"], "reconcile_healed");
+        assert_eq!(event["payload"]["pr"], 42);
+        assert_eq!(event["payload"]["repo"], "owner/repo");
+        assert_eq!(event["payload"]["target"], "macos");
+        assert_eq!(event["payload"]["from_status"], "failed");
+        assert_eq!(event["payload"]["to_status"], "completed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_blocking_serves_status_and_ship_state_list_until_stopped() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        seed_registered_repos(temp.path(), &["owner/repo"]);
+        let store = ShipStateStore::new(temp.path().join("ship")).expect("store");
+        let mut state =
+            ShipState::new(151, "owner/repo", "feature/x", "main", "a".repeat(40), "p1");
+        state.pr_title = "Test ship".to_owned();
+        state.dispatched_runs.push(DispatchedRun {
+            target: "macos".to_owned(),
+            provider: "local".to_owned(),
+            run_id: "42".to_owned(),
+            status: "completed".to_owned(),
+            started_at: Utc::now(),
+            updated_at: Utc::now(),
+            attempt: 1,
+            last_heartbeat_at: None,
+            phase: None,
+            required: true,
+        });
+        store.save(&state).expect("save");
+
+        let state_dir = temp.path().to_path_buf();
+        let worker = std::thread::spawn(move || {
+            run_blocking(DaemonRunConfig {
+                mode: RuntimeMode::Isolated,
+                state_dir,
+                repos: vec!["owner/repo".to_owned()],
+            })
+            .expect("daemon runtime");
+            ExitCode::SUCCESS
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while read_daemon_status(temp.path()).is_none() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let daemon_status = read_daemon_status(temp.path()).expect("status");
+        let ship_states = read_daemon_ship_state_list(temp.path()).expect("ship-state list");
+
+        assert_eq!(daemon_status["registered_repos"][0], "owner/repo");
+        assert_eq!(ship_states.len(), 1);
+        assert_eq!(ship_states[0]["pr"], 151);
+        assert_eq!(ship_states[0]["pr_title"], "Test ship");
+
+        assert!(stop_running(temp.path()));
+        assert_eq!(worker.join().expect("join"), ExitCode::SUCCESS);
+        assert!(read_daemon_status(temp.path()).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_blocking_rejects_already_running_state_root() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let state_dir = temp.path().to_path_buf();
+        let other_state_dir = state_dir.clone();
+        let worker = std::thread::spawn(move || {
+            run_blocking(DaemonRunConfig {
+                mode: RuntimeMode::Isolated,
+                state_dir,
+                repos: vec!["owner/repo".to_owned()],
+            })
+            .expect("daemon runtime");
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while read_daemon_status(temp.path()).is_none() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let error = run_blocking(DaemonRunConfig {
+            mode: RuntimeMode::Isolated,
+            state_dir: other_state_dir,
+            repos: vec!["owner/repo".to_owned()],
+        })
+        .expect_err("already running");
+        assert!(matches!(error, DaemonRunError::AlreadyRunning));
+
+        assert!(stop_running(temp.path()));
+        worker.join().expect("join");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stop_running_terminates_pid_when_ipc_is_unavailable() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let daemon_dir = temp.path().join("daemon");
+        std::fs::create_dir_all(&daemon_dir).expect("daemon dir");
+        let script = temp.path().join("shipyard-daemon-run.sh");
+        let pid_path = daemon_dir.join("daemon.pid");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\npid_file=\"$1\"\necho $$ > \"$pid_file\"\ntrap 'rm -f \"$pid_file\"; exit 0' TERM\nwhile true; do sleep 1; done\n",
+        )
+        .expect("script");
+        let mut child = Command::new("sh")
+            .arg(&script)
+            .arg(&pid_path)
+            .arg("daemon")
+            .arg("run")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("daemon-shaped child");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !pid_path.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(pid_path.exists(), "pid file was not written");
+
+        assert!(stop_running(temp.path()));
+
+        let status = child
+            .wait_timeout(Duration::from_secs(1))
+            .expect("wait")
+            .or_else(|| {
+                let _ = child.kill();
+                child.wait().ok()
+            })
+            .expect("child exited");
+        assert!(status.success());
+        assert!(!pid_path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stop_running_does_not_signal_unrecognized_pid_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let daemon_dir = temp.path().join("daemon");
+        std::fs::create_dir_all(&daemon_dir).expect("daemon dir");
+        let pid_path = daemon_dir.join("daemon.pid");
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("sleep child");
+        std::fs::write(&pid_path, child.id().to_string()).expect("pid file");
+
+        assert!(!stop_running(temp.path()));
+        assert!(pid_alive(child.id()));
+        assert!(!pid_path.exists());
+
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_blocking_broadcasts_workflow_run_events_for_ship_state_changes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = ShipStateStore::new(temp.path().join("ship")).expect("store");
+        let state = ShipState::new(151, "owner/repo", "feature/x", "main", "a".repeat(40), "p1");
+        store.save(&state).expect("save");
+
+        let state_dir = temp.path().to_path_buf();
+        let worker = std::thread::spawn(move || {
+            run_blocking(DaemonRunConfig {
+                mode: RuntimeMode::Isolated,
+                state_dir,
+                repos: vec!["owner/repo".to_owned()],
+            })
+            .expect("daemon runtime");
+            ExitCode::SUCCESS
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while read_daemon_status(temp.path()).is_none() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let socket_path = temp.path().join("daemon").join("daemon.sock");
+        let mut stream = UnixStream::connect(&socket_path).expect("connect");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .expect("timeout");
+        stream
+            .write_all(br#"{"type":"subscribe"}"#)
+            .expect("subscribe");
+        stream.write_all(b"\n").expect("newline");
+
+        let mut reader = BufReader::new(stream);
+        let mut hello = String::new();
+        reader.read_line(&mut hello).expect("hello");
+        let hello_value: Value = serde_json::from_str(hello.trim()).expect("hello json");
+        assert_eq!(hello_value["type"], "hello");
+
+        let mut updated = store.get(151).expect("state");
+        updated.append_run(DispatchedRun {
+            target: "macos".to_owned(),
+            provider: "github".to_owned(),
+            run_id: "42".to_owned(),
+            status: "in_progress".to_owned(),
+            started_at: Utc::now(),
+            updated_at: Utc::now(),
+            attempt: 1,
+            last_heartbeat_at: None,
+            phase: Some("queued".to_owned()),
+            required: true,
+        });
+        store.save(&updated).expect("save");
+
+        let event = read_event(&mut reader).expect("workflow event");
+        assert_eq!(event["type"], "event");
+        assert_eq!(event["kind"], "workflow_run");
+        assert_eq!(event["payload"]["repo"], "owner/repo");
+        assert_eq!(event["payload"]["run_id"], 42);
+        assert_eq!(event["payload"]["status"], "in_progress");
+        assert_eq!(event["payload"]["workflow_name"], "macos");
+
+        let status = read_daemon_status(temp.path()).expect("status");
+        assert!(status["last_event_at"].is_number());
+
+        assert!(stop_running(temp.path()));
+        assert_eq!(worker.join().expect("join"), ExitCode::SUCCESS);
+    }
+
+    #[cfg(unix)]
+    fn read_event(reader: &mut BufReader<UnixStream>) -> Option<Value> {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut line = String::new();
+        while Instant::now() < deadline {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => return None,
+                Ok(_) => {
+                    let value = serde_json::from_str::<Value>(line.trim()).ok()?;
+                    if value.get("type").and_then(Value::as_str) == Some("event") {
+                        return Some(value);
+                    }
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) => {}
+                Err(_) => return None,
+            }
+        }
+        None
+    }
+}

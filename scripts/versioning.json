@@ -1,28 +1,48 @@
 {
   "$schema": "./versioning.schema.json",
   "schema_version": 1,
-  "_comment": "Shipyard-specific versioning gate config. Same schema as pulp's tools/scripts/versioning.json — enables the same scripts (scripts/version_bump_check.py, scripts/skill_sync_check.py) to run against Shipyard unchanged. Two surfaces: CLI (pyproject.toml + __init__.py) and Claude plugin (.claude-plugin/plugin.json). Per RELEASING.md the two versions are intentionally decoupled — the gate just ensures each moves when its own surface moves.",
+  "_comment": "Shipyard versioning gate. The CLI is now a Shipyard binary versioned from Cargo.toml; plugin files remain git-delivered and independently versioned.",
 
   "surfaces": {
     "cli": {
       "label": "Shipyard CLI",
       "version_files": [
-        { "path": "pyproject.toml", "kind": "pyproject_version" },
-        { "path": "src/shipyard/__init__.py", "kind": "python_dunder_version" }
+        {
+          "path": "Cargo.toml",
+          "kind": "regex",
+          "pattern": "(?ms)^\\[package\\].*?^version\\s*=\\s*\"([^\"]+)\""
+        }
       ],
       "trigger_paths": [
-        "src/shipyard/**/*.py",
-        "src/shipyard/**/*.pyi"
+        "Cargo.toml",
+        "Cargo.lock",
+        "src/**/*.rs",
+        "install.sh",
+        ".github/workflows/ci.yml",
+        ".github/workflows/release.yml",
+        ".github/workflows/auto-release.yml",
+        ".github/workflows/sandbox-e2e.yml",
+        ".github/workflows/package-smoke.yml",
+        ".github/workflows/cloud-live-smoke.yml",
+        "scripts/package_release.py",
+        "scripts/release_macos_local.py",
+        "scripts/release-macos-local.sh",
+        "scripts/ci_matrix.py",
+        "scripts/finish_line_status.py",
+        "tools/sandbox-e2e/**"
       ],
       "public_api_paths": [
-        "src/shipyard/*.py",
-        "src/shipyard/cli/**/*.py",
-        "src/shipyard/config/**/*.py",
-        "src/shipyard/__init__.py"
+        "src/app/cli.rs",
+        "src/app/**/*.rs",
+        "src/daemon_ipc.rs",
+        "src/daemon_runtime.rs",
+        "src/paths.rs",
+        "src/config.rs",
+        "src/init_config.rs"
       ],
       "internal_only_paths": [
-        "src/shipyard/runners/**",
-        "src/shipyard/_internal/**"
+        "scripts/test_*.py",
+        "tools/sandbox-e2e/**"
       ],
       "auto_apply_patch": true,
       "changelog": "CHANGELOG.md"
@@ -58,9 +78,10 @@
   "generated_globs": [
     "dist/**",
     "build/**",
+    "target/**",
+    "coverage/**",
     "*.egg-info/**",
     "**/*.generated.*",
-    "uv.lock",
     "node_modules/**"
   ],
 
