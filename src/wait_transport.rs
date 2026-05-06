@@ -458,6 +458,7 @@ mod tests {
             last_event_at: None,
             registered_repos: Vec::new(),
             rate_limit: None,
+            last_error: None,
         }
     }
 

@@ -44,6 +44,8 @@ pub struct IpcState {
     pub registered_repos: Vec<String>,
     /// Rate-limit snapshot if known.
     pub rate_limit: Option<Value>,
+    /// Last recoverable daemon warning/error, if any.
+    pub last_error: Option<String>,
 }
 
 #[cfg(unix)]
@@ -259,6 +261,7 @@ fn handle_client(
                     std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
                 ) =>
             {
+                thread::sleep(Duration::from_millis(50));
                 continue;
             }
             Err(_) => break,
@@ -366,6 +369,7 @@ fn status_frame(state: &IpcState) -> Value {
         "last_event_at": state.last_event_at,
         "registered_repos": state.registered_repos,
         "rate_limit": state.rate_limit,
+        "last_error": state.last_error,
         "shipyard_version": env!("CARGO_PKG_VERSION"),
         "protocol": IPC_PROTOCOL_VERSION,
     })
@@ -483,6 +487,7 @@ mod tests {
             last_event_at: None,
             registered_repos: vec!["org/repo".to_owned()],
             rate_limit: None,
+            last_error: None,
         }
     }
 

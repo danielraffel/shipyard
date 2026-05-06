@@ -25,6 +25,9 @@ pub const SUBSCRIBED_EVENTS: [&str; 6] = [
     "release",
 ];
 
+/// One-time GitHub CLI remediation for managing repository webhooks.
+pub const WEBHOOK_SCOPE_COMMAND: &str = "gh auth refresh -h github.com -s admin:repo_hook";
+
 const GH_API_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Durable repo-to-hook mapping.
@@ -52,6 +55,13 @@ pub enum RegistrarError {
         /// Combined stdout/stderr from `gh`.
         output: String,
     },
+    /// GitHub CLI lacks the admin scope required to manage repo hooks.
+    MissingWebhookScope {
+        /// Registrar operation being attempted.
+        action: &'static str,
+        /// Combined stdout/stderr from `gh`.
+        output: String,
+    },
     /// GitHub CLI returned a successful response without a hook ID.
     MissingHookId(String),
     /// Persisted registration state could not be serialized or parsed.
@@ -67,6 +77,13 @@ impl std::fmt::Display for RegistrarError {
             Self::GhFailed { action, output } => {
                 write!(formatter, "{action} hook failed: {}", output.trim())
             }
+            Self::MissingWebhookScope { action, output } => {
+                write!(
+                    formatter,
+                    "{action} hook failed: {}. Run `{WEBHOOK_SCOPE_COMMAND}` and restart Shipyard.",
+                    output.trim()
+                )
+            }
             Self::MissingHookId(output) => {
                 write!(
                     formatter,
@@ -80,6 +97,14 @@ impl std::fmt::Display for RegistrarError {
 }
 
 impl std::error::Error for RegistrarError {}
+
+impl RegistrarError {
+    /// True when remediation is the GitHub webhook management scope refresh.
+    #[must_use]
+    pub fn is_missing_webhook_scope(&self) -> bool {
+        matches!(self, Self::MissingWebhookScope { .. })
+    }
+}
 
 impl From<std::io::Error> for RegistrarError {
     fn from(value: std::io::Error) -> Self {
@@ -254,10 +279,7 @@ fn create_hook(
         Some(&body.to_string()),
     )?;
     if output.status != 0 {
-        return Err(RegistrarError::GhFailed {
-            action: "create",
-            output: output.combined_output(),
-        });
+        return Err(classify_gh_failure("create", output.combined_output()));
     }
     let parsed = serde_json::from_str::<serde_json::Value>(&output.stdout)
         .map_err(|_| RegistrarError::MissingHookId(output.stdout.clone()))?;
@@ -300,10 +322,7 @@ fn update_hook(
     if output.status == 0 {
         return Ok(());
     }
-    Err(RegistrarError::GhFailed {
-        action: "patch",
-        output: output.combined_output(),
-    })
+    Err(classify_gh_failure("patch", output.combined_output()))
 }
 
 fn delete_hook(gh_binary: &Path, repo: &str, hook_id: u64) -> Result<(), RegistrarError> {
@@ -325,10 +344,20 @@ fn delete_hook(gh_binary: &Path, repo: &str, hook_id: u64) -> Result<(), Registr
     if lowered.contains("404") || lowered.contains("not found") {
         return Ok(());
     }
-    Err(RegistrarError::GhFailed {
-        action: "delete",
-        output: combined,
-    })
+    Err(classify_gh_failure("delete", combined))
+}
+
+fn classify_gh_failure(action: &'static str, output: String) -> RegistrarError {
+    if mentions_webhook_scope(&output) {
+        RegistrarError::MissingWebhookScope { action, output }
+    } else {
+        RegistrarError::GhFailed { action, output }
+    }
+}
+
+fn mentions_webhook_scope(output: &str) -> bool {
+    let lowered = output.to_ascii_lowercase();
+    lowered.contains("admin:repo_hook") || lowered.contains("repo_hook")
 }
 
 #[derive(Debug)]
@@ -450,7 +479,7 @@ mod tests {
 
     use super::Registrar;
     #[cfg(unix)]
-    use super::{RegistrarError, SUBSCRIBED_EVENTS};
+    use super::{RegistrarError, SUBSCRIBED_EVENTS, WEBHOOK_SCOPE_COMMAND};
 
     #[test]
     fn corrupt_state_loads_as_empty() {
@@ -572,6 +601,22 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn create_missing_webhook_scope_is_actionable() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let gh = write_gh_stub(temp.path(), GhStubMode::MissingWebhookScope);
+        let mut registrar = Registrar::new(temp.path());
+
+        let error = registrar
+            .ensure_registered_with_gh("owner/repo", "https://example.test/webhook", "secret", &gh)
+            .expect_err("missing scope");
+
+        assert!(error.is_missing_webhook_scope());
+        assert!(error.to_string().contains(WEBHOOK_SCOPE_COMMAND));
+        assert!(registrar.all().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn unregister_without_gh_removes_local_state() {
         let temp = tempfile::tempdir().expect("tempdir");
         let gh = write_gh_stub(temp.path(), GhStubMode::Ok);
@@ -592,6 +637,7 @@ mod tests {
         Ok,
         Delete404,
         MissingId,
+        MissingWebhookScope,
     }
 
     #[cfg(unix)]
@@ -599,13 +645,25 @@ mod tests {
         let gh = temp.join("gh");
         let create_response = match mode {
             GhStubMode::MissingId => "{}",
-            GhStubMode::Ok | GhStubMode::Delete404 => "{\"id\":4242}",
+            GhStubMode::Ok | GhStubMode::Delete404 | GhStubMode::MissingWebhookScope => {
+                "{\"id\":4242}"
+            }
         };
         let delete_branch = match mode {
             GhStubMode::Delete404 => {
                 "  *\" -X DELETE \"*) printf '404 not found\\n' >&2; exit 1 ;;"
             }
-            GhStubMode::Ok | GhStubMode::MissingId => "  *\" -X DELETE \"*) exit 0 ;;",
+            GhStubMode::Ok | GhStubMode::MissingId | GhStubMode::MissingWebhookScope => {
+                "  *\" -X DELETE \"*) exit 0 ;;"
+            }
+        };
+        let create_branch = match mode {
+            GhStubMode::MissingWebhookScope => String::from(
+                "  *\" -X POST \"*) printf 'missing scope: admin:repo_hook\\n' >&2; exit 1 ;;",
+            ),
+            GhStubMode::Ok | GhStubMode::Delete404 | GhStubMode::MissingId => {
+                format!("  *\" -X POST \"*) printf '%s\\n' '{create_response}' ;;")
+            }
         };
         let script = format!(
             r#"#!/bin/sh
@@ -618,14 +676,14 @@ printf '%s' "$COUNT" > "$COUNT_FILE"
 printf '%s\n' "$*" > "$LOG_DIR/args-$COUNT"
 cat > "$LOG_DIR/stdin-$COUNT" || true
 case " $* " in
-  *" -X POST "*) printf '%s\n' '{create_response}' ;;
+{create_branch}
   *" -X PATCH "*) printf '%s\n' '{{}}' ;;
 {delete_branch}
   *) printf 'unexpected gh args: %s\n' "$*" >&2; exit 2 ;;
 esac
 "#,
             log_dir = shell_quote(temp),
-            create_response = create_response,
+            create_branch = create_branch,
             delete_branch = delete_branch,
         );
         fs::write(&gh, script).expect("write gh stub");
