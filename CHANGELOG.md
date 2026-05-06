@@ -3,6 +3,11 @@
 All notable changes to Shipyard are documented here. Each entry links
 to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
+<a id="v0513"></a>
+## [0.51.3] - 2026-05-06
+
+- daemon: archive local ship-state from `pull_request.closed` webhooks
+
 <a id="v0512"></a>
 ## [0.51.2] - 2026-05-05
 
@@ -494,6 +499,7 @@ to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
 - feat/shipyard phases 1 4 ([#1](https://github.com/danielraffel/Shipyard/pull/1))
 
+[0.51.3]: https://github.com/danielraffel/Shipyard/releases/tag/v0.51.3
 [0.51.2]: https://github.com/danielraffel/Shipyard/releases/tag/v0.51.2
 [0.51.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.51.0
 [0.50.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.50.0
