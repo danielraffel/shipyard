@@ -196,7 +196,13 @@ pub fn run_blocking(config: DaemonRunConfig) -> Result<(), DaemonRunError> {
     let mut next_ship_state_scan_at = Instant::now() + SHIP_STATE_SCAN_INTERVAL;
     let mut active_registration_url = None;
     while running.load(Ordering::Acquire) {
-        drain_webhook_events(&webhook_rx, &server, &last_event_at);
+        drain_webhook_events(
+            &webhook_rx,
+            &server,
+            &last_event_at,
+            &ship_dir,
+            &mut previous_states,
+        );
         sync_tunnel_registration(
             &tunnel_runtime,
             &registrar,
@@ -277,14 +283,81 @@ fn drain_webhook_events(
     webhook_rx: &mpsc::Receiver<Value>,
     server: &IpcServer,
     last_event_at: &Arc<Mutex<Option<f64>>>,
+    ship_dir: &Path,
+    previous_states: &mut BTreeMap<u64, ShipState>,
 ) {
     while let Ok(event) = webhook_rx.try_recv() {
-        let timestamp = daemon_timestamp();
-        if let Ok(mut last_event_at) = last_event_at.lock() {
-            *last_event_at = Some(timestamp);
+        let archived_event =
+            archive_closed_pull_request_ship_state(&event, ship_dir, previous_states);
+        publish_daemon_event(server, last_event_at, event);
+        if let Some(archived_event) = archived_event {
+            publish_daemon_event(server, last_event_at, archived_event);
         }
-        server.broadcast_event(event);
     }
+}
+
+#[cfg(unix)]
+fn publish_daemon_event(server: &IpcServer, last_event_at: &Arc<Mutex<Option<f64>>>, event: Value) {
+    let timestamp = daemon_timestamp();
+    if let Ok(mut last_event_at) = last_event_at.lock() {
+        *last_event_at = Some(timestamp);
+    }
+    server.broadcast_event(event);
+}
+
+#[cfg(unix)]
+fn archive_closed_pull_request_ship_state(
+    event: &Value,
+    ship_dir: &Path,
+    previous_states: &mut BTreeMap<u64, ShipState>,
+) -> Option<Value> {
+    let payload = event.get("payload")?;
+    if event.get("kind").and_then(Value::as_str) != Some("pull_request") {
+        return None;
+    }
+
+    let pr = payload.get("number").and_then(Value::as_u64)?;
+    let repo = payload.get("repo").and_then(Value::as_str)?.to_owned();
+    let action = payload
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let state = payload
+        .get("state")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let merged = payload
+        .get("merged")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let closed_at = payload
+        .get("closed_at")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let is_terminal =
+        action == "closed" || state == "closed" || merged || !closed_at.trim().is_empty();
+    if !is_terminal {
+        return None;
+    }
+
+    let store = ShipStateStore::new(ship_dir.to_path_buf()).ok()?;
+    let current = store.get(pr)?;
+    if current.repo != repo {
+        return None;
+    }
+    store.archive(pr).ok().flatten()?;
+    previous_states.remove(&pr);
+
+    let outcome = if merged { "merged" } else { "closed" };
+    Some(serde_json::json!({
+        "kind": "state-archived",
+        "payload": {
+            "pr": pr,
+            "repo": repo,
+            "source": "pull_request.closed",
+            "message": format!("PR #{pr} {outcome}; archived local ship state."),
+        }
+    }))
 }
 
 #[cfg(unix)]
@@ -1263,9 +1336,10 @@ mod tests {
     use super::resolve_repos;
     #[cfg(unix)]
     use super::{
-        DaemonRunConfig, DaemonRunError, WebhookRequest, daemon_tunnel_config,
-        handle_webhook_request, load_or_create_webhook_secret, parse_tunnel_enabled, pid_alive,
-        reconcile_healed_event, run_blocking, start_tunnel_runtime, stop_running,
+        DaemonRunConfig, DaemonRunError, WebhookRequest, archive_closed_pull_request_ship_state,
+        daemon_tunnel_config, handle_webhook_request, load_or_create_webhook_secret,
+        parse_tunnel_enabled, pid_alive, reconcile_healed_event, run_blocking, ship_state_map,
+        start_tunnel_runtime, stop_running,
     };
     #[cfg(unix)]
     use crate::daemon_ipc::{read_daemon_ship_state_list, read_daemon_status};
@@ -1593,6 +1667,78 @@ mod tests {
         assert_eq!(event["payload"]["target"], "macos");
         assert_eq!(event["payload"]["from_status"], "failed");
         assert_eq!(event["payload"]["to_status"], "completed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn closed_pull_request_webhook_archives_matching_ship_state() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let ship_dir = temp.path().join("ship");
+        let store = ShipStateStore::new(ship_dir.clone()).expect("store");
+        let state = ShipState::new(151, "owner/repo", "feature/x", "main", "a".repeat(40), "p1");
+        store.save(&state).expect("save");
+        let mut previous_states = ship_state_map(&ship_dir);
+        let event = serde_json::json!({
+            "kind": "pull_request",
+            "payload": {
+                "action": "closed",
+                "number": 151,
+                "repo": "owner/repo",
+                "state": "closed",
+                "merged": true,
+                "closed_at": "2026-05-06T12:00:00Z",
+                "merged_at": "2026-05-06T12:00:00Z",
+            }
+        });
+
+        let archived_event =
+            archive_closed_pull_request_ship_state(&event, &ship_dir, &mut previous_states)
+                .expect("archive event");
+
+        assert!(store.get(151).is_none());
+        assert_eq!(store.list_archived().len(), 1);
+        assert!(!previous_states.contains_key(&151));
+        assert_eq!(archived_event["kind"], "state-archived");
+        assert_eq!(archived_event["payload"]["pr"], 151);
+        assert_eq!(archived_event["payload"]["repo"], "owner/repo");
+        assert_eq!(archived_event["payload"]["source"], "pull_request.closed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn closed_pull_request_webhook_ignores_same_number_from_other_repo() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let ship_dir = temp.path().join("ship");
+        let store = ShipStateStore::new(ship_dir.clone()).expect("store");
+        store
+            .save(&ShipState::new(
+                151,
+                "owner/repo",
+                "feature/x",
+                "main",
+                "a".repeat(40),
+                "p1",
+            ))
+            .expect("save");
+        let mut previous_states = ship_state_map(&ship_dir);
+        let event = serde_json::json!({
+            "kind": "pull_request",
+            "payload": {
+                "action": "closed",
+                "number": 151,
+                "repo": "other/repo",
+                "state": "closed",
+                "merged": false,
+                "closed_at": "2026-05-06T12:00:00Z",
+            }
+        });
+
+        assert!(
+            archive_closed_pull_request_ship_state(&event, &ship_dir, &mut previous_states)
+                .is_none()
+        );
+        assert!(store.get(151).is_some());
+        assert!(previous_states.contains_key(&151));
     }
 
     #[cfg(unix)]
