@@ -33,7 +33,7 @@ use crate::reconcile::{
     reconcile_active_ship_states,
 };
 #[cfg(unix)]
-use crate::registrar::Registrar;
+use crate::registrar::{Registrar, RegistrarError, WEBHOOK_SCOPE_COMMAND};
 use crate::ship_state::ShipStateStore;
 #[cfg(unix)]
 use crate::ship_state::{DispatchedRun, ShipState};
@@ -44,6 +44,9 @@ use crate::tunnel::{
 };
 #[cfg(unix)]
 use crate::webhook::{decode_webhook_event, is_valid_signature};
+
+#[cfg(unix)]
+const SHIP_STATE_SCAN_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Foreground daemon runtime configuration.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -165,33 +168,21 @@ pub fn run_blocking(config: DaemonRunConfig) -> Result<(), DaemonRunError> {
     )?;
     let repos = normalize_repos(config.repos);
     let registrar = Arc::new(Mutex::new(Registrar::new(&config.state_dir)));
-    let registrar_for_status = Arc::clone(&registrar);
+    let registration_error = Arc::new(Mutex::new(None::<String>));
     let ship_dir = config.state_dir.join("ship");
     let ship_dir_for_list = ship_dir.clone();
-    let last_event_at_for_status = Arc::clone(&last_event_at);
-    let tunnel_for_status = Arc::clone(&tunnel_runtime.snapshot);
 
-    let mut server = IpcServer::new(daemon_dir.join("daemon.sock"), move || {
-        let tunnel = tunnel_for_status
-            .lock()
-            .map_or_else(|_| TunnelSnapshot::inactive(), |guard| guard.clone());
-        IpcState {
-            tunnel_backend: tunnel.backend,
-            tunnel_url: tunnel.url,
-            tunnel_verified_at: tunnel.verified_at,
-            subscribers: 0,
-            last_event_at: last_event_at_for_status
-                .lock()
-                .ok()
-                .and_then(|guard| *guard),
-            registered_repos: registered_repos_snapshot(&registrar_for_status),
-            rate_limit: None,
-        }
-    })
-    .with_stop_request(move || {
-        stop_flag.store(false, Ordering::Release);
-    })
-    .with_ship_state_list_provider(move || ship_state_values(&ship_dir_for_list));
+    let status_provider = daemon_status_provider(
+        Arc::clone(&registrar),
+        Arc::clone(&registration_error),
+        Arc::clone(&last_event_at),
+        Arc::clone(&tunnel_runtime.snapshot),
+    );
+    let mut server = IpcServer::new(daemon_dir.join("daemon.sock"), status_provider)
+        .with_stop_request(move || {
+            stop_flag.store(false, Ordering::Release);
+        })
+        .with_ship_state_list_provider(move || ship_state_values(&ship_dir_for_list));
 
     server
         .start()
@@ -201,13 +192,15 @@ pub fn run_blocking(config: DaemonRunConfig) -> Result<(), DaemonRunError> {
     let mut reconcile_window = ReconcileWindow::default();
     let mut reconcile_in_flight = false;
     let mut next_reconcile_at = Instant::now() + initial_reconcile_delay();
-    let mut previous_states = BTreeMap::new();
+    let mut previous_states = ship_state_map(&ship_dir);
+    let mut next_ship_state_scan_at = Instant::now() + SHIP_STATE_SCAN_INTERVAL;
     let mut active_registration_url = None;
     while running.load(Ordering::Acquire) {
         drain_webhook_events(&webhook_rx, &server, &last_event_at);
         sync_tunnel_registration(
             &tunnel_runtime,
             &registrar,
+            &registration_error,
             &repos,
             &mut active_registration_url,
         );
@@ -218,9 +211,10 @@ pub fn run_blocking(config: DaemonRunConfig) -> Result<(), DaemonRunError> {
             publish_reconcile_events(&server, &last_event_at, &result.report);
         }
 
-        if !reconcile_in_flight && Instant::now() >= next_reconcile_at {
+        let now = Instant::now();
+        if !reconcile_in_flight && now >= next_reconcile_at {
             reconcile_in_flight = true;
-            next_reconcile_at = Instant::now() + Duration::from_secs(RECONCILE_INTERVAL_SECONDS);
+            next_reconcile_at = now + Duration::from_secs(RECONCILE_INTERVAL_SECONDS);
             start_reconcile_worker(
                 config.state_dir.clone(),
                 reconcile_window.clone(),
@@ -228,15 +222,18 @@ pub fn run_blocking(config: DaemonRunConfig) -> Result<(), DaemonRunError> {
             );
         }
 
-        let current_states = ship_state_map(&ship_dir);
-        for event in ship_state_delta_events(&previous_states, &current_states) {
-            let timestamp = daemon_timestamp();
-            if let Ok(mut last_event_at) = last_event_at.lock() {
-                *last_event_at = Some(timestamp);
+        if now >= next_ship_state_scan_at {
+            next_ship_state_scan_at = now + SHIP_STATE_SCAN_INTERVAL;
+            let current_states = ship_state_map(&ship_dir);
+            for event in ship_state_delta_events(&previous_states, &current_states) {
+                let timestamp = daemon_timestamp();
+                if let Ok(mut last_event_at) = last_event_at.lock() {
+                    *last_event_at = Some(timestamp);
+                }
+                server.broadcast_event(event);
             }
-            server.broadcast_event(event);
+            previous_states = current_states;
         }
-        previous_states = current_states;
         thread::sleep(Duration::from_millis(100));
     }
 
@@ -246,6 +243,33 @@ pub fn run_blocking(config: DaemonRunConfig) -> Result<(), DaemonRunError> {
         .stop()
         .map_err(|error| DaemonRunError::Protocol(error.to_string()))?;
     Ok(())
+}
+
+#[cfg(unix)]
+fn daemon_status_provider(
+    registrar: Arc<Mutex<Registrar>>,
+    registration_error: Arc<Mutex<Option<String>>>,
+    last_event_at: Arc<Mutex<Option<f64>>>,
+    tunnel_snapshot: Arc<Mutex<TunnelSnapshot>>,
+) -> impl Fn() -> IpcState + Send + Sync + 'static {
+    move || {
+        let tunnel = tunnel_snapshot
+            .lock()
+            .map_or_else(|_| TunnelSnapshot::inactive(), |guard| guard.clone());
+        IpcState {
+            tunnel_backend: tunnel.backend,
+            tunnel_url: tunnel.url,
+            tunnel_verified_at: tunnel.verified_at,
+            subscribers: 0,
+            last_event_at: last_event_at.lock().ok().and_then(|guard| *guard),
+            registered_repos: registered_repos_snapshot(&registrar),
+            rate_limit: None,
+            last_error: registration_error
+                .lock()
+                .ok()
+                .and_then(|guard| guard.clone()),
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -267,6 +291,7 @@ fn drain_webhook_events(
 fn sync_tunnel_registration(
     tunnel_runtime: &TunnelRuntime,
     registrar: &Arc<Mutex<Registrar>>,
+    registration_error: &Arc<Mutex<Option<String>>>,
     repos: &[String],
     active_registration_url: &mut Option<String>,
 ) {
@@ -278,7 +303,9 @@ fn sync_tunnel_registration(
         current_registration_url.as_deref(),
         tunnel_runtime.webhook_secret.as_deref(),
     ) {
-        register_webhooks(registrar, repos, url, secret);
+        register_webhooks(registrar, registration_error, repos, url, secret);
+    } else if let Ok(mut status_error) = registration_error.lock() {
+        *status_error = None;
     }
     *active_registration_url = current_registration_url;
 }
@@ -1004,6 +1031,7 @@ fn public_webhook_url_for_snapshot(snapshot: &TunnelSnapshot) -> Option<String> 
 #[cfg(unix)]
 fn register_webhooks(
     registrar: &Arc<Mutex<Registrar>>,
+    registration_error: &Arc<Mutex<Option<String>>>,
     repos: &[String],
     public_url: &str,
     secret: &str,
@@ -1011,10 +1039,29 @@ fn register_webhooks(
     let Ok(mut registrar) = registrar.lock() else {
         return;
     };
+    let mut first_error = None;
     for repo in repos {
         if let Err(error) = registrar.ensure_registered(repo, public_url, secret) {
-            eprintln!("shipyard daemon: failed to register webhook for {repo}: {error}");
+            let message = registration_error_message(repo, &error);
+            eprintln!("shipyard daemon: failed to register webhook for {repo}: {message}");
+            if first_error.is_none() {
+                first_error = Some(message);
+            }
         }
+    }
+    if let Ok(mut status_error) = registration_error.lock() {
+        *status_error = first_error;
+    }
+}
+
+#[cfg(unix)]
+fn registration_error_message(repo: &str, error: &RegistrarError) -> String {
+    if error.is_missing_webhook_scope() {
+        format!(
+            "GitHub webhook management for {repo} needs one-time authorization. Polling continues; live webhooks need: {WEBHOOK_SCOPE_COMMAND}"
+        )
+    } else {
+        error.to_string()
     }
 }
 
