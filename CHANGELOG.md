@@ -3,6 +3,12 @@
 All notable changes to Shipyard are documented here. Each entry links
 to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
+<a id="v0512"></a>
+## [0.51.2] - 2026-05-05
+
+- daemon: surface webhook registration warnings ([#271](https://github.com/danielraffel/Shipyard/pull/271))
+- codex/docs rust 0.51.1 ([#270](https://github.com/danielraffel/Shipyard/pull/270))
+
 <a id="v0510"></a>
 ## [0.51.0] - 2026-05-04
 
@@ -488,6 +494,7 @@ to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
 - feat/shipyard phases 1 4 ([#1](https://github.com/danielraffel/Shipyard/pull/1))
 
+[0.51.2]: https://github.com/danielraffel/Shipyard/releases/tag/v0.51.2
 [0.51.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.51.0
 [0.50.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.50.0
 [0.49.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.49.0
