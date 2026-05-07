@@ -79,10 +79,12 @@ Namespace capacity is available. If a workflow or repo variable still points at
 Namespace during an outage/account-expired period, set
 `DEFAULT_RUNNER_PROVIDER=github-hosted` or pass `-f runner_provider=github-hosted`.
 
-Explicit `*_runner_selector_json` inputs and repo variables can still route
+Explicit `*_runner_selector_json` workflow-dispatch inputs can still route
 trusted jobs to self-hosted GitHub Actions runners, such as a local Mac or SSH
-VM fleet. GitHub dispatches by `runs-on` labels; SSH is only the management
-layer for those machines.
+VM fleet. Do not add hidden repo-variable fallbacks that silently override the
+GitHub-hosted default; a trusted self-hosted run should be an explicit per-run
+choice. GitHub dispatches by `runs-on` labels; SSH is only the management layer
+for those machines.
 
 ## Live mode (`shipyard daemon`) — when it helps and when to ignore it
 

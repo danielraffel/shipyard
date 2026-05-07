@@ -100,6 +100,9 @@ Namespace is optional and account-dependent. When Namespace is unavailable,
 Shipyard should default to GitHub-hosted Linux/macOS/Windows runners or explicit
 self-hosted GitHub Actions labels. Do not assume `nsc` access, and do not route
 new Shipyard CI to Namespace unless the user explicitly confirms active access.
+Do not add hidden repo-variable fallbacks to local/self-hosted macOS runners:
+local runner use should be explicit via workflow-dispatch selector inputs so
+default GitHub-hosted runs cannot be stolen by stale local runner variables.
 
 For local capacity, keep GitHub Actions as the dispatch layer and use SSH only
 to manage the runner hosts. Stable labels such as `shipyard-macos-arm64`,
