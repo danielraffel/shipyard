@@ -254,10 +254,6 @@ def publish_if_ready(config: ReleaseConfig, runner: CommandRunner) -> str:
         print("keeping release draft; missing macOS DMG(s): " + ", ".join(missing))
         return "partial"
 
-    if config.ci_mode:
-        print("skipping draft flip and install E2E because --ci-mode is set")
-        return "ci-mode"
-
     was_draft = release_is_draft(config, runner)
     did_publish = False
     if was_draft:
@@ -276,6 +272,9 @@ def publish_if_ready(config: ReleaseConfig, runner: CommandRunner) -> str:
 
     try:
         wait_for_public_release_assets(config, runner)
+        if config.ci_mode:
+            print("skipping install E2E because --ci-mode is set")
+            return "published-ci" if did_publish else "already-public-ci"
         run_install_e2e(config, runner)
     except SystemExit:
         if did_publish or was_draft:
@@ -386,7 +385,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--repo", default=os.environ.get("SHIPYARD_REPO", DEFAULT_REPO))
     parser.add_argument("--arch", default="arm64", help="Only arm64 is supported")
     parser.add_argument("--upload", action="store_true", help="Upload DMG and checksum to the GitHub release")
-    parser.add_argument("--ci-mode", action="store_true", help="Allow same-runner DMG mount skips and never publish")
+    parser.add_argument(
+        "--ci-mode",
+        action="store_true",
+        help="Allow same-runner DMG mount skips and skip post-publish install E2E",
+    )
     parser.add_argument("--skip-build", action="store_true", help="Use an existing --binary instead of building")
     parser.add_argument("--binary", type=Path, help="Existing shipyard binary to package")
     parser.add_argument("--cargo-target", help="Optional Rust target triple")

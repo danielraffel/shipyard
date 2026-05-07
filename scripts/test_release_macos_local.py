@@ -86,7 +86,7 @@ class ReleaseMacosLocalTests(unittest.TestCase):
             release_macos_local.require_arm64("x64")
         self.assertIn("arm64", str(ctx.exception))
 
-    def test_ci_mode_skips_publish_and_install_e2e(self) -> None:
+    def test_ci_mode_publishes_but_skips_install_e2e(self) -> None:
         config = release_macos_local.ReleaseConfig(
             tag="v0.1.0",
             repo="danielraffel/Shipyard",
@@ -103,9 +103,11 @@ class ReleaseMacosLocalTests(unittest.TestCase):
         with redirect_stdout(StringIO()):
             outcome = release_macos_local.publish_if_ready(config, runner)
 
-        self.assertEqual(outcome, "ci-mode")
+        self.assertEqual(outcome, "published-ci")
         flattened = [" ".join(command) for command in runner.commands]
-        self.assertFalse(any("release edit" in command for command in flattened))
+        self.assertTrue(any("release edit" in command for command in flattened))
+        self.assertTrue(any("--draft=false" in command for command in flattened))
+        self.assertTrue(any(command.startswith("curl -fsSL") for command in flattened))
         self.assertFalse(any(command.startswith("bash ") for command in flattened))
 
     def test_publish_reverts_draft_when_install_e2e_fails(self) -> None:
