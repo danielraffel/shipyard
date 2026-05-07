@@ -96,6 +96,16 @@ Read `references/platforms.md` when work touches Tailscale, live mode,
 signing, packaging, Namespace/GitHub Actions runners, Windows SSH/PowerShell,
 or cross-platform sandbox E2E behavior.
 
+Namespace is optional and account-dependent. When Namespace is unavailable,
+Shipyard should default to GitHub-hosted Linux/macOS/Windows runners or explicit
+self-hosted GitHub Actions labels. Do not assume `nsc` access, and do not route
+new Shipyard CI to Namespace unless the user explicitly confirms active access.
+
+For local capacity, keep GitHub Actions as the dispatch layer and use SSH only
+to manage the runner hosts. Stable labels such as `shipyard-macos-arm64`,
+`shipyard-linux-arm64`, and `shipyard-windows-x64` are preferable to raw host
+names in workflow `runs-on` selectors.
+
 ## Cloud Retargeting
 
 `shipyard cloud retarget --apply` is intentionally fail-closed. It cancels
