@@ -85,10 +85,11 @@ pub fn find_pr_for_branch(
         .output()
         .map_err(|error| PrError::new(format!("gh pr list failed to start: {error}")))?;
     if !output.status.success() {
-        return Err(PrError::new(format!(
-            "gh pr list failed: {}",
-            stderr_or_stdout(&output)
-        )));
+        let message = stderr_or_stdout(&output);
+        if is_graphql_rate_limited(&message) {
+            return find_pr_for_branch_rest(cwd, gh_command, branch);
+        }
+        return Err(PrError::new(format!("gh pr list failed: {message}")));
     }
     let text = String::from_utf8_lossy(&output.stdout);
     parse_pr_list(&text)
@@ -111,10 +112,11 @@ pub fn create_pr(
         .output()
         .map_err(|error| PrError::new(format!("gh pr create failed to start: {error}")))?;
     if !output.status.success() {
-        return Err(PrError::new(format!(
-            "gh pr create failed: {}",
-            stderr_or_stdout(&output)
-        )));
+        let message = stderr_or_stdout(&output);
+        if is_graphql_rate_limited(&message) {
+            return create_pr_rest(cwd, gh_command, branch, base, title, body);
+        }
+        return Err(PrError::new(format!("gh pr create failed: {message}")));
     }
     let selector = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     if selector.is_empty() {
@@ -135,10 +137,11 @@ pub fn get_pr_status(
         .output()
         .map_err(|error| PrError::new(format!("gh pr view failed to start: {error}")))?;
     if !output.status.success() {
-        return Err(PrError::new(format!(
-            "gh pr view failed: {}",
-            stderr_or_stdout(&output)
-        )));
+        let message = stderr_or_stdout(&output);
+        if is_graphql_rate_limited(&message) {
+            return get_pr_status_rest(cwd, gh_command, selector);
+        }
+        return Err(PrError::new(format!("gh pr view failed: {message}")));
     }
     parse_pr_info(&String::from_utf8_lossy(&output.stdout))
 }
@@ -164,6 +167,186 @@ fn parse_pr_list(text: &str) -> Result<Option<PrInfo>, PrError> {
         return Err(PrError::new("gh pr list JSON was not an array"));
     };
     items.first().map(parse_pr_value).transpose()
+}
+
+fn find_pr_for_branch_rest(
+    cwd: &Path,
+    gh_command: Option<&Path>,
+    branch: &str,
+) -> Result<Option<PrInfo>, PrError> {
+    let repo = repo_slug(cwd)?;
+    let owner = repo
+        .split('/')
+        .next()
+        .filter(|owner| !owner.is_empty())
+        .ok_or_else(|| PrError::new(format!("could not derive owner from repo {repo:?}")))?;
+    let endpoint = format!("repos/{repo}/pulls");
+    let head = format!("{owner}:{branch}");
+    let args = vec![
+        "api".to_owned(),
+        endpoint,
+        "-f".to_owned(),
+        format!("head={head}"),
+        "-f".to_owned(),
+        "state=open".to_owned(),
+        "-F".to_owned(),
+        "per_page=1".to_owned(),
+    ];
+    let output = gh(gh_command)
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .map_err(|error| PrError::new(format!("gh REST PR lookup failed to start: {error}")))?;
+    if !output.status.success() {
+        return Err(PrError::new(format!(
+            "gh REST PR lookup failed after GraphQL rate limit: {}",
+            stderr_or_stdout(&output)
+        )));
+    }
+    parse_pr_rest_list(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn create_pr_rest(
+    cwd: &Path,
+    gh_command: Option<&Path>,
+    branch: &str,
+    base: &str,
+    title: &str,
+    body: &str,
+) -> Result<PrInfo, PrError> {
+    let repo = repo_slug(cwd)?;
+    let endpoint = format!("repos/{repo}/pulls");
+    let args = vec![
+        "api".to_owned(),
+        "-X".to_owned(),
+        "POST".to_owned(),
+        endpoint,
+        "-f".to_owned(),
+        format!("title={title}"),
+        "-f".to_owned(),
+        format!("head={branch}"),
+        "-f".to_owned(),
+        format!("base={base}"),
+        "-f".to_owned(),
+        format!("body={body}"),
+    ];
+    let output = gh(gh_command)
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .map_err(|error| PrError::new(format!("gh REST PR create failed to start: {error}")))?;
+    if !output.status.success() {
+        return Err(PrError::new(format!(
+            "gh pr create hit GraphQL rate limit, then REST fallback failed: {}",
+            stderr_or_stdout(&output)
+        )));
+    }
+    parse_pr_rest_info(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn get_pr_status_rest(
+    cwd: &Path,
+    gh_command: Option<&Path>,
+    selector: &str,
+) -> Result<PrInfo, PrError> {
+    let repo = repo_slug(cwd)?;
+    let number = selector_pr_number(selector)
+        .ok_or_else(|| PrError::new(format!("could not parse PR selector {selector:?}")))?;
+    let endpoint = format!("repos/{repo}/pulls/{number}");
+    let output = gh(gh_command)
+        .args(["api", &endpoint])
+        .current_dir(cwd)
+        .output()
+        .map_err(|error| PrError::new(format!("gh REST PR view failed to start: {error}")))?;
+    if !output.status.success() {
+        return Err(PrError::new(format!(
+            "gh REST PR view failed after GraphQL rate limit: {}",
+            stderr_or_stdout(&output)
+        )));
+    }
+    parse_pr_rest_info(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn repo_slug(cwd: &Path) -> Result<String, PrError> {
+    let output = Command::new("git")
+        .args(["config", "--get", "remote.origin.url"])
+        .current_dir(cwd)
+        .output()
+        .map_err(|error| PrError::new(format!("git remote probe failed: {error}")))?;
+    if !output.status.success() {
+        return Err(PrError::new(format!(
+            "git remote probe failed: {}",
+            stderr_or_stdout(&output)
+        )));
+    }
+    let remote = String::from_utf8_lossy(&output.stdout);
+    parse_github_remote_slug(remote.trim()).ok_or_else(|| {
+        PrError::new(format!(
+            "remote.origin.url is not a supported GitHub remote: {}",
+            remote.trim()
+        ))
+    })
+}
+
+fn parse_github_remote_slug(remote: &str) -> Option<String> {
+    let mut slug = remote
+        .strip_prefix("git@github.com:")
+        .or_else(|| remote.strip_prefix("ssh://git@github.com/"))
+        .or_else(|| remote.strip_prefix("https://github.com/"))
+        .or_else(|| remote.strip_prefix("http://github.com/"))?
+        .trim_end_matches(".git")
+        .trim_matches('/')
+        .to_owned();
+    if slug.split('/').count() != 2 {
+        return None;
+    }
+    if slug.starts_with('/') {
+        slug.remove(0);
+    }
+    (!slug.is_empty()).then_some(slug)
+}
+
+fn selector_pr_number(selector: &str) -> Option<u64> {
+    selector
+        .trim()
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .and_then(|part| part.parse::<u64>().ok())
+}
+
+fn is_graphql_rate_limited(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("graphql") && lower.contains("rate limit")
+}
+
+fn parse_pr_rest_list(text: &str) -> Result<Option<PrInfo>, PrError> {
+    let value = serde_json::from_str::<Value>(text)
+        .map_err(|error| PrError::new(format!("failed to parse REST PR list JSON: {error}")))?;
+    let Some(items) = value.as_array() else {
+        return Err(PrError::new("REST PR list JSON was not an array"));
+    };
+    items.first().map(parse_pr_rest_value).transpose()
+}
+
+fn parse_pr_rest_info(text: &str) -> Result<PrInfo, PrError> {
+    let value = serde_json::from_str::<Value>(text)
+        .map_err(|error| PrError::new(format!("failed to parse REST PR JSON: {error}")))?;
+    parse_pr_rest_value(&value)
+}
+
+fn parse_pr_rest_value(value: &Value) -> Result<PrInfo, PrError> {
+    Ok(PrInfo {
+        number: value
+            .get("number")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| PrError::new("REST PR JSON missing number"))?,
+        url: string_field(value, "html_url")?,
+        title: string_field(value, "title")?,
+        state: string_field(value, "state")?.to_ascii_uppercase(),
+        branch: nested_string_field(value, &["head", "ref"])?,
+        base: nested_string_field(value, &["base", "ref"])?,
+    })
 }
 
 fn parse_pr_info(text: &str) -> Result<PrInfo, PrError> {
@@ -194,9 +377,25 @@ fn string_field(value: &Value, field: &str) -> Result<String, PrError> {
         .ok_or_else(|| PrError::new(format!("PR JSON missing {field}")))
 }
 
+fn nested_string_field(value: &Value, path: &[&str]) -> Result<String, PrError> {
+    let mut current = value;
+    for field in path {
+        current = current
+            .get(field)
+            .ok_or_else(|| PrError::new(format!("REST PR JSON missing {}", path.join("."))))?;
+    }
+    current
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| PrError::new(format!("REST PR JSON missing {}", path.join("."))))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{PrInfo, parse_pr_info, parse_pr_list};
+    use super::{
+        PrInfo, is_graphql_rate_limited, parse_github_remote_slug, parse_pr_info, parse_pr_list,
+        parse_pr_rest_info, parse_pr_rest_list, selector_pr_number,
+    };
 
     #[test]
     fn parses_pr_view_payload() {
@@ -243,6 +442,81 @@ mod tests {
             .expect("first")
             .number,
             7
+        );
+    }
+
+    #[test]
+    fn detects_graphql_rate_limit_errors() {
+        assert!(is_graphql_rate_limited(
+            "GraphQL: API rate limit already exceeded for user ID 123"
+        ));
+        assert!(!is_graphql_rate_limited("HTTP 500: something else failed"));
+    }
+
+    #[test]
+    fn parses_github_remote_slugs() {
+        assert_eq!(
+            parse_github_remote_slug("git@github.com:danielraffel/Shipyard.git"),
+            Some("danielraffel/Shipyard".to_owned())
+        );
+        assert_eq!(
+            parse_github_remote_slug("https://github.com/danielraffel/pulp"),
+            Some("danielraffel/pulp".to_owned())
+        );
+        assert_eq!(parse_github_remote_slug("https://example.com/nope"), None);
+    }
+
+    #[test]
+    fn parses_pr_numbers_from_urls_or_plain_selectors() {
+        assert_eq!(
+            selector_pr_number("https://github.com/danielraffel/Shipyard/pull/273"),
+            Some(273)
+        );
+        assert_eq!(selector_pr_number("274"), Some(274));
+        assert_eq!(selector_pr_number("not-a-pr"), None);
+    }
+
+    #[test]
+    fn parses_rest_pr_payloads() {
+        let info = parse_pr_rest_info(
+            r#"{
+                "number": 273,
+                "html_url": "https://github.com/danielraffel/Shipyard/pull/273",
+                "title": "REST fallback",
+                "state": "open",
+                "head": {"ref": "feature/rest-fallback"},
+                "base": {"ref": "main"}
+            }"#,
+        )
+        .expect("rest pr");
+
+        assert_eq!(
+            info,
+            PrInfo {
+                number: 273,
+                url: "https://github.com/danielraffel/Shipyard/pull/273".to_owned(),
+                title: "REST fallback".to_owned(),
+                state: "OPEN".to_owned(),
+                branch: "feature/rest-fallback".to_owned(),
+                base: "main".to_owned(),
+            }
+        );
+        assert_eq!(parse_pr_rest_list("[]").expect("empty"), None);
+        assert_eq!(
+            parse_pr_rest_list(
+                r#"[{
+                    "number": 274,
+                    "html_url": "https://github.com/o/r/pull/274",
+                    "title": "Focus profile",
+                    "state": "open",
+                    "head": {"ref": "feature/focus"},
+                    "base": {"ref": "main"}
+                }]"#
+            )
+            .expect("list")
+            .expect("first")
+            .number,
+            274
         );
     }
 }
