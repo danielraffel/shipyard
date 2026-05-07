@@ -4,8 +4,6 @@ All notable changes to Shipyard are documented here. Each entry links
 to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
 <a id="v0512"></a>
-## [0.51.5]
-
 ## [0.51.2] - 2026-05-05
 
 - daemon: surface webhook registration warnings ([#271](https://github.com/danielraffel/Shipyard/pull/271))
