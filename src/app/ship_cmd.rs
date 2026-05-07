@@ -394,7 +394,9 @@ fn post_run_merge_state(
     match execute_auto_merge(store, cwd, &request)
         .map_err(|error| CliFailure::new(1, error.to_string()))?
     {
-        AutoMergeOutcome::Merged | AutoMergeOutcome::AlreadyMerged => Ok(ShipRenderState::Merged),
+        AutoMergeOutcome::Merged { .. } | AutoMergeOutcome::AlreadyMerged => {
+            Ok(ShipRenderState::Merged)
+        }
         AutoMergeOutcome::MergeFailed { .. } => Ok(ShipRenderState::GreenNotMerged),
         AutoMergeOutcome::PrNotFound
         | AutoMergeOutcome::InFlight { .. }

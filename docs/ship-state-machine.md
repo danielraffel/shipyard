@@ -241,10 +241,10 @@ inspection. `shipyard cleanup --ship-state` ages these out (see T12).
 - **Trigger:** end of `shipyard ship` or `shipyard auto-merge <pr>`
 - **Writes:** `merge_pr(...)` (gh); on success, `ctx.ship_state.archive(pr)`
 - **Externals:** `gh pr merge` (branch protection, auth, network)
-- **Failure-handling split (key asymmetry):**
-  - `shipyard ship` at cli.py:2723 calls `merge_pr` with **no local try/except**. A `GhError` propagates up and aborts with a traceback. The state file is left active.
-  - `shipyard auto-merge` at cli.py:3333–3347 catches `GhError` + `TypeError` (back-compat) and exits 1 with a `merge-failed` event. The state file is left active.
-- **Archive failure is NOT auto-recoverable.** `_pr_is_merged(pr)` is only consulted when `ctx.ship_state.get(pr)` returns `None` (cli.py:3242). If `archive(pr)` fails (disk error, race) and leaves the active state file present, the next `auto-merge` tick reads the state, recomputes `STATE_VERDICT_PASS`, and attempts `merge_pr` again — which returns `GhError` from gh ("Pull request is already merged"). `auto-merge` exits 1 reporting `merge-failed`, not 0. Phase B test: inject an archive failure after a successful merge; assert the next `auto-merge` tick emits a distinct event (not a false `merge-failed`). The fix may be a new "archive or accept merged PR" probe on the state-present branch.
+- **Failure-handling split:**
+  - `shipyard ship` treats merge-command failure as "green but not merged" and leaves the state file active for retry.
+  - `shipyard auto-merge` returns `merge-failed` only when the PR is still unmerged. If `gh pr merge --delete-branch` exits nonzero after GitHub has already merged the PR (for example, local branch deletion failed because another worktree has it checked out), Shipyard archives state and exits 0 with a `cleanup_warning`.
+- **Archive failure remains a store error.** If `archive(pr)` itself fails after GitHub merge succeeds, the active state file remains and the command exits nonzero. A later retry can still recover if `gh pr merge` reports "already merged" or PR-state lookup confirms `MERGED`.
 
 ### T6 — Refuse to merge on FAIL
 
@@ -360,7 +360,7 @@ inspection. `shipyard cleanup --ship-state` ages these out (see T12).
 | `workflow_dispatch`                    | T2, T9, T10         | 404 / 5xx / rate-limit       | Add-lane: exits before mutation. Retarget: if dispatch fails after cancel succeeded, the old lane is gone and no new lane exists. `ship` path goes through `CloudExecutor` inside `_execute_job`. |
 | `find_dispatched_run`                  | T2, T10             | timeout                      | DispatchedRun persisted with `pending-<target>` sentinel. **No backfill path exists.**                              |
 | GitHub Actions cancel (retarget)       | T9                  | race / auth / scope / unsupported / not-found | If cancellation is not proven complete, retarget aborts before dispatch with `event=cancel_failed`. Partial cancellation no longer dispatches additively. Whole-run fallback is used only when every active job matches the target. |
-| `gh pr merge`                          | T5                  | branch protection / auth / already-merged | `ship`: unwrapped, propagates. `auto-merge`: wrapped, exits 1 with `merge-failed`. "Already merged" from a failed-archive retry is currently reported as `merge-failed`, not idempotent success (see T5). |
+| `gh pr merge`                          | T5                  | branch protection / auth / already-merged / cleanup failure | `auto-merge` treats "already merged" or post-error `MERGED` PR state as success with `cleanup_warning`; genuine unmerged failures still return `merge-failed`. |
 | SSH backend probe                      | T2 (preflight)      | network / auth / host_key     | Pre-#100: silent hang. Post-#100: exit 3 with classified error inside 10s.                                           |
 | `git rev-parse HEAD` (branch/SHA)      | T1, T7              | worktree gone                 | `ship` aborts at cli.py:2582 before drift detection if branch or SHA is unavailable.                                 |
 
@@ -384,7 +384,7 @@ will fail the `state-machine` CI lane immediately.
 
 ## Silent-failure regression tests
 
-1. **Archive failure after merge is not idempotent on retry.** `_pr_is_merged` fires only when the state file is absent (cli.py:3242). If archive fails and leaves the state active, the next `auto-merge` reattempts `merge_pr`, GitHub returns "already merged" as an error, and `auto-merge` exits 1 with `merge-failed`. *Test:* archive → force an `OSError` on the rename; assert the next `auto-merge` tick distinguishes "already merged on GH" from "merge genuinely failed" and exits 0 with an event like `already-merged-but-state-not-archived`.
+1. **Merge success hidden behind cleanup failure.** If `gh pr merge --delete-branch` merges on GitHub but fails while deleting a local branch checked out in another worktree, `auto-merge` must archive ship-state and exit 0 with a cleanup warning, not report `merge-failed`. Covered by `auto_merge_archives_when_merge_error_reports_already_merged`.
 2. **Partial evidence PASS (Bug B1).** Dispatch 3 targets, write evidence for only 1 (all "pass"), compute verdict. Today returns True. *Test:* seed a `ShipState` with `dispatched_runs=[T1, T2, T3]` and `evidence_snapshot={"T1":"pass"}`; `_ship_terminal_verdict(state)` must return `None`, not `True`. Proposed fix: extend the function to require an evidence row for every non-advisory `DispatchedRun.target`.
 3. **Ship-state tmp-write durability.** `ShipStateStore.save` already uses tmp+`os.replace` (core/ship_state.py:342). *Test:* inject an `os.replace` failure; assert the prior file is byte-identical. (Do NOT couple this test to `queue.json` — `Queue._save` uses a different write pattern on `main`; atomicity for that file lands in PR #105.)
 

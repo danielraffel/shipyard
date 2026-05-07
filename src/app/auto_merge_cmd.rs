@@ -37,7 +37,9 @@ pub(super) enum AutoMergeOutcome {
     MergeFailed {
         error: String,
     },
-    Merged,
+    Merged {
+        cleanup_warning: Option<String>,
+    },
 }
 
 #[derive(Debug)]
@@ -94,12 +96,24 @@ pub(super) fn execute_auto_merge(
                 request.merge_command.clone(),
                 request.merge_result,
             ) {
+                if merge_error_confirms_merged(&error)
+                    || pr_is_merged(request.pr, cwd, request.pr_snapshot_file.as_deref())
+                {
+                    store
+                        .archive(request.pr)
+                        .map_err(AutoMergeOperationError::Store)?;
+                    return Ok(AutoMergeOutcome::Merged {
+                        cleanup_warning: Some(error),
+                    });
+                }
                 return Ok(AutoMergeOutcome::MergeFailed { error });
             }
             store
                 .archive(request.pr)
                 .map_err(AutoMergeOperationError::Store)?;
-            Ok(AutoMergeOutcome::Merged)
+            Ok(AutoMergeOutcome::Merged {
+                cleanup_warning: None,
+            })
         }
     }
 }
@@ -197,8 +211,12 @@ pub(super) fn auto_merge<W: Write>(
             )?;
             Ok(ExitCode::from(1))
         }
-        AutoMergeOutcome::Merged => {
-            render_event(stdout, json, "merged", fields([("pr", Value::from(pr))]))?;
+        AutoMergeOutcome::Merged { cleanup_warning } => {
+            let mut data = fields([("pr", Value::from(pr))]);
+            if let Some(warning) = cleanup_warning {
+                data.insert("cleanup_warning".to_owned(), Value::from(warning));
+            }
+            render_event(stdout, json, "merged", data)?;
             Ok(ExitCode::SUCCESS)
         }
     }
@@ -271,6 +289,11 @@ fn merge_pr(
     Err(if stderr.is_empty() { stdout } else { stderr })
 }
 
+fn merge_error_confirms_merged(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("pull request") && lower.contains("already merged")
+}
+
 fn failing_required_targets(state: &ShipState) -> Vec<String> {
     let advisory_targets = state
         .dispatched_runs
@@ -333,7 +356,13 @@ fn render_event<W: Write>(
             "PR #{pr}: merge attempt failed - {}",
             data.get("error").and_then(Value::as_str).unwrap_or("")
         ),
-        "merged" => writeln!(stdout, "PR #{pr}: merged."),
+        "merged" => {
+            if let Some(warning) = data.get("cleanup_warning").and_then(Value::as_str) {
+                writeln!(stdout, "PR #{pr}: merged. Cleanup warning: {warning}")
+            } else {
+                writeln!(stdout, "PR #{pr}: merged.")
+            }
+        }
         _ => Ok(()),
     }
     .map_err(|error| CliFailure::new(1, error.to_string()))

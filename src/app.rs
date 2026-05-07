@@ -784,6 +784,8 @@ fn handle_ship_state_command<W: Write>(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::process::ExitCode;
     use std::process::{Command, Stdio};
     #[cfg(unix)]
@@ -825,6 +827,15 @@ mod tests {
             .status()
             .expect("git command should run");
         assert!(status.success(), "git command failed: {args:?}");
+    }
+
+    #[cfg(unix)]
+    fn make_executable(path: &std::path::Path) {
+        let mut permissions = std::fs::metadata(path)
+            .expect("script metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).expect("chmod script");
     }
 
     fn seed_git_repo(repo: &std::path::Path, branch: &str) {
@@ -2152,6 +2163,46 @@ mod tests {
         assert_eq!(value["event"], "merged");
         assert_eq!(value["pr"], 12);
         assert!(store.get(12).is_none());
+        assert_eq!(store.list_archived().len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn auto_merge_archives_when_merge_error_reports_already_merged() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = ShipStateStore::new(temp.path().join("ship")).expect("store");
+        store
+            .save(&auto_merge_state(13, &[("macos", "pass")]))
+            .expect("save");
+        let merge = temp.path().join("merge-fails-after-merge.sh");
+        std::fs::write(
+            &merge,
+            "#!/usr/bin/env bash\nprintf 'Pull request danielraffel/pulp#13 was already merged\\nfailed to delete local branch feature/x: used by worktree\\n' >&2\nexit 1\n",
+        )
+        .expect("merge script");
+        make_executable(&merge);
+        let cli = Cli::parse_from([
+            "shipyard",
+            "--json",
+            "--state-dir",
+            temp.path().to_str().expect("temp path"),
+            "auto-merge",
+            "13",
+            "--merge-command",
+            merge.to_str().expect("merge script"),
+        ]);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run_with(cli, &mut stdout, &mut stderr);
+
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert!(stderr.is_empty());
+        let value: Value = serde_json::from_slice(&stdout).expect("json");
+        assert_eq!(value["event"], "merged");
+        assert!(value["cleanup_warning"].as_str().is_some_and(|warning| {
+            warning.contains("already merged") && warning.contains("worktree")
+        }));
+        assert!(store.get(13).is_none());
         assert_eq!(store.list_archived().len(), 1);
     }
 
