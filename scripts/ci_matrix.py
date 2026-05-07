@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Resolve GitHub Actions runner matrices for Shipyard Rust workflows.
+"""Resolve GitHub Actions runner matrices for Shipyard workflows.
 
-Namespace is the default provider because these workflows are intended to move
-quickly while the Rust port is under active parity validation. Workflow inputs
-and repository variables can override the defaults without editing YAML.
+GitHub-hosted runners are the safe default. Namespace remains an explicit
+opt-in provider for repos/accounts that still have access, and workflow inputs
+or repository variables can override defaults without editing YAML.
 """
 
 from __future__ import annotations
@@ -117,7 +117,7 @@ def _load_selector(raw: str, *, target: RunnerTarget, source: str) -> str:
 
 
 def requested_provider(env: Mapping[str, str]) -> str:
-    provider = _env(env, "REQUESTED_PROVIDER") or "namespace"
+    provider = _env(env, "REQUESTED_PROVIDER") or "github-hosted"
     if provider not in VALID_PROVIDERS:
         raise SystemExit(
             f"Unsupported runner provider {provider!r}; expected one of "

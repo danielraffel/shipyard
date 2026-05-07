@@ -4,6 +4,8 @@ All notable changes to Shipyard are documented here. Each entry links
 to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
 <a id="v0513"></a>
+## [0.51.4]
+
 ## [0.51.3] - 2026-05-06
 
 - daemon: archive local ship-state from `pull_request.closed` webhooks

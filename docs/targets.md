@@ -51,7 +51,7 @@ backend = "ssh"
 host = "ubuntu"
 fallback = [
     { type = "vm", vm_name = "Ubuntu 24.04" },
-    { type = "cloud", provider = "namespace" },
+    { type = "cloud", provider = "github-hosted" },
 ]
 ```
 

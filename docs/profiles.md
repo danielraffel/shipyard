@@ -19,7 +19,7 @@ your config every time is annoying.
 targets = ["mac"]
 
 [profiles.normal]
-# Mac local + cloud for Windows and Linux
+# Mac local + GitHub-hosted Windows and Linux
 targets = ["mac", "ubuntu-cloud", "windows-cloud"]
 
 [profiles.full]
@@ -31,7 +31,7 @@ targets = ["mac", "ubuntu", "windows"]
 
 ```bash
 $ shipyard config use local          # just my Mac
-$ shipyard config use normal         # Mac + Namespace cloud
+$ shipyard config use normal         # Mac + GitHub-hosted cloud
 $ shipyard config use full           # Mac + VMs + cloud fallback
 ```
 
@@ -53,9 +53,35 @@ $ shipyard targets
   (ubuntu and windows are disabled in this profile)
 ```
 
+## Platform-focus profiles
+
+Profiles can also describe which platforms are merge-blocking during a
+focused development phase. Shipyard still runs every configured target, but
+targets outside the focus set become advisory and are listed in the PR body.
+
+```toml
+[project]
+profile = "macos-only"
+
+[profiles.macos-only]
+description = "Active focus is macOS. Linux and Windows still build for visibility."
+focus_platforms = ["macos"]
+advisory_platforms = ["linux", "windows"]
+```
+
+`Lane-Policy:` commit trailers still win for a single PR:
+
+```text
+Lane-Policy: windows=required linux=advisory
+```
+
+Automatic issue filing for advisory failures is intentionally not enabled in
+this first slice; issue #274 tracks that follow-up so Shipyard does not spam a
+repo while the local runner migration is still settling.
+
 ## Provider profiles & capabilities
 
-Shipyard's runner providers (GitHub-hosted, Namespace) expose *profiles*
+Shipyard's runner providers (GitHub-hosted, Namespace where available) expose *profiles*
 — named bundles of capabilities a given runner class advertises. This
 is the other side of the [`requires`](./targets.md#locality-routing-requires)
 feature: when a target says it needs `gpu`, Shipyard filters the
@@ -77,7 +103,9 @@ These ship with Shipyard — no config needed for the common cases.
 ### Overriding or extending
 
 Any same-named profile you define in `.shipyard/config.toml` overrides
-the built-in. Add new profiles for custom fleets:
+the built-in. Add new profiles for custom fleets. Namespace examples remain
+for users with Namespace access; Shipyard's own CI defaults to GitHub-hosted
+runners unless a workflow input or repo variable opts into Namespace.
 
 ```toml
 [providers.namespace.profiles.default]

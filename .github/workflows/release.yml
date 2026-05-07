@@ -8,11 +8,11 @@ on:
       runner_provider:
         description: Runner provider for release jobs
         required: false
-        default: namespace
+        default: github-hosted
         type: choice
         options:
-          - namespace
           - github-hosted
+          - namespace
       linux_runner_selector_json:
         description: Optional JSON string/array for Linux x64 runs-on
         required: false
@@ -56,10 +56,13 @@ jobs:
 
       - id: resolve
         env:
-          REQUESTED_PROVIDER: ${{ inputs.runner_provider || vars.DEFAULT_RUNNER_PROVIDER || 'namespace' }}
+          REQUESTED_PROVIDER: ${{ inputs.runner_provider || vars.DEFAULT_RUNNER_PROVIDER || 'github-hosted' }}
           EXPLICIT_LINUX_RUNNER_SELECTOR_JSON: ${{ inputs.linux_runner_selector_json || '' }}
           EXPLICIT_LINUX_ARM64_RUNNER_SELECTOR_JSON: ${{ inputs.linux_arm64_runner_selector_json || '' }}
-          EXPLICIT_MACOS_ARM64_RUNNER_SELECTOR_JSON: ${{ inputs.macos_arm64_runner_selector_json || '' }}
+          # Falls back to the MACOS_ARM64_LOCAL_SELECTOR_JSON repo var so the
+          # macOS leg routes to the local self-hosted runner (label `local-mac`)
+          # without a workflow_dispatch input on auto release events.
+          EXPLICIT_MACOS_ARM64_RUNNER_SELECTOR_JSON: ${{ inputs.macos_arm64_runner_selector_json || vars.MACOS_ARM64_LOCAL_SELECTOR_JSON || '' }}
           EXPLICIT_WINDOWS_RUNNER_SELECTOR_JSON: ${{ inputs.windows_runner_selector_json || '' }}
           NAMESPACE_LINUX_RUNS_ON_JSON: ${{ vars.NAMESPACE_LINUX_RUNS_ON_JSON }}
           NAMESPACE_LINUX_ARM64_RUNS_ON_JSON: ${{ vars.NAMESPACE_LINUX_ARM64_RUNS_ON_JSON }}

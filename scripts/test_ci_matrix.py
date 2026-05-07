@@ -12,10 +12,10 @@ import ci_matrix
 
 
 class CiMatrixTests(unittest.TestCase):
-    def test_namespace_is_fast_default_without_repo_vars(self) -> None:
+    def test_github_hosted_is_safe_default_without_repo_vars(self) -> None:
         row = ci_matrix.resolve_runs_on("linux", {})
-        self.assertEqual(row["provider"], "namespace")
-        self.assertEqual(json.loads(row["runs_on_json"]), "namespace-profile-generouscorp")
+        self.assertEqual(row["provider"], "github-hosted")
+        self.assertEqual(json.loads(row["runs_on_json"]), "ubuntu-latest")
 
     def test_github_hosted_provider_uses_hosted_labels(self) -> None:
         row = ci_matrix.resolve_runs_on("windows", {"REQUESTED_PROVIDER": "github-hosted"})
@@ -100,8 +100,8 @@ class CiMatrixTests(unittest.TestCase):
                 for line in output.read_text(encoding="utf-8").splitlines()
             )
         self.assertEqual(len(json.loads(values["matrix_json"])["include"]), 2)
-        self.assertEqual(json.loads(values["linux_runs_on_json"]), "namespace-profile-generouscorp")
-        self.assertEqual(values["linux_provider"], "namespace")
+        self.assertEqual(json.loads(values["linux_runs_on_json"]), "ubuntu-latest")
+        self.assertEqual(values["linux_provider"], "github-hosted")
 
 
 if __name__ == "__main__":

@@ -86,8 +86,8 @@ Downloads a standalone binary for your platform. No runtime needed. See
 - **Local builds** run on your host machine — fast, no network.
 - **Remote builds** run on machines you control via SSH — VMs, containers,
   or hosts on your network.
-- **Cloud builds** run on managed infrastructure (Namespace, GitHub
-  Actions) for neutral or on-demand capacity.
+- **Cloud builds** run on managed infrastructure (GitHub Actions by default,
+  Namespace where available) for neutral or on-demand capacity.
 
 `shipyard run` delivers the exact commit to each machine, runs your build
 and test commands, and reports what passed. `shipyard ship` does the same,
@@ -136,7 +136,7 @@ You don't need everything — just what matches your setup:
 | [git](https://github.com/git-guides/install-git) | Yes | Version control | Pre-installed on macOS |
 | [gh](https://github.com/cli/cli) | Yes (for PRs) | GitHub integration[^gh-scope] | `brew install gh` |
 | `ssh` | For remote targets | Connect to VMs | Pre-installed on macOS / [Ubuntu](https://ubuntu.com/server/docs/how-to/security/openssh-server/) / [Windows](https://learn.microsoft.com/en-us/windows-server/administration/openssh/openssh_install_firstuse?tabs=gui&pivots=windows-11) |
-| [nsc](https://namespace.so/docs/reference/cli/installation) | For [Namespace](https://namespace.so) | Cloud runners | `brew install namespace-cli` |
+| [nsc](https://namespace.so/docs/reference/cli/installation) | Optional | Namespace runner visibility when your account has access | `brew install namespace-cli` |
 | [UTM](https://mac.getutm.app) / [Parallels](https://www.parallels.com/products/desktop/) | For VM fallback | Auto-boot VMs | `brew install --cask utm` |
 
 `shipyard doctor` checks all of this and tells you what's missing.

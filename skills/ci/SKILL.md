@@ -52,8 +52,8 @@ Shipyard coordinates validation across local, SSH, and cloud targets.
 | Drain the warm-pool (force cold-start everywhere) | `shipyard targets warm drain --yes` |
 | Force cold-start for one ship only | `shipyard ship --no-warm` (or `shipyard run --no-warm`) |
 | Global warm-pool kill switch | `SHIPYARD_NO_WARM_POOL=1` in the environment |
-| Retarget one lane on an in-flight PR | `shipyard cloud retarget --pr <n> --target macos --provider namespace` (dry-run; add `--apply`) |
-| Add a new lane to an in-flight PR | `shipyard cloud add-lane --pr <n> --target windows [--provider namespace]` (dry-run; add `--apply`) |
+| Retarget one lane on an in-flight PR | `shipyard cloud retarget --pr <n> --target macos --provider github-hosted` (dry-run; add `--apply`) |
+| Add a new lane to an in-flight PR | `shipyard cloud add-lane --pr <n> --target windows [--provider github-hosted]` (dry-run; add `--apply`) |
 | Skip a version-bump gate | `shipyard pr --skip-bump sdk --bump-reason "docs only"` |
 | Skip a skill-sync gate | `shipyard pr --skip-skill-update ci --skill-reason "mechanical"` |
 | Deliberately skip one lane | `shipyard run --skip-target windows` (repeatable; no probe run) |
@@ -70,6 +70,19 @@ Shipyard coordinates validation across local, SSH, and cloud targets.
 | List quarantined targets | `shipyard quarantine list --json` |
 | Quarantine a flaky target | `shipyard quarantine add <target> --reason "..."` |
 | Remove from quarantine | `shipyard quarantine remove <target>` |
+
+## Runner Provider Defaults
+
+Shipyard's own workflows default to GitHub-hosted runners for Linux, macOS, and
+Windows. Namespace is optional and account-dependent; do not assume `nsc` or
+Namespace capacity is available. If a workflow or repo variable still points at
+Namespace during an outage/account-expired period, set
+`DEFAULT_RUNNER_PROVIDER=github-hosted` or pass `-f runner_provider=github-hosted`.
+
+Explicit `*_runner_selector_json` inputs and repo variables can still route
+trusted jobs to self-hosted GitHub Actions runners, such as a local Mac or SSH
+VM fleet. GitHub dispatches by `runs-on` labels; SSH is only the management
+layer for those machines.
 
 ## Live mode (`shipyard daemon`) — when it helps and when to ignore it
 
@@ -163,14 +176,14 @@ a ship.
 
 ## Mid-flight runner retargeting
 
-When a provider change would be valuable *during* an in-flight PR drain — e.g., you notice halfway through shipping 10 PRs that Namespace macOS is faster than GitHub-hosted — use `shipyard cloud retarget`:
+When a provider change would be valuable *during* an in-flight PR drain — e.g., you need to move a lane from an unavailable paid pool back to GitHub-hosted — use `shipyard cloud retarget`:
 
 ```sh
 # Preview first (dry-run by default):
-shipyard cloud retarget --pr 224 --target macos --provider namespace
+shipyard cloud retarget --pr 224 --target macos --provider github-hosted
 
 # Apply when the plan looks right:
-shipyard cloud retarget --pr 224 --target macos --provider namespace --apply
+shipyard cloud retarget --pr 224 --target macos --provider github-hosted --apply
 ```
 
 What it does:
@@ -197,7 +210,7 @@ Sibling to retarget. Use when a ship is already in flight and you realize you wa
 shipyard cloud add-lane --pr 224 --target windows
 
 # Apply when the plan looks right:
-shipyard cloud add-lane --pr 224 --target windows --provider namespace --apply
+shipyard cloud add-lane --pr 224 --target windows --provider github-hosted --apply
 ```
 
 What it does:

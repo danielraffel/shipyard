@@ -87,9 +87,10 @@ fn config_profiles<W: Write>(
         let marker = if row.active { " <- active" } else { "" };
         writeln!(
             stdout,
-            "  {:<10} {}{}",
+            "  {:<10} {}{}{}",
             row.name,
-            row.targets.join(", "),
+            display_list(&row.targets),
+            display_profile_policy(&row),
             marker
         )
         .map_err(|error| CliFailure::new(1, error.to_string()))?;
@@ -151,6 +152,9 @@ struct ProfileRow {
     name: String,
     active: bool,
     targets: Vec<String>,
+    description: Option<String>,
+    focus_platforms: Vec<String>,
+    advisory_platforms: Vec<String>,
 }
 
 fn profile_rows(config: &LoadedConfig) -> Vec<ProfileRow> {
@@ -164,6 +168,9 @@ fn profile_rows(config: &LoadedConfig) -> Vec<ProfileRow> {
             name: name.clone(),
             active: active.as_deref() == Some(name.as_str()),
             targets: profile_targets(body),
+            description: profile_string(body, "description"),
+            focus_platforms: profile_string_array(body, "focus_platforms"),
+            advisory_platforms: profile_string_array(body, "advisory_platforms"),
         })
         .collect()
 }
@@ -177,8 +184,12 @@ fn profile_names(config: &LoadedConfig) -> Vec<String> {
 }
 
 fn profile_targets(value: &TomlValue) -> Vec<String> {
+    profile_string_array(value, "targets")
+}
+
+fn profile_string_array(value: &TomlValue, key: &str) -> Vec<String> {
     value
-        .get("targets")
+        .get(key)
         .and_then(TomlValue::as_array)
         .map(|targets| {
             targets
@@ -188,6 +199,36 @@ fn profile_targets(value: &TomlValue) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn profile_string(value: &TomlValue, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(TomlValue::as_str)
+        .map(ToOwned::to_owned)
+}
+
+fn display_list(items: &[String]) -> String {
+    if items.is_empty() {
+        "-".to_owned()
+    } else {
+        items.join(", ")
+    }
+}
+
+fn display_profile_policy(row: &ProfileRow) -> String {
+    let mut parts = Vec::new();
+    if !row.focus_platforms.is_empty() {
+        parts.push(format!("focus={}", row.focus_platforms.join(",")));
+    }
+    if !row.advisory_platforms.is_empty() {
+        parts.push(format!("advisory={}", row.advisory_platforms.join(",")));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", parts.join("; "))
+    }
 }
 
 fn active_profile(config: &LoadedConfig) -> Option<String> {

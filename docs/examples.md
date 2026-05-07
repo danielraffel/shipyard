@@ -69,7 +69,7 @@ What platforms do you want to validate?
   [x] Windows  (SSH host "win" — reachable, 23ms)
   [x] Linux    (SSH host "ubuntu" — reachable, 847ms)
 
-Cloud failover: fall back to Namespace when VMs are down? [Y/n]
+Cloud failover: fall back to GitHub-hosted Actions when VMs are down? [Y/n]
 
 Writing .shipyard/config.toml... done
 ```
@@ -85,14 +85,14 @@ $ shipyard run
   All green.
 ```
 
-If your VMs are powered off or unreachable, Shipyard automatically falls back
-to Namespace cloud runners — you don't have to do anything:
+If your VMs are powered off or unreachable, Shipyard can fall back to
+GitHub-hosted cloud runners — you don't have to do anything:
 
 ```
 $ shipyard run
   mac     = pass  (local, 3m12s)
-  windows → SSH unreachable → dispatching to Namespace...
-          = pass  (namespace-failover, 8m45s)    ← cloud runner took over
+  windows → SSH unreachable → dispatching to GitHub Actions...
+          = pass  (github-hosted-failover, 8m45s)    ← cloud runner took over
   ubuntu  = pass  (ssh, 4m18s)
   All green.
 ```

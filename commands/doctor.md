@@ -11,7 +11,7 @@ shipyard doctor --json
 
 Parse the JSON output. Report:
 - Which core tools are installed (git, ssh) with versions
-- Which cloud providers are available (gh, nsc)
+- Which cloud providers are available (`gh` required for GitHub, `nsc` optional for Namespace)
 - Overall readiness status
 
 If something is missing, explain how to install it.
