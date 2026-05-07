@@ -6,11 +6,11 @@ on:
       runner_provider:
         description: Runner provider for package smoke jobs
         required: false
-        default: namespace
+        default: github-hosted
         type: choice
         options:
-          - namespace
           - github-hosted
+          - namespace
       linux_runner_selector_json:
         description: Optional JSON string/array for Linux runs-on
         required: false
@@ -45,7 +45,7 @@ jobs:
 
       - id: resolve
         env:
-          REQUESTED_PROVIDER: ${{ inputs.runner_provider || vars.DEFAULT_RUNNER_PROVIDER || 'namespace' }}
+          REQUESTED_PROVIDER: ${{ inputs.runner_provider || vars.DEFAULT_RUNNER_PROVIDER || 'github-hosted' }}
           EXPLICIT_LINUX_RUNNER_SELECTOR_JSON: ${{ inputs.linux_runner_selector_json || '' }}
           # Repo var fallback routes macOS to local self-hosted runner.
           EXPLICIT_MACOS_ARM64_RUNNER_SELECTOR_JSON: ${{ inputs.macos_arm64_runner_selector_json || vars.MACOS_ARM64_LOCAL_SELECTOR_JSON || '' }}

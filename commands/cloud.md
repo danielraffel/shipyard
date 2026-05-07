@@ -27,10 +27,10 @@ When summarizing JSON output, report:
 
 ```bash
 # Swap one lane on an in-flight PR to a new provider:
-shipyard cloud retarget --pr <n> --target macos --provider namespace [--apply]
+shipyard cloud retarget --pr <n> --target macos --provider github-hosted [--apply]
 
 # Add a brand-new lane to an in-flight PR without re-dispatching the matrix:
-shipyard cloud add-lane --pr <n> --target windows [--provider namespace] [--apply]
+shipyard cloud add-lane --pr <n> --target windows [--provider github-hosted] [--apply]
 ```
 
 Both are dry-run by default. `add-lane` is idempotent — if the target is

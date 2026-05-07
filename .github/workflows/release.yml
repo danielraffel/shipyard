@@ -8,11 +8,11 @@ on:
       runner_provider:
         description: Runner provider for release jobs
         required: false
-        default: namespace
+        default: github-hosted
         type: choice
         options:
-          - namespace
           - github-hosted
+          - namespace
       linux_runner_selector_json:
         description: Optional JSON string/array for Linux x64 runs-on
         required: false
@@ -56,7 +56,7 @@ jobs:
 
       - id: resolve
         env:
-          REQUESTED_PROVIDER: ${{ inputs.runner_provider || vars.DEFAULT_RUNNER_PROVIDER || 'namespace' }}
+          REQUESTED_PROVIDER: ${{ inputs.runner_provider || vars.DEFAULT_RUNNER_PROVIDER || 'github-hosted' }}
           EXPLICIT_LINUX_RUNNER_SELECTOR_JSON: ${{ inputs.linux_runner_selector_json || '' }}
           EXPLICIT_LINUX_ARM64_RUNNER_SELECTOR_JSON: ${{ inputs.linux_arm64_runner_selector_json || '' }}
           # Falls back to the MACOS_ARM64_LOCAL_SELECTOR_JSON repo var so the

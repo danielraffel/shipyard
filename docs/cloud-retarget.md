@@ -8,6 +8,11 @@ everything.
 
 Available since Shipyard v0.8.0.
 
+Shipyard's own workflows currently default to GitHub-hosted runners because
+Namespace access is optional and account-dependent. The Namespace examples
+below are still useful when that provider is available; otherwise retarget to
+`github-hosted` or pass explicit self-hosted runner selectors.
+
 ## The use case
 
 You start a ten-PR drain with the topology:

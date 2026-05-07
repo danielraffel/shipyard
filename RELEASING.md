@@ -136,37 +136,36 @@ If any step in that chain fails, the release fails regardless of what
 
 ## Preferred runner provider
 
-Shipyard's own CI defaults to the runner provider configured in the repo variable `DEFAULT_RUNNER_PROVIDER`. Set it once:
+Shipyard's own CI defaults to GitHub-hosted runners. Namespace remains an
+explicit opt-in for accounts that have access, but it is not the safe default.
+If a repo variable was previously set to Namespace, flip it back:
 
 ```sh
-gh variable set DEFAULT_RUNNER_PROVIDER --repo danielraffel/Shipyard --body namespace
+gh variable set DEFAULT_RUNNER_PROVIDER --repo danielraffel/Shipyard --body github-hosted
 ```
 
-Every subsequent PR push, tag push, and scheduled release picks that up without workflow edits. Per-run overrides still work via `gh workflow run ci.yml --ref <branch> -f runner_provider=github-hosted`.
+Every subsequent PR push, tag push, and scheduled release picks that up without
+workflow edits. Per-run overrides still work via
+`gh workflow run ci.yml --ref <branch> -f runner_provider=namespace` when
+Namespace access is available.
 
-**Why Namespace is the preferred default:** GitHub-hosted `macos-15` queues routinely stall shipyard PRs for 10+ minutes during business hours. Namespace's cloud pool (profiles `namespace-profile-generouscorp`, `-macos`, `-windows`) has near-zero queue time and faster macOS ARM machines. The trade-off is per-minute cost — Namespace is not free like GitHub-hosted on public repos — but for an active project the wall-clock-time savings are worth it.
+**Current default:** GitHub-hosted Linux, macOS, and Windows. This is slower
+than a warm paid pool, but it avoids paid Namespace capacity and keeps public
+repo CI available while local/self-hosted runners are being set up.
 
-**When to flip back to `github-hosted`:**
-- Forks / external contributors whose repos don't have the variable set will naturally fall through to `github-hosted` (safe default, no paid surface exposed).
-- If Namespace has an outage: `gh variable delete DEFAULT_RUNNER_PROVIDER` restores `github-hosted` for all future runs without a workflow PR.
+**When to opt into Namespace:**
+- Only when the account has active Namespace access.
+- Only for trusted branches/repos; paid or self-hosted capacity should not run
+  untrusted fork code by default.
 
 The resolution order per target in `ci.yml` / `release.yml` is:
 1. `workflow_dispatch` input (per-run override — all targets).
-2. `vars.DEFAULT_RUNNER_PROVIDER_LINUX` / `_MACOS` / `_WINDOWS` (per-target repo variable).
-3. `vars.DEFAULT_RUNNER_PROVIDER` (repo-wide default).
-4. Hardcoded fallback `github-hosted`.
+2. `vars.DEFAULT_RUNNER_PROVIDER` (repo-wide default).
+3. Hardcoded fallback `github-hosted`.
 
-**Per-target override use case:** If one Namespace profile goes down (e.g. `generouscorp-windows` saturated 2026-04-23, #193) you can route just that platform to `github-hosted` without losing the speed benefit on the healthy profiles:
-
-```sh
-gh variable set DEFAULT_RUNNER_PROVIDER_WINDOWS --repo danielraffel/Shipyard --body github-hosted
-```
-
-Every subsequent run builds Linux + macOS on Namespace and Windows on `windows-latest`. Delete the variable when the outage clears:
-
-```sh
-gh variable delete DEFAULT_RUNNER_PROVIDER_WINDOWS --repo danielraffel/Shipyard
-```
+The workflow also supports explicit `*_runner_selector_json` inputs and the
+`MACOS_ARM64_LOCAL_SELECTOR_JSON` repo variable for routing a trusted macOS leg
+to a local self-hosted runner without making Namespace the provider default.
 
 ## Default path: automatic on merge
 
@@ -233,7 +232,7 @@ The script:
    - Builds Linux x64, Linux ARM64, Windows x64, and macOS ARM64 release candidates
    - Uploads non-macOS binaries plus SHA256 checksums to a draft GitHub Release
    - Leaves macOS signing/upload to `scripts/release-macos-local.sh` unless CI macOS signing is explicitly enabled
-   - Uses the configured runner provider, with Namespace as the preferred default
+   - Uses the configured runner provider, with GitHub-hosted as the safe default
 
 ## Monitoring a release
 
@@ -250,6 +249,8 @@ gh release view v0.1.1 --repo danielraffel/Shipyard
 ```bash
 gh workflow run release.yml --repo danielraffel/Shipyard -f runner_provider=namespace
 ```
+
+Only use this when the Namespace account is active.
 
 ## Version locations
 

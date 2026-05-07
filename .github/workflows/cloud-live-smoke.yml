@@ -6,15 +6,15 @@ on:
       runner_provider:
         description: Runner provider requested by Shipyard cloud dispatch
         required: false
-        default: namespace
+        default: github-hosted
       workflow_runner_provider:
         description: Runner provider for this smoke workflow job
         required: false
-        default: namespace
+        default: github-hosted
         type: choice
         options:
-          - namespace
           - github-hosted
+          - namespace
       workflow_runner_selector_json:
         description: Optional JSON string/array for this smoke workflow runs-on
         required: false
@@ -45,7 +45,7 @@ jobs:
 
       - id: resolve
         env:
-          REQUESTED_PROVIDER: ${{ inputs.workflow_runner_provider || vars.DEFAULT_RUNNER_PROVIDER || 'namespace' }}
+          REQUESTED_PROVIDER: ${{ inputs.workflow_runner_provider || vars.DEFAULT_RUNNER_PROVIDER || 'github-hosted' }}
           EXPLICIT_LINUX_RUNNER_SELECTOR_JSON: ${{ inputs.workflow_runner_selector_json || '' }}
           NAMESPACE_LINUX_RUNS_ON_JSON: ${{ vars.NAMESPACE_LINUX_RUNS_ON_JSON }}
         run: python3 scripts/ci_matrix.py --workflow ci --github-output
