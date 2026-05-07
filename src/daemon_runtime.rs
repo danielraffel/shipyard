@@ -1343,6 +1343,11 @@ fn terminate_daemon_pid(pid: u32, timeout: Duration) -> bool {
     !pid_alive(pid)
 }
 
+#[cfg(not(unix))]
+fn terminate_daemon_pid(_pid: u32, _timeout: Duration) -> bool {
+    true
+}
+
 fn read_log_tail(path: &Path) -> String {
     let Ok(bytes) = fs::read(path) else {
         return String::new();
