@@ -143,6 +143,56 @@ fi
 
 mkdir -p "${INSTALL_DIR}"
 
+prepare_macos_binary() {
+    binary="$1"
+    if [ "${OS}" != "macos" ]; then
+        return 0
+    fi
+    xattr -cr "${binary}" 2>/dev/null || true
+    if command -v codesign >/dev/null 2>&1; then
+        team_line=$(codesign -dv "${binary}" 2>&1 | grep "^TeamIdentifier=") || team_line=""
+        if [ -n "${team_line}" ] && [ "${team_line}" != "TeamIdentifier=not set" ]; then
+            echo "Detected Developer-ID-signed binary (${team_line#TeamIdentifier=}); preserving notarization."
+        else
+            codesign --force --sign - "${binary}" 2>/dev/null || true
+            echo "Detected ad-hoc-signed binary; re-signed locally for Gatekeeper."
+        fi
+    fi
+}
+
+smoke_binary_or_repair() {
+    binary="$1"
+    if [ "${SHIPYARD_SKIP_SMOKE:-0}" = "1" ]; then
+        return 0
+    fi
+    if "${binary}" --version >/dev/null 2>&1; then
+        return 0
+    fi
+    if [ "${OS}" = "macos" ]; then
+        xattr -d com.apple.provenance "${binary}" 2>/dev/null || true
+        sleep 1
+    fi
+    if "${binary}" --version >/dev/null 2>&1; then
+        return 0
+    fi
+    if [ "${OS}" = "macos" ] \
+        && [ "${SHIPYARD_NO_ADHOC_FALLBACK:-0}" != "1" ] \
+        && command -v codesign >/dev/null 2>&1; then
+        team_line=$(codesign -dv "${binary}" 2>&1 | grep "^TeamIdentifier=") || team_line=""
+        if [ -n "${team_line}" ] && [ "${team_line}" != "TeamIdentifier=not set" ]; then
+            echo "WARN: notarized binary would not launch; trying local ad-hoc fallback." >&2
+            xattr -cr "${binary}" 2>/dev/null || true
+            codesign --remove-signature "${binary}" 2>/dev/null || true
+            codesign --force --sign - "${binary}" 2>/dev/null || true
+        fi
+    fi
+    if ! "${binary}" --version >/dev/null 2>&1; then
+        echo "ERROR: ${BINARY_NAME} installed but failed post-install smoke." >&2
+        echo "Run '${binary} --version' manually for details." >&2
+        exit 1
+    fi
+}
+
 DMG_URL=""
 DMG_URL_IS_API=0
 RELEASE_URL=""
@@ -188,11 +238,14 @@ if [ "${SHIPYARD_SKIP_DOWNLOAD:-0}" != "1" ]; then
 fi
 
 DEST="${INSTALL_DIR}/${BINARY_NAME}"
+STAGED_DEST="${INSTALL_DIR}/.${BINARY_NAME}.install.$$"
+trap 'rm -f "${STAGED_DEST:-}"' EXIT
 if [ "${SHIPYARD_SKIP_DOWNLOAD:-0}" = "1" ]; then
     if [ ! -f "${DEST}" ]; then
         echo "SHIPYARD_SKIP_DOWNLOAD=1 but ${DEST} does not exist." >&2
         exit 1
     fi
+    cp "${DEST}" "${STAGED_DEST}"
 elif [ -n "${DMG_URL}" ]; then
     echo "Downloading ${ARTIFACT}.dmg (${VERSION_LABEL})..."
     DMG_TMP="$(mktemp -d)/shipyard.dmg"
@@ -211,56 +264,20 @@ elif [ -n "${DMG_URL}" ]; then
         rm -f "${DMG_TMP}"
         exit 1
     fi
-    cp "${MOUNT_POINT}/${BINARY_NAME}" "${DEST}"
+    cp "${MOUNT_POINT}/${BINARY_NAME}" "${STAGED_DEST}"
     hdiutil detach "${MOUNT_POINT}" >/dev/null 2>&1 || true
     rm -f "${DMG_TMP}"
 else
     echo "Downloading ${ARTIFACT} (${VERSION_LABEL})..."
-    download_asset "${RELEASE_URL}" "${DEST}" "${RELEASE_URL_IS_API}"
+    download_asset "${RELEASE_URL}" "${STAGED_DEST}" "${RELEASE_URL_IS_API}"
 fi
-chmod +x "${DEST}"
+chmod +x "${STAGED_DEST}"
 
-if [ "${OS}" = "macos" ]; then
-    xattr -cr "${DEST}" 2>/dev/null || true
-    if command -v codesign >/dev/null 2>&1; then
-        team_line=$(codesign -dv "${DEST}" 2>&1 | grep "^TeamIdentifier=") || team_line=""
-        if [ -n "${team_line}" ] && [ "${team_line}" != "TeamIdentifier=not set" ]; then
-            echo "Detected Developer-ID-signed binary (${team_line#TeamIdentifier=}); preserving notarization."
-        else
-            codesign --force --sign - "${DEST}" 2>/dev/null || true
-            echo "Detected ad-hoc-signed binary; re-signed locally for Gatekeeper."
-        fi
-    fi
-fi
-
+prepare_macos_binary "${STAGED_DEST}"
+smoke_binary_or_repair "${STAGED_DEST}"
+mv -f "${STAGED_DEST}" "${DEST}"
 ln -sf "${DEST}" "${INSTALL_DIR}/${ALIAS_NAME}"
-
-if [ "${SHIPYARD_SKIP_SMOKE:-0}" != "1" ]; then
-    if ! "${DEST}" --version >/dev/null 2>&1; then
-        if [ "${OS}" = "macos" ]; then
-            xattr -d com.apple.provenance "${DEST}" 2>/dev/null || true
-            sleep 1
-        fi
-        if ! "${DEST}" --version >/dev/null 2>&1; then
-            if [ "${OS}" = "macos" ] \
-                && [ "${SHIPYARD_NO_ADHOC_FALLBACK:-0}" != "1" ] \
-                && command -v codesign >/dev/null 2>&1; then
-                team_line=$(codesign -dv "${DEST}" 2>&1 | grep "^TeamIdentifier=") || team_line=""
-                if [ -n "${team_line}" ] && [ "${team_line}" != "TeamIdentifier=not set" ]; then
-                    echo "WARN: notarized binary would not launch; trying local ad-hoc fallback." >&2
-                    xattr -cr "${DEST}" 2>/dev/null || true
-                    codesign --remove-signature "${DEST}" 2>/dev/null || true
-                    codesign --force --sign - "${DEST}" 2>/dev/null || true
-                fi
-            fi
-            if ! "${DEST}" --version >/dev/null 2>&1; then
-                echo "ERROR: ${BINARY_NAME} installed but failed post-install smoke." >&2
-                echo "Run '${DEST} --version' manually for details." >&2
-                exit 1
-            fi
-        fi
-    fi
-fi
+smoke_binary_or_repair "${DEST}"
 
 echo ""
 echo "Installed ${BINARY_NAME} to ${DEST}"

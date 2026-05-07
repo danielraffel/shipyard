@@ -358,6 +358,70 @@ def test_install_script_skip_download_preserves_production_binary_names(
 
 @pytest.mark.installer
 @pytest.mark.skipif(sys.platform == "win32", reason="uses POSIX shell fakes")
+def test_install_script_replaces_existing_binary_atomically(sandbox: Sandbox) -> None:
+    install_dir = sandbox.home_dir / "install-bin-atomic"
+    install_dir.mkdir()
+    binary = install_dir / BINARY_NAME
+    binary.write_text(
+        "#!/bin/sh\n"
+        "echo 'shipyard 0.0.1-old'\n",
+        encoding="utf-8",
+    )
+    binary.chmod(0o755)
+    old_inode = binary.stat().st_ino
+
+    fake_curl = sandbox.bin_dir / "curl"
+    fake_curl.write_text(
+        "#!/bin/sh\n"
+        "out=''\n"
+        "while [ \"$#\" -gt 0 ]; do\n"
+        "  case \"$1\" in\n"
+        "    -o) out=\"$2\"; shift 2 ;;\n"
+        "    -*) shift ;;\n"
+        "    *) shift ;;\n"
+        "  esac\n"
+        "done\n"
+        "if [ -n \"$out\" ]; then\n"
+        "  cat > \"$out\" <<'SCRIPT'\n"
+        "#!/bin/sh\n"
+        "echo 'shipyard 9.9.9'\n"
+        "SCRIPT\n"
+        "  exit 0\n"
+        "fi\n"
+        "cat <<'JSON'\n"
+        "{\"assets\":[{\"name\":\"shipyard-linux-arm64\",\"browser_download_url\":\"https://example.invalid/shipyard-linux-arm64\"}]}\n"
+        "JSON\n",
+        encoding="utf-8",
+    )
+    fake_curl.chmod(0o755)
+
+    result = subprocess.run(
+        ["bash", str(REPO_ROOT / "install.sh")],
+        cwd=sandbox.work_dir,
+        env={
+            "HOME": str(sandbox.home_dir),
+            "PATH": f"{sandbox.bin_dir}:/usr/bin:/bin:/usr/sbin:/sbin",
+            "SHIPYARD_INSTALL_DIR": str(install_dir),
+            "SHIPYARD_VERSION": "v9.9.9",
+            "SHIPYARD_INSTALL_TEST_UNAME_S": "Linux",
+            "SHIPYARD_INSTALL_TEST_UNAME_M": "aarch64",
+        },
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "Installed shipyard" in result.stdout
+    assert binary.stat().st_ino != old_inode
+    assert (
+        subprocess.check_output([str(binary), "--version"], text=True).strip()
+        == "shipyard 9.9.9"
+    )
+    assert not list(install_dir.glob(f".{BINARY_NAME}.install.*"))
+
+
+@pytest.mark.installer
+@pytest.mark.skipif(sys.platform == "win32", reason="uses POSIX shell fakes")
 def test_install_script_adhoc_fallback_recovers_notarized_launch_failure(
     sandbox: Sandbox,
 ) -> None:
