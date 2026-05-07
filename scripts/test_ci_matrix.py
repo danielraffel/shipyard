@@ -103,6 +103,13 @@ class CiMatrixTests(unittest.TestCase):
         self.assertEqual(json.loads(values["linux_runs_on_json"]), "ubuntu-latest")
         self.assertEqual(values["linux_provider"], "github-hosted")
 
+    def test_workflows_do_not_implicitly_route_macos_to_local_runner(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        workflow_dir = root / ".github" / "workflows"
+        for path in workflow_dir.glob("*.yml"):
+            text = path.read_text(encoding="utf-8")
+            self.assertNotIn("MACOS_ARM64_LOCAL_SELECTOR_JSON", text, path.name)
+
 
 if __name__ == "__main__":
     unittest.main()
