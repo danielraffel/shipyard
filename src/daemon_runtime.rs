@@ -150,6 +150,9 @@ pub fn run_blocking(config: DaemonRunConfig) -> Result<(), DaemonRunError> {
     if read_daemon_status(&config.state_dir).is_some() {
         return Err(DaemonRunError::AlreadyRunning);
     }
+    if live_daemon_pid(&daemon_dir).is_some() {
+        return Err(DaemonRunError::AlreadyRunning);
+    }
     cleanup_stale_runtime_files(&daemon_dir)?;
 
     let _pid_guard = PidFileGuard::acquire(&daemon_dir.join("daemon.pid"))?;
@@ -457,6 +460,9 @@ pub fn spawn_detached(request: &SpawnRequest) -> Result<u32, DaemonSpawnFailedEr
     if read_daemon_status(&request.state_dir).is_some() {
         return Ok(read_pid_file(&daemon_dir.join("daemon.pid")).unwrap_or(0));
     }
+    if let Some(pid) = live_daemon_pid(&daemon_dir) {
+        let _ = terminate_daemon_pid(pid, Duration::from_secs(3));
+    }
     cleanup_stale_runtime_files(&daemon_dir).map_err(|error| io_spawn_error(&error))?;
 
     let log_path = daemon_dir.join("daemon.log");
@@ -537,14 +543,40 @@ pub fn stop_running(state_dir: &Path) -> bool {
         let deadline = Instant::now() + Duration::from_secs(3);
         while Instant::now() < deadline {
             if read_daemon_status(state_dir).is_none() && !socket_path.exists() {
+                #[cfg(unix)]
+                if pid == Some(std::process::id()) {
+                    let _ = fs::remove_file(&pid_path);
+                    return true;
+                }
+                #[cfg(unix)]
+                if pid.is_some_and(pid_alive) {
+                    thread::sleep(Duration::from_millis(100));
+                    continue;
+                }
                 let _ = fs::remove_file(&pid_path);
                 return true;
             }
             thread::sleep(Duration::from_millis(100));
         }
         if read_daemon_status(state_dir).is_none() {
-            let _ = cleanup_stale_runtime_files(&daemon_dir);
-            return true;
+            #[cfg(unix)]
+            if pid == Some(std::process::id()) {
+                let _ = cleanup_stale_runtime_files(&daemon_dir);
+                return true;
+            }
+            #[cfg(unix)]
+            if pid.is_some_and(pid_alive) {
+                // Fall through to pid-based termination below. A daemon whose
+                // socket disappeared while its process survived is not stopped.
+            } else {
+                let _ = cleanup_stale_runtime_files(&daemon_dir);
+                return true;
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = cleanup_stale_runtime_files(&daemon_dir);
+                return true;
+            }
         }
     }
 
@@ -553,14 +585,16 @@ pub fn stop_running(state_dir: &Path) -> bool {
         && pid_alive(pid)
         && process_looks_like_shipyard_daemon(pid)
     {
-        if signal_pid(pid, "-TERM") && wait_until_pid_stops(pid, &pid_path, Duration::from_secs(3))
-        {
+        if signal_pid(pid, "-TERM") && wait_until_pid_stops(pid, Duration::from_secs(3)) {
             let _ = cleanup_stale_runtime_files(&daemon_dir);
             return true;
         }
         if pid_alive(pid) {
             let _ = signal_pid(pid, "-KILL");
-            let _ = wait_until_pid_stops(pid, &pid_path, Duration::from_secs(1));
+            let _ = wait_until_pid_stops(pid, Duration::from_secs(1));
+        }
+        if pid_alive(pid) {
+            return false;
         }
         let _ = cleanup_stale_runtime_files(&daemon_dir);
         return true;
@@ -1205,14 +1239,33 @@ fn read_pid_file(path: &Path) -> Option<u32> {
 
 #[cfg(unix)]
 fn pid_alive(pid: u32) -> bool {
-    Command::new("kill")
+    let signalable = Command::new("kill")
         .arg("-0")
         .arg(pid.to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .is_ok_and(|status| status.success())
+        .is_ok_and(|status| status.success());
+    if !signalable {
+        return false;
+    }
+    let Ok(output) = Command::new("ps")
+        .arg("-p")
+        .arg(pid.to_string())
+        .arg("-o")
+        .arg("stat=")
+        .stdin(Stdio::null())
+        .output()
+    else {
+        return true;
+    };
+    if !output.status.success() {
+        return true;
+    }
+    !String::from_utf8_lossy(&output.stdout)
+        .trim_start()
+        .starts_with('Z')
 }
 
 #[cfg(not(unix))]
@@ -1237,9 +1290,7 @@ fn process_looks_like_shipyard_daemon(pid: u32) -> bool {
     }
 
     let args = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
-    args.contains("shipyard")
-        && args.split_whitespace().any(|part| part == "daemon")
-        && args.split_whitespace().any(|part| part == "run")
+    args.contains("shipyard") && args.contains("daemon") && args.contains("run")
 }
 
 #[cfg(unix)]
@@ -1255,15 +1306,41 @@ fn signal_pid(pid: u32, signal: &str) -> bool {
 }
 
 #[cfg(unix)]
-fn wait_until_pid_stops(pid: u32, pid_path: &Path, timeout: Duration) -> bool {
+fn wait_until_pid_stops(pid: u32, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
-        if !pid_alive(pid) || !pid_path.exists() {
+        if !pid_alive(pid) {
             return true;
         }
         thread::sleep(Duration::from_millis(100));
     }
-    !pid_alive(pid) || !pid_path.exists()
+    !pid_alive(pid)
+}
+
+#[cfg(unix)]
+fn live_daemon_pid(daemon_dir: &Path) -> Option<u32> {
+    let pid = read_pid_file(&daemon_dir.join("daemon.pid"))?;
+    (pid > 0 && pid_alive(pid) && process_looks_like_shipyard_daemon(pid)).then_some(pid)
+}
+
+#[cfg(not(unix))]
+fn live_daemon_pid(_daemon_dir: &Path) -> Option<u32> {
+    None
+}
+
+#[cfg(unix)]
+fn terminate_daemon_pid(pid: u32, timeout: Duration) -> bool {
+    if !pid_alive(pid) {
+        return true;
+    }
+    if signal_pid(pid, "-TERM") && wait_until_pid_stops(pid, timeout) {
+        return true;
+    }
+    if pid_alive(pid) {
+        let _ = signal_pid(pid, "-KILL");
+        let _ = wait_until_pid_stops(pid, Duration::from_secs(1));
+    }
+    !pid_alive(pid)
 }
 
 fn read_log_tail(path: &Path) -> String {
@@ -1865,6 +1942,50 @@ mod tests {
             })
             .expect("child exited");
         assert!(status.success());
+        assert!(!pid_path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stop_running_kills_daemon_that_removes_pid_file_but_survives_term() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let daemon_dir = temp.path().join("daemon");
+        std::fs::create_dir_all(&daemon_dir).expect("daemon dir");
+        let script = temp.path().join("shipyard-daemon-run-stubborn.sh");
+        let pid_path = daemon_dir.join("daemon.pid");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\npid_file=\"$1\"\necho $$ > \"$pid_file\"\ntrap 'rm -f \"$pid_file\"' TERM\nwhile true; do sleep 1; done\n",
+        )
+        .expect("script");
+        let mut child = Command::new("sh")
+            .arg(&script)
+            .arg(&pid_path)
+            .arg("daemon")
+            .arg("run")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("daemon-shaped child");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !pid_path.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(pid_path.exists(), "pid file was not written");
+
+        assert!(stop_running(temp.path()));
+
+        let status = child
+            .wait_timeout(Duration::from_secs(2))
+            .expect("wait")
+            .or_else(|| {
+                let _ = child.kill();
+                child.wait().ok()
+            })
+            .expect("child exited");
+        assert!(!status.success(), "stubborn daemon should require SIGKILL");
+        assert!(!pid_alive(child.id()));
         assert!(!pid_path.exists());
     }
 
