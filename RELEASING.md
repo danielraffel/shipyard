@@ -163,9 +163,10 @@ The resolution order per target in `ci.yml` / `release.yml` is:
 2. `vars.DEFAULT_RUNNER_PROVIDER` (repo-wide default).
 3. Hardcoded fallback `github-hosted`.
 
-The workflow also supports explicit `*_runner_selector_json` inputs and the
-`MACOS_ARM64_LOCAL_SELECTOR_JSON` repo variable for routing a trusted macOS leg
-to a local self-hosted runner without making Namespace the provider default.
+The workflow also supports explicit `*_runner_selector_json` inputs for trusted
+manual runs. There is intentionally no hidden repo-variable fallback to a local
+macOS runner; if you want a self-hosted runner for one run, pass the selector
+explicitly via `workflow_dispatch`.
 
 ## Default path: automatic on merge
 
