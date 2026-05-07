@@ -195,10 +195,10 @@ inspection. `shipyard cleanup --ship-state` ages these out (see T12).
 - **To:** `STATE_FRESH`
 - **Trigger:** `shipyard ship` on a branch
 - **Writes:** `ShipStateStore.save(ShipState(..., dispatched_runs=[], evidence_snapshot={}))` at cli.py:2675 — **before** preflight runs at cli.py:2679
-- **Externals:** `git push -u origin <branch>` at cli.py:2602 (return code ignored — see "External matrix" below), `gh pr list` / `gh pr create` for PR number
+- **Externals:** `git push -u origin <branch>` at cli.py:2602 (return code ignored — see "External matrix" below), `gh pr list` / `gh pr create` for PR number. The Rust implementation falls back to REST `gh api repos/<owner>/<repo>/pulls` when GitHub GraphQL is rate-limited, so PR creation can still produce a tracked ship-state record.
 - **Failure modes**
   - `git push` fails silently → `find_pr_for_branch` may still find an existing PR; the local SHA may not match the remote. A fresh state is saved for a branch whose tip may not be pushed. *Recovery: none automatic — the drift check on the next resume will catch it, but between the stale push and the next resume the state claims a SHA that doesn't exist on the remote.*
-  - `gh pr create` fails → `create_pr` raises `GhError`; `ship` exits without saving state because the save at cli.py:2675 runs only after the PR has been found or created. *Recovery: retry.*
+  - `gh pr create` fails after the REST fallback also fails → `create_pr` raises `GhError`; `ship` exits without saving state because the save at cli.py:2675 runs only after the PR has been found or created. *Recovery: retry or create the PR through REST and run `shipyard ship --pr <n>` to track it.*
   - `save` fails (disk, permission) → `save` raises; tmp file is cleaned up by the `except` branch in `core/ship_state.py`. *Recovery: resolve disk issue, retry.*
 
 ### T2 — Dispatch targets within `_execute_job`
@@ -355,7 +355,7 @@ inspection. `shipyard cleanup --ship-state` ages these out (see T12).
 | `EvidenceStore.record`                 | T3 (via `_record_evidence` at cli.py:4343) | disk full / race | **Does NOT use tmp+replace** — `core/evidence.py:226` writes directly. Phase B: inject disk-full; assert behavior (crash vs. half-written row). Tracked separately from #102. |
 | `queue.json` writes                    | T2, T3              | disk full / kill mid-write   | On `main` today, `Queue._save` writes `queue.json` directly (core/queue.py:119). Fixed in PR #105 (`fix/102-atomic-queue-writes`). Phase B should run against main OR the fix/102 branch depending on test timing. |
 | `git push`                             | T1                  | auth / network               | Return code is ignored. State can be saved for a branch whose tip isn't pushed — drift check on next resume catches it, but the first run proceeds. |
-| `gh pr create` / `gh pr list`          | T1                  | auth / network / rate-limit  | Raises `GhError`; ship aborts before T1 save.                                                                        |
+| `gh pr create` / `gh pr list`          | T1                  | auth / network / rate-limit  | GraphQL rate-limit errors fall back to REST `gh api repos/<owner>/<repo>/pulls`; only auth/network errors or REST fallback failures abort before T1 save. |
 | `gh pr view` (idempotency for `auto-merge`) | T5 (no-state branch only) | auth / network | On failure the command falls through to `pr-not-found`. Not reached when the state file is present.                |
 | `workflow_dispatch`                    | T2, T9, T10         | 404 / 5xx / rate-limit       | Add-lane: exits before mutation. Retarget: if dispatch fails after cancel succeeded, the old lane is gone and no new lane exists. `ship` path goes through `CloudExecutor` inside `_execute_job`. |
 | `find_dispatched_run`                  | T2, T10             | timeout                      | DispatchedRun persisted with `pending-<target>` sentinel. **No backfill path exists.**                              |

@@ -14,6 +14,8 @@ On merge, `.github/workflows/auto-release.yml` detects the `Cargo.toml` package-
 
 Do NOT run `gh pr create` + `shipyard ship` separately. Do NOT run the skill-sync or version-bump scripts by hand — `shipyard pr` invokes them in the right order with the right flags.
 
+If GitHub GraphQL quota is exhausted, Shipyard falls back from `gh pr list/create/view` to the REST Pulls API. That keeps the PR in Shipyard's tracker instead of forcing a manual `gh api` escape hatch that the GUI cannot see.
+
 ```bash
 shipyard pr $ARGUMENTS
 ```
