@@ -13,9 +13,9 @@ Use these entry points instead:
 - Effective cloud workflow/provider resolution: `shipyard cloud defaults --json`
 - Active job and target state: `shipyard status --json`
 
-If the user asks to "switch profiles", "go local", or "go cloud", explain that
-profile switching is not implemented in the CLI yet and make the required config
-file changes explicitly instead of invoking a nonexistent command.
+If the user asks to "switch profiles", "go local", or "go cloud", use
+`shipyard config profiles` to inspect options and `shipyard config use <profile>`
+to switch an existing profile.
 
 Examples:
 
