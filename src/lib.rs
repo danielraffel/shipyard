@@ -64,6 +64,8 @@ pub mod queue;
 pub mod reconcile;
 /// GitHub webhook registration through the user's existing `gh` auth.
 pub mod registrar;
+/// Self-hosted runner watchdog detection logic.
+pub mod runner_watchdog;
 /// Ship execution orchestration helpers.
 pub mod ship;
 /// Durable in-flight ship-state model and store.

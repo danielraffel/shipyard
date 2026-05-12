@@ -51,7 +51,17 @@ shipyard cloud status          # tracked cloud runs
 
 # Branch protection (one-shot)
 shipyard branch apply [--create name] [--base branch] [target_branch]
+
+# Self-hosted runner watchdog
+shipyard runner status                    # one-shot health check (exit 0/1/2)
+shipyard runner cleanup                   # dry-run: list stale queued runs
+shipyard runner cleanup --fix             # cancel stale queued runs
+shipyard runner cleanup --stale-hours 4   # override threshold for this call
+shipyard runner watch                     # poll loop (default 5 min)
+shipyard runner watch --fix               # auto-cancel stale runs each tick
 ```
+
+See `docs/runner-watchdog.md` for the full reference.
 
 ## JSON output
 

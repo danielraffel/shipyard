@@ -301,6 +301,81 @@ pub(super) enum Command {
         #[command(subcommand)]
         command: ShipStateCommand,
     },
+    /// Self-hosted runner watchdog: detect and recover stuck runner state.
+    Runner {
+        /// Runner subcommand.
+        #[command(subcommand)]
+        command: RunnerCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(super) enum RunnerCommand {
+    /// One-shot health check. Exit 0 healthy, 1 stuck, 2 offline.
+    Status {
+        /// Self-hosted runner ID, e.g. 1763. Defaults to `runner.watchdog.runner_id`.
+        #[arg(long = "runner-id")]
+        runner_id: Option<u64>,
+        /// Owner/repo slug. Defaults to the current git repo.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Local actions-runner directory. Defaults to `runner.watchdog.runner_dir`
+        /// or `$HOME/actions-runner`.
+        #[arg(long = "runner-dir")]
+        runner_dir: Option<PathBuf>,
+        /// Warn when a Worker has been running longer than this many minutes.
+        #[arg(long = "max-job-min")]
+        max_job_min: Option<i64>,
+        /// Flag queued runs older than this many hours.
+        #[arg(long = "max-queue-age-hours")]
+        max_queue_age_hours: Option<i64>,
+    },
+    /// Show or cancel stale queued runs older than the threshold.
+    Cleanup {
+        /// Show what would be cancelled without making changes.
+        #[arg(long = "dry-run", action = ArgAction::SetTrue, default_value_t = true)]
+        dry_run: bool,
+        /// Cancel stale queued runs (overrides --dry-run).
+        #[arg(long = "fix")]
+        fix: bool,
+        /// Stale-queue cutoff in hours.
+        #[arg(long = "stale-hours")]
+        stale_hours: Option<i64>,
+        /// Owner/repo slug. Defaults to the current git repo.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Forcibly kill the oldest hung Worker process. Requires --fix and
+        /// two confirmation prompts; never honoured when stdin is not a TTY
+        /// unless --yes is also passed.
+        #[arg(long = "force-kill")]
+        force_kill: bool,
+        /// Bypass the two interactive confirmations for --force-kill. Intended
+        /// for tests; in production this still requires --force-kill.
+        #[arg(long = "yes", hide = true)]
+        yes: bool,
+    },
+    /// Watch loop. Polls every `watch_interval_seconds` until interrupted.
+    Watch {
+        /// Self-hosted runner ID. Defaults to `runner.watchdog.runner_id`.
+        #[arg(long = "runner-id")]
+        runner_id: Option<u64>,
+        /// Owner/repo slug. Defaults to the current git repo.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Local actions-runner directory.
+        #[arg(long = "runner-dir")]
+        runner_dir: Option<PathBuf>,
+        /// Polling cadence in seconds.
+        #[arg(long)]
+        interval: Option<u64>,
+        /// Auto-cancel stale queued runs (still does NOT kill workers).
+        #[arg(long = "fix")]
+        fix: bool,
+        /// Maximum number of iterations to run before exiting. Defaults to
+        /// looping forever. Test hook.
+        #[arg(long = "max-iterations", hide = true)]
+        max_iterations: Option<u32>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Subcommand)]
