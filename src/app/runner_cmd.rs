@@ -98,6 +98,42 @@ pub(super) fn runner_command<W: Write>(
             json,
             stdout,
         ),
+        RunnerCommand::Kill {
+            pid,
+            reason,
+            retrigger,
+            yes,
+            repo,
+            runner_dir,
+            history,
+            last,
+            recover,
+            grace_secs,
+            recovery_log,
+            quarantine_root,
+            no_wait_github,
+        } => super::runner_kill_cmd::kill_command(
+            super::runner_kill_cmd::KillCommandArgs {
+                config,
+                cwd,
+                actions: &actions,
+                pid,
+                reason,
+                retrigger,
+                yes,
+                repo_override: repo,
+                runner_dir_override: runner_dir,
+                history,
+                last,
+                recover,
+                grace_secs,
+                recovery_log_override: recovery_log,
+                quarantine_root_override: quarantine_root,
+                no_wait_github,
+                json,
+            },
+            stdout,
+        ),
     }
 }
 
@@ -594,15 +630,16 @@ fn cancel_stale_inline<W: Write>(
 // ---------- settings / config wiring ----------
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct WatchdogSettings {
-    repo_slug: String,
-    runner_id: Option<u64>,
-    runner_dir: PathBuf,
-    thresholds: WatchdogThresholds,
+pub(super) struct WatchdogSettings {
+    pub(super) repo_slug: String,
+    #[allow(dead_code)]
+    pub(super) runner_id: Option<u64>,
+    pub(super) runner_dir: PathBuf,
+    pub(super) thresholds: WatchdogThresholds,
 }
 
 #[allow(clippy::too_many_arguments)]
-fn resolve_watchdog_settings(
+pub(super) fn resolve_watchdog_settings(
     config: &LoadedConfig,
     cwd: &Path,
     runner_id_override: Option<u64>,

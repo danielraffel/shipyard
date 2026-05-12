@@ -376,6 +376,53 @@ pub(super) enum RunnerCommand {
         #[arg(long = "max-iterations", hide = true)]
         max_iterations: Option<u32>,
     },
+    /// Explicitly kill a hung `Runner.Worker` process with full recovery
+    /// sequence: snapshot, SIGTERM with grace, SIGKILL, reap children,
+    /// quarantine partial build, verify Runner.Listener, optional retrigger.
+    Kill {
+        /// Worker PID to kill. Required unless `--history` or `--recover`.
+        #[arg(long = "pid")]
+        pid: Option<u32>,
+        /// Free-text reason for the kill, recorded in the recovery log.
+        /// Required when `--pid` is set.
+        #[arg(long = "reason")]
+        reason: Option<String>,
+        /// After kill, immediately re-queue the killed PR's CI via
+        /// `gh api .../actions/runs/<id>/rerun-failed-jobs`.
+        #[arg(long = "retrigger")]
+        retrigger: bool,
+        /// Skip the typed "KILL" confirmation prompt. Scripted use only.
+        #[arg(long = "yes")]
+        yes: bool,
+        /// Owner/repo slug. Defaults to the current git repo.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Local actions-runner directory. Defaults to
+        /// `runner.watchdog.runner_dir` or `$HOME/actions-runner`.
+        #[arg(long = "runner-dir")]
+        runner_dir: Option<PathBuf>,
+        /// Print recent kill events from the recovery log and exit.
+        #[arg(long = "history", conflicts_with_all = ["pid", "recover"])]
+        history: bool,
+        /// Limit history output to the most recent N entries.
+        #[arg(long = "last")]
+        last: Option<usize>,
+        /// Recover a previously-quarantined build by kill-event ID.
+        #[arg(long = "recover", conflicts_with_all = ["pid", "history"])]
+        recover: Option<String>,
+        /// Override the SIGTERM-to-SIGKILL grace window in seconds. Test hook.
+        #[arg(long = "grace-secs", hide = true)]
+        grace_secs: Option<u64>,
+        /// Override the recovery log path. Test hook.
+        #[arg(long = "recovery-log", hide = true)]
+        recovery_log: Option<PathBuf>,
+        /// Override the quarantine root directory. Test hook.
+        #[arg(long = "quarantine-root", hide = true)]
+        quarantine_root: Option<PathBuf>,
+        /// Skip the post-kill GitHub status-flip poll. Test hook.
+        #[arg(long = "no-wait-github", hide = true)]
+        no_wait_github: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Subcommand)]

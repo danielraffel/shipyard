@@ -31,6 +31,7 @@ mod queue_cmd;
 mod release_bot_cmd;
 mod run_cmd;
 mod runner_cmd;
+mod runner_kill_cmd;
 mod ship_cmd;
 mod ship_state_cmd;
 mod targets_cmd;

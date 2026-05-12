@@ -394,6 +394,49 @@ impl GitHubActions {
         self.run_gh(&args).map(|_| ())
     }
 
+    /// Re-trigger only the failed jobs in a workflow run. Used by the runner
+    /// kill recovery path to immediately re-queue a PR whose Worker we just
+    /// terminated.
+    pub fn rerun_failed_jobs(&self, repository: &str, run_id: u64) -> Result<(), GitHubError> {
+        let args = vec![
+            "api".to_owned(),
+            "-X".to_owned(),
+            "POST".to_owned(),
+            format!("repos/{repository}/actions/runs/{run_id}/rerun-failed-jobs"),
+        ];
+        self.run_gh(&args).map(|_| ())
+    }
+
+    /// Fetch raw status + conclusion for a workflow run as `(status,
+    /// conclusion)`. Both fields are returned as raw strings, e.g.
+    /// `("completed", "failure")` or `("in_progress", "")`. Used by the runner
+    /// kill recovery path to wait for GitHub to recognise that a killed worker
+    /// has cleared.
+    pub fn run_status_conclusion(
+        &self,
+        repository: &str,
+        run_id: u64,
+    ) -> Result<(String, String), GitHubError> {
+        let args = vec![
+            "api".to_owned(),
+            format!("repos/{repository}/actions/runs/{run_id}"),
+        ];
+        let stdout = self.run_gh(&args)?;
+        let value: Value = serde_json::from_str(&stdout)
+            .map_err(|error| GitHubError::new(format!("failed to parse run JSON: {error}")))?;
+        let status = value
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let conclusion = value
+            .get("conclusion")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        Ok((status, conclusion))
+    }
+
     /// List queued workflow runs for a repository.
     pub fn list_queued_runs(
         &self,
