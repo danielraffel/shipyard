@@ -3,11 +3,12 @@
 
 [project]
 name = "shipyard"
-type = "python"
+type = "rust"
 platforms = ["macos", "linux", "windows"]
 
+# What CI runs (see .github/workflows/ci.yml). Keep in sync.
 [validation.default]
-command = "pip install -e '.[dev]' && pytest && ruff check src/"
+command = "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --all-targets --locked"
 
 [targets.mac]
 backend = "local"

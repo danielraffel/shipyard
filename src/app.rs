@@ -118,6 +118,7 @@ fn run_with<W: Write, E: Write>(cli: Cli, stdout: &mut W, stderr: &mut E) -> Exi
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn dispatch<W: Write, E: Write>(
     cli: Cli,
     stdout: &mut W,
@@ -180,6 +181,7 @@ fn dispatch<W: Write, E: Write>(
         Command::Doctor {
             release_chain,
             runners,
+            rate_limit,
         } => {
             handle_doctor_command(
                 cli.json,
@@ -188,6 +190,7 @@ fn dispatch<W: Write, E: Write>(
                 &runtime_paths.state_dir,
                 release_chain,
                 runners,
+                rate_limit,
                 stdout,
             )?;
         }
@@ -380,6 +383,7 @@ fn handle_paths_command<W: Write>(
     .map_err(|error| CliFailure::new(1, error.to_string()))
 }
 
+#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
 fn handle_doctor_command<W: Write>(
     json: bool,
     mode: RuntimeMode,
@@ -387,10 +391,20 @@ fn handle_doctor_command<W: Write>(
     state_dir: &Path,
     release_chain: bool,
     runners: bool,
+    rate_limit: bool,
     stdout: &mut W,
 ) -> Result<(), CliFailure> {
-    doctor(json, mode, cwd, state_dir, release_chain, runners, stdout)
-        .map_err(|error| CliFailure::new(1, error.to_string()))
+    doctor(
+        json,
+        mode,
+        cwd,
+        state_dir,
+        release_chain,
+        runners,
+        rate_limit,
+        stdout,
+    )
+    .map_err(|error| CliFailure::new(1, error.to_string()))
 }
 
 fn handle_daemon_command<W: Write>(

@@ -93,7 +93,7 @@ pub(super) fn execute_auto_merge(
                 request.merge_method,
                 request.delete_branch,
                 request.admin,
-                request.merge_command.clone(),
+                request.merge_command.as_deref(),
                 request.merge_result,
             ) {
                 if merge_error_confirms_merged(&error)
@@ -256,7 +256,7 @@ fn merge_pr(
     merge_method: MergeMethod,
     delete_branch: bool,
     admin: bool,
-    merge_command: Option<PathBuf>,
+    merge_command: Option<&Path>,
     merge_result: Option<MergeResult>,
 ) -> Result<(), String> {
     match merge_result {
@@ -266,7 +266,8 @@ fn merge_pr(
     }
 
     let custom_command = merge_command.is_some();
-    let mut command = Command::new(merge_command.unwrap_or_else(|| PathBuf::from("gh")));
+    let mut command =
+        Command::new(merge_command.map_or_else(|| PathBuf::from("gh"), Path::to_path_buf));
     if !custom_command {
         command.args(["pr", "merge", &pr.to_string()]);
     }
@@ -286,7 +287,129 @@ fn merge_pr(
     }
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    Err(if stderr.is_empty() { stdout } else { stderr })
+    let message = if stderr.is_empty() { stdout } else { stderr };
+
+    // GraphQL exhausted but REST still has budget? `gh pr merge` uses GraphQL
+    // for the merge state probe; the actual merge atom is REST
+    // (PUT /repos/:r/pulls/:n/merge), so fall back to a direct REST call
+    // rather than failing the ship. Matches src/pr.rs's pattern for
+    // gh pr list / create / view.
+    if !custom_command && crate::pr::is_graphql_rate_limited(&message) {
+        return merge_pr_rest(pr, cwd, merge_method, delete_branch);
+    }
+    Err(message)
+}
+
+/// REST fallback for `gh pr merge` when GraphQL is rate-limited.
+///
+/// `gh pr merge` queries the PR's mergeable state via GraphQL before issuing
+/// the actual merge POST. When GraphQL is at 0/5000 the call fails, but
+/// REST is independent (`PUT /repos/:repo/pulls/:n/merge`) and usually has
+/// budget left. This function bypasses the GraphQL probe and calls REST
+/// directly through `gh api`, then optionally deletes the head branch the
+/// same way `gh pr merge --delete-branch` would.
+fn merge_pr_rest(
+    pr: u64,
+    cwd: &Path,
+    merge_method: MergeMethod,
+    delete_branch: bool,
+) -> Result<(), String> {
+    let repo = repo_slug_for_rest(cwd)?;
+    let endpoint = format!("repos/{repo}/pulls/{pr}/merge");
+    let output = Command::new("gh")
+        .args([
+            "api",
+            "-X",
+            "PUT",
+            &endpoint,
+            "-f",
+            &format!("merge_method={}", merge_method.rest_value()),
+        ])
+        .current_dir(cwd)
+        .output()
+        .map_err(|error| format!("REST fallback: failed to invoke gh api: {error}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        return Err(format!(
+            "REST fallback: gh api PUT {endpoint} failed: {}",
+            if stderr.is_empty() { stdout } else { stderr }
+        ));
+    }
+    if delete_branch && let Ok(branch) = pr_head_branch_rest(&repo, pr, cwd) {
+        // Best-effort delete; mirrors `gh pr merge --delete-branch` which
+        // also tolerates a missing branch silently.
+        let _ = Command::new("gh")
+            .args([
+                "api",
+                "-X",
+                "DELETE",
+                &format!("repos/{repo}/git/refs/heads/{branch}"),
+            ])
+            .current_dir(cwd)
+            .status();
+    }
+    Ok(())
+}
+
+fn repo_slug_for_rest(cwd: &Path) -> Result<String, String> {
+    let output = Command::new("git")
+        .args(["config", "--get", "remote.origin.url"])
+        .current_dir(cwd)
+        .output()
+        .map_err(|error| format!("REST fallback: git remote probe failed: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "REST fallback: git remote probe failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let remote = String::from_utf8_lossy(&output.stdout);
+    parse_github_remote_slug(remote.trim()).ok_or_else(|| {
+        format!(
+            "REST fallback: remote.origin.url is not a supported GitHub remote: {}",
+            remote.trim()
+        )
+    })
+}
+
+fn parse_github_remote_slug(remote: &str) -> Option<String> {
+    let mut slug = remote
+        .strip_prefix("git@github.com:")
+        .or_else(|| remote.strip_prefix("ssh://git@github.com/"))
+        .or_else(|| remote.strip_prefix("https://github.com/"))
+        .or_else(|| remote.strip_prefix("http://github.com/"))?
+        .trim_end_matches('/')
+        .to_owned();
+    if let Some(stripped) = slug.strip_suffix(".git") {
+        slug = stripped.to_owned();
+    }
+    if slug.split('/').count() != 2 {
+        return None;
+    }
+    Some(slug)
+}
+
+fn pr_head_branch_rest(repo: &str, pr: u64, cwd: &Path) -> Result<String, String> {
+    let output = Command::new("gh")
+        .args(["api", &format!("repos/{repo}/pulls/{pr}")])
+        .current_dir(cwd)
+        .output()
+        .map_err(|error| format!("REST fallback: gh api PR fetch failed: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "REST fallback: gh api repos/{repo}/pulls/{pr} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let value: Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("REST fallback: failed to parse PR JSON: {error}"))?;
+    value
+        .get("head")
+        .and_then(|head| head.get("ref"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| "REST fallback: PR JSON missing head.ref".to_owned())
 }
 
 fn merge_error_confirms_merged(message: &str) -> bool {

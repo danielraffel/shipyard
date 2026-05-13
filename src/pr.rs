@@ -315,7 +315,12 @@ fn selector_pr_number(selector: &str) -> Option<u64> {
         .and_then(|part| part.parse::<u64>().ok())
 }
 
-fn is_graphql_rate_limited(message: &str) -> bool {
+/// Detect the surface-level marker of a GraphQL rate-limit exhaustion in
+/// `gh` stderr. Used by `src/pr.rs` (existing) and `src/app/auto_merge_cmd.rs`
+/// to opt into a REST fallback when GraphQL is at 0/5000 but REST still has
+/// budget.
+#[must_use]
+pub(crate) fn is_graphql_rate_limited(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     lower.contains("graphql") && lower.contains("rate limit")
 }
