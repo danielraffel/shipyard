@@ -30,6 +30,8 @@ mod quarantine_cmd;
 mod queue_cmd;
 mod release_bot_cmd;
 mod run_cmd;
+mod runner_cmd;
+mod runner_kill_cmd;
 mod ship_cmd;
 mod ship_state_cmd;
 mod targets_cmd;
@@ -61,6 +63,7 @@ use self::run_cmd::{
     FailFastMode, ReachabilityPolicy, RootMismatchPolicy, RunCommandArgs, TreeDriftPolicy,
     WarmPolicy, run_command,
 };
+use self::runner_cmd::runner_command;
 use self::ship_cmd::{ShipCommandArgs, ship_command};
 use self::ship_state_cmd::{
     ship_state_discard, ship_state_list, ship_state_reconcile, ship_state_show,
@@ -256,6 +259,7 @@ fn handle_operational_variant<W: Write>(
             handle_ship_state_variant(&command, &runtime_paths.state_dir, json, stdout)?;
             Ok(ExitCode::SUCCESS)
         }
+        Command::Runner { command } => handle_runner_command(command, mode, cwd, json, stdout),
         Command::Paths
         | Command::Pin { .. }
         | Command::Config { .. }
@@ -396,6 +400,18 @@ fn handle_wait_command<W: Write>(
     stdout: &mut W,
 ) -> Result<ExitCode, CliFailure> {
     wait_command(command, mode, daemon_socket, cwd, json, stdout)
+}
+
+fn handle_runner_command<W: Write>(
+    command: self::cli::RunnerCommand,
+    mode: RuntimeMode,
+    cwd: &Path,
+    json: bool,
+    stdout: &mut W,
+) -> Result<ExitCode, CliFailure> {
+    let config = crate::config::LoadedConfig::load_from_cwd(mode, cwd)
+        .map_err(|error| CliFailure::new(1, error.to_string()))?;
+    runner_command(command, &config, cwd, json, stdout)
 }
 
 struct AutoMergeInvocation {

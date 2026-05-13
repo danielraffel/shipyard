@@ -36,6 +36,10 @@ shipyard changelog init    # opt in to post-release CHANGELOG auto-sync
 - **22 ecosystem detectors.** `shipyard init` recognises CMake, Swift,
   Xcode, Rust, Go, Node (pnpm/bun/yarn/npm), Python (uv/poetry/pip),
   Gradle, Maven, .NET, Flutter, Dart, Deno, Ruby, Elixir, PHP.
+- **Self-hosted runner watchdog.** `shipyard runner status` /
+  `cleanup --fix` / `watch --fix` detect and auto-recover the
+  stuck-runner failure mode (orphaned busy state, hung worker, stale
+  queued runs). See [docs/runner-watchdog.md](docs/runner-watchdog.md).
 
 ## Installation
 

@@ -53,6 +53,77 @@ python3 scripts/finish_line_status.py \
   --json
 ```
 
+## Runner Watchdog (self-hosted runner recovery)
+
+Shipyard ships a `runner` subcommand family for detecting and recovering from
+stuck self-hosted GitHub Actions runner state. Built after the 2026-05-12
+incident where a UBSan job from a closed branch wedged Pulp's local runner for
+>75 min while 17 stale queued runs piled up behind it, blocking PR #1859 for
+hours.
+
+### When to reach for it
+
+- Runner reports `busy=true` to GitHub but no Worker process running locally
+- Worker process running >90 min on a job that should take ~20-30 min
+- Queue depth growing while runner appears stalled
+- Stale queued runs from closed/rebased branches monopolizing the runner
+
+### Safe commands (read-only or advisory)
+
+- `shipyard runner status` — one-shot health check, exit 0/1/2, `--json` supported
+- `shipyard runner cleanup --dry-run` — list stale queued runs without cancelling
+- `shipyard runner watch` — advisory daemon mode, polls every 5 min
+
+### Mutating commands (require explicit flags)
+
+- `shipyard runner cleanup --fix` — cancel stale queued runs (1s gap between cancels)
+- `shipyard runner watch --fix` — auto-recovery loop (cron-friendly)
+- `shipyard runner kill --pid X --reason "..."` — kill a specific Worker; requires typed `KILL` confirmation
+
+### `runner kill` recovery sequence
+
+10 steps, all reversible. **Nothing is destroyed.**
+
+1. Snapshot kill event to `~/.shipyard/kill-recovery.jsonl`
+2. Typed `KILL` confirmation (skip with `--yes`)
+3. SIGTERM with 10s grace (configurable via `--grace-secs`)
+4. SIGKILL only if still alive
+5. Reap orphaned children (`cmake|ninja|make|ctest|build`)
+6. **Move** (not delete) partial `build*` dirs to `/tmp/shipyard-killed-builds/<event-id>/`
+7. Verify `Runner.Listener` health via `pgrep`
+8. Poll GitHub for status flip to `completed`/`failure`
+9. Optional `--retrigger` re-queues the killed PR's CI
+10. Print recovery summary with `--recover` invocation hint
+
+A misclick costs ~2 min of cmake re-configure. To recover:
+`shipyard runner kill --recover <event-id>` walks the quarantined `build*` dir
+back to `_work/<repo>/` and re-queues the killed run.
+
+### Gotchas
+
+- The watchdog's `busy=true but no Worker process` check has a brief 1-5 min
+  false-positive window after `cleanup --fix` cancels a run — the runner needs
+  time to gracefully exit. Don't double-cancel.
+- `runner kill --pid` REFUSES non-Runner.Worker PIDs as a safety check. Override
+  via `--runner-dir` only if your install path is non-standard.
+- The `concurrency: cancel-in-progress: true` workflow setting SHOULD auto-cancel
+  on force-push but doesn't always (Pulp issue #1884). The watchdog's stale-queue
+  detection catches the consequences.
+
+### Config
+
+Per-machine overrides in `.shipyard.local/config.toml`:
+
+```toml
+[runner.watchdog]
+runner_id = 1763
+runner_dir = "/Users/me/actions-runner"
+max_job_min = 90
+max_queue_age_hours = 2
+watch_interval_seconds = 300
+auto_fix = false
+```
+
 ## Validation Gates
 
 Prefer non-mutating checks first:

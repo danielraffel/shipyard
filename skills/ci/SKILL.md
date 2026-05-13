@@ -38,6 +38,13 @@ Shipyard coordinates validation across local, SSH, and cloud targets.
 | Show queue and status | `shipyard status --json` |
 | Show all queued jobs | `shipyard queue --json` |
 | Show run logs | `shipyard logs <job_id> --json` |
+| **Runner watchdog: health check** | `shipyard runner status --repo <r> --runner-id <id>` |
+| **Runner watchdog: list stale queued runs (dry-run)** | `shipyard runner cleanup --dry-run` |
+| **Runner watchdog: cancel stale queued runs** | `shipyard runner cleanup --fix` |
+| **Runner watchdog: daemon mode** | `shipyard runner watch --fix` |
+| **Stuck-runner: kill specific worker (with recovery)** | `shipyard runner kill --pid <pid> --reason "..." [--retrigger]` |
+| **Stuck-runner: review past kills** | `shipyard runner kill --history` |
+| **Stuck-runner: restore quarantined build after a misclick** | `shipyard runner kill --recover <event-id>` |
 | Show logs for one target | `shipyard logs <job_id> --target windows` |
 | Check merge readiness | `shipyard evidence --json` |
 | Bump job priority | `shipyard bump <job_id> high` |
