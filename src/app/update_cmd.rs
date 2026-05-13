@@ -229,7 +229,7 @@ fn apply_update<W: Write>(
         format!("Updating from {installed} to {target_tag} via {install_script_url} …")
     })?;
 
-    invoke_install_script(&curl_bin, &shell_bin, install_script_url, target_tag)?;
+    invoke_install_script(&curl_bin, &shell_bin, install_script_url, target_tag, json)?;
 
     let mut data = BTreeMap::new();
     data.insert("event".to_owned(), Value::from("applied"));
@@ -248,6 +248,7 @@ fn invoke_install_script(
     shell_bin: &Path,
     install_script_url: &str,
     target_tag: &str,
+    json: bool,
 ) -> Result<(), CliFailure> {
     let mut curl = Command::new(curl_bin)
         .args(["-fsSL", install_script_url])
@@ -261,11 +262,31 @@ fn invoke_install_script(
         .take()
         .ok_or_else(|| CliFailure::new(1, "curl stdout pipe missing"))?;
 
+    // Under `--json`, route installer progress to stderr so the stdout
+    // stream stays a clean sequence of JSON envelopes for downstream
+    // automation. In human mode, keep the installer's stdout visible so
+    // the user sees the progress bar.
+    let install_stdout = if json {
+        // Inherit our own stderr — install.sh's stdout becomes our stderr.
+        // `Stdio::from(std::io::stderr())` would consume our stderr handle;
+        // duplicate the parent stderr fd instead.
+        Stdio::from(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open("/dev/stderr")
+                .map_err(|error| {
+                    CliFailure::new(1, format!("failed to open /dev/stderr: {error}"))
+                })?,
+        )
+    } else {
+        Stdio::inherit()
+    };
+
     let env_tag = target_tag.strip_prefix('v').unwrap_or(target_tag);
     let mut sh = Command::new(shell_bin)
         .env("SHIPYARD_VERSION", env_tag)
         .stdin(curl_stdout)
-        .stdout(Stdio::inherit())
+        .stdout(install_stdout)
         .stderr(Stdio::inherit())
         .spawn()
         .map_err(|error| CliFailure::new(1, format!("failed to spawn shell: {error}")))?;

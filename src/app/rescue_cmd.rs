@@ -13,7 +13,11 @@ use crate::cloud::{GitHubActions, QueuedRun, discover_workflows, resolve_cloud_d
 use crate::config::LoadedConfig;
 use crate::output::write_json_envelope;
 
-const RESCUE_LIST_LIMIT: u32 = 50;
+/// Cap on the number of paginated `gh api` calls per rescue invocation.
+/// Each page is 100 items, so the worst case is 500 queued + 500 completed
+/// runs scanned. In practice we expect early termination on the first
+/// short page.
+const RESCUE_LIST_MAX_PAGES: u32 = 5;
 const RESCUE_EVENT: &str = "cloud.rescue";
 
 /// Outcome of attempting to rescue a single workflow run.
@@ -147,7 +151,7 @@ fn collect_candidates(
     now: DateTime<Utc>,
 ) -> Result<Vec<Candidate>, CliFailure> {
     let queued = actions
-        .list_queued_runs(repo_slug, RESCUE_LIST_LIMIT)
+        .list_queued_runs_paginated(repo_slug, RESCUE_LIST_MAX_PAGES)
         .map_err(|error| CliFailure::new(1, format!("Could not list queued runs: {error}")))?;
     let stuck = filter_stuck_queued(&queued, branch, threshold_secs, now);
     let mut candidates: Vec<Candidate> = stuck
@@ -161,7 +165,7 @@ fn collect_candidates(
         return Ok(candidates);
     }
     let completed = actions
-        .list_runs_with_status(repo_slug, "completed", branch, RESCUE_LIST_LIMIT)
+        .list_runs_with_status_paginated(repo_slug, "completed", branch, RESCUE_LIST_MAX_PAGES)
         .map_err(|error| CliFailure::new(1, format!("Could not list completed runs: {error}")))?;
     for run in completed {
         if !matches_branch(&run, branch) {
@@ -437,11 +441,22 @@ fn run_age_secs(run: &QueuedRun, now: DateTime<Utc>) -> Option<i64> {
     Some((now - created.with_timezone(&Utc)).num_seconds())
 }
 
+/// Extract a workflow filename from a workflow-run `path` field.
+///
+/// GitHub's Actions API returns `path` values like
+/// `.github/workflows/ci.yml@refs/heads/main` or
+/// `.github/workflows/ci.yml@main`; only the `ci.yml` portion matches the
+/// `WorkflowDefinition::file` we discovered locally. The `@<ref>` suffix
+/// must be stripped *before* taking the basename — a ref like
+/// `refs/heads/main` contains slashes, which `Path::file_name` would
+/// otherwise read as nested directories and return `main`. Strip the
+/// `@<ref>` first so the basename is computed against the file path alone.
 fn workflow_filename(path: &str) -> String {
-    Path::new(path)
+    let file_segment = path.split_once('@').map_or(path, |(file, _ref)| file);
+    Path::new(file_segment)
         .file_name()
         .and_then(|value| value.to_str())
-        .unwrap_or(path)
+        .unwrap_or(file_segment)
         .to_owned()
 }
 
@@ -517,6 +532,24 @@ mod tests {
             status: status.to_owned(),
             conclusion: conclusion.map(ToOwned::to_owned),
         }
+    }
+
+    #[test]
+    fn workflow_filename_strips_ref_suffix() {
+        // GitHub's Actions API returns path with `@<ref>` appended in many
+        // common cases. We must strip it or workflow lookup fails.
+        assert_eq!(
+            workflow_filename(".github/workflows/ci.yml@refs/heads/main"),
+            "ci.yml"
+        );
+        assert_eq!(
+            workflow_filename(".github/workflows/release.yml@main"),
+            "release.yml"
+        );
+        assert_eq!(workflow_filename("ci.yml@v0.53.0"), "ci.yml");
+        // Bare filenames and paths without @ref still work.
+        assert_eq!(workflow_filename(".github/workflows/ci.yml"), "ci.yml");
+        assert_eq!(workflow_filename("ci.yml"), "ci.yml");
     }
 
     #[test]
