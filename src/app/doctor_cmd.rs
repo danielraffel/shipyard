@@ -12,6 +12,7 @@ use crate::doctor::{
 use crate::identity::RuntimeMode;
 use crate::output::write_json_envelope;
 
+#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
 pub(super) fn doctor<W: Write>(
     json: bool,
     mode: RuntimeMode,
@@ -19,6 +20,7 @@ pub(super) fn doctor<W: Write>(
     state_dir: &Path,
     release_chain: bool,
     runners: bool,
+    rate_limit: bool,
     stdout: &mut W,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut report = collect_report(&SystemCommandProbe, cwd, state_dir);
@@ -37,6 +39,12 @@ pub(super) fn doctor<W: Write>(
         if let Some(section) = runner_section {
             report.checks.insert("Runners".to_owned(), section);
         }
+    }
+    if rate_limit {
+        let entries = collect_rate_limit_section(cwd);
+        report
+            .checks
+            .insert("GitHub rate limits".to_owned(), entries);
     }
     if json {
         let mut data = BTreeMap::new();
@@ -89,13 +97,128 @@ fn write_human_report<W: Write>(stdout: &mut W, report: DoctorReport) -> std::io
     Ok(())
 }
 
+fn collect_rate_limit_section(cwd: &Path) -> BTreeMap<String, crate::doctor::DoctorEntry> {
+    use std::process::Command;
+    let raw = Command::new("gh")
+        .args(["api", "rate_limit"])
+        .current_dir(cwd)
+        .output();
+    let mut entries: BTreeMap<String, crate::doctor::DoctorEntry> = BTreeMap::new();
+    match raw {
+        Ok(output) if output.status.success() => {
+            let parsed: Result<Value, _> = serde_json::from_slice(&output.stdout);
+            match parsed {
+                Ok(value) => {
+                    for bucket in ["core", "graphql"] {
+                        let entry = rate_limit_entry(&value, bucket);
+                        entries.insert(rate_limit_label(bucket), entry);
+                    }
+                }
+                Err(error) => {
+                    entries.insert(
+                        "rate_limit".to_owned(),
+                        crate::doctor::DoctorEntry {
+                            ok: false,
+                            version: None,
+                            detail: None,
+                            error: Some(format!("failed to parse `gh api rate_limit`: {error}")),
+                        },
+                    );
+                }
+            }
+        }
+        Ok(output) => {
+            entries.insert(
+                "rate_limit".to_owned(),
+                crate::doctor::DoctorEntry {
+                    ok: false,
+                    version: None,
+                    detail: None,
+                    error: Some(format!(
+                        "`gh api rate_limit` exited non-zero: {}",
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    )),
+                },
+            );
+        }
+        Err(error) => {
+            entries.insert(
+                "rate_limit".to_owned(),
+                crate::doctor::DoctorEntry {
+                    ok: false,
+                    version: None,
+                    detail: None,
+                    error: Some(format!("failed to invoke gh: {error}")),
+                },
+            );
+        }
+    }
+    entries
+}
+
+fn rate_limit_label(bucket: &str) -> String {
+    match bucket {
+        "core" => "REST (core)".to_owned(),
+        "graphql" => "GraphQL".to_owned(),
+        other => other.to_owned(),
+    }
+}
+
+fn rate_limit_entry(value: &Value, bucket: &str) -> crate::doctor::DoctorEntry {
+    let Some(node) = value
+        .get("resources")
+        .and_then(|res| res.get(bucket))
+        .and_then(Value::as_object)
+    else {
+        return crate::doctor::DoctorEntry {
+            ok: false,
+            version: None,
+            detail: None,
+            error: Some(format!("rate_limit response missing resources.{bucket}")),
+        };
+    };
+    let remaining = node.get("remaining").and_then(Value::as_u64).unwrap_or(0);
+    let limit = node.get("limit").and_then(Value::as_u64).unwrap_or(0);
+    let reset_epoch = node.get("reset").and_then(Value::as_u64).unwrap_or(0);
+    let reset_relative = relative_reset(reset_epoch);
+    let summary = format!("{remaining}/{limit} remaining (resets in {reset_relative})");
+    let degraded = limit > 0 && remaining < limit / 10;
+    crate::doctor::DoctorEntry {
+        ok: !degraded,
+        version: Some(summary),
+        detail: degraded.then(|| {
+            "Bucket is < 10% of quota. Use the OTHER bucket if you have an option: `shipyard auto-merge` and `shipyard wait pr` accept REST fallbacks; `shipyard rescue` and `gh api` are REST-only.".to_owned()
+        }),
+        error: None,
+    }
+}
+
+fn relative_reset(reset_epoch: u64) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    if reset_epoch <= now {
+        return "now".to_owned();
+    }
+    let secs = reset_epoch - now;
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
 
     use crate::doctor::{DoctorEntry, DoctorReport};
 
-    use super::write_human_report;
+    use super::{rate_limit_entry, relative_reset, write_human_report};
+    use serde_json::json;
 
     #[test]
     fn human_doctor_renders_detail_for_failing_rows() {
@@ -136,5 +259,53 @@ mod tests {
         assert!(text.contains("    Reinstall using install.sh."));
         assert!(text.contains("    Run: curl ... | bash"));
         assert!(!text.contains("hidden detail"));
+    }
+
+    #[test]
+    fn rate_limit_entry_renders_remaining_versus_limit() {
+        let value = json!({
+            "resources": {
+                "core": {"remaining": 4826, "limit": 5000, "reset": 0},
+                "graphql": {"remaining": 0, "limit": 5000, "reset": 0},
+            }
+        });
+        let core = rate_limit_entry(&value, "core");
+        let graphql = rate_limit_entry(&value, "graphql");
+        assert!(core.ok);
+        assert!(core.version.as_deref().unwrap().contains("4826/5000"));
+        assert!(!graphql.ok);
+        assert!(graphql.version.as_deref().unwrap().contains("0/5000"));
+        // Detail should explain the asymmetry on the degraded bucket.
+        assert!(graphql.detail.as_deref().unwrap().contains("OTHER bucket"));
+    }
+
+    #[test]
+    fn rate_limit_entry_handles_missing_bucket() {
+        let value = json!({"resources": {}});
+        let entry = rate_limit_entry(&value, "core");
+        assert!(!entry.ok);
+        assert!(entry.error.as_deref().unwrap().contains("resources.core"));
+    }
+
+    #[test]
+    fn relative_reset_returns_now_for_past_epoch() {
+        assert_eq!(relative_reset(0), "now");
+    }
+
+    #[test]
+    fn relative_reset_formats_seconds_minutes_hours() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        // future reset 45s out
+        let s = relative_reset(now + 45);
+        assert!(s.ends_with('s') && !s.contains('m'));
+        // future reset 90s out → minutes+seconds
+        let ms = relative_reset(now + 90);
+        assert!(ms.contains('m'));
+        // future reset 1h+ out → hours+minutes
+        let hm = relative_reset(now + 3700);
+        assert!(hm.contains('h'));
     }
 }

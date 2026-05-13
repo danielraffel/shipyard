@@ -47,6 +47,7 @@ use crate::webhook::{decode_webhook_event, is_valid_signature};
 
 #[cfg(unix)]
 const SHIP_STATE_SCAN_INTERVAL: Duration = Duration::from_secs(1);
+const WEBHOOK_REGISTRATION_RETRY_INTERVAL: Duration = Duration::from_mins(5);
 
 /// Foreground daemon runtime configuration.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -143,6 +144,7 @@ pub fn resolve_repos(state_dir: &Path, explicit_repos: &[String]) -> Vec<String>
 
 /// Run the daemon in the foreground until a stop request arrives.
 #[cfg(unix)]
+#[allow(clippy::too_many_lines)]
 pub fn run_blocking(config: DaemonRunConfig) -> Result<(), DaemonRunError> {
     let daemon_dir = config.state_dir.join("daemon");
     fs::create_dir_all(&daemon_dir)?;
@@ -197,7 +199,7 @@ pub fn run_blocking(config: DaemonRunConfig) -> Result<(), DaemonRunError> {
     let mut next_reconcile_at = Instant::now() + initial_reconcile_delay();
     let mut previous_states = ship_state_map(&ship_dir);
     let mut next_ship_state_scan_at = Instant::now() + SHIP_STATE_SCAN_INTERVAL;
-    let mut active_registration_url = None;
+    let mut registration_sync = RegistrationSyncState::default();
     while running.load(Ordering::Acquire) {
         drain_webhook_events(
             &webhook_rx,
@@ -211,7 +213,8 @@ pub fn run_blocking(config: DaemonRunConfig) -> Result<(), DaemonRunError> {
             &registrar,
             &registration_error,
             &repos,
-            &mut active_registration_url,
+            &mut registration_sync,
+            Instant::now(),
         );
 
         while let Ok(result) = reconcile_rx.try_recv() {
@@ -221,7 +224,8 @@ pub fn run_blocking(config: DaemonRunConfig) -> Result<(), DaemonRunError> {
         }
 
         let now = Instant::now();
-        if !reconcile_in_flight && now >= next_reconcile_at {
+        let has_subscribers = server.subscriber_count() > 0;
+        if should_start_reconcile(has_subscribers, reconcile_in_flight, now, next_reconcile_at) {
             reconcile_in_flight = true;
             next_reconcile_at = now + Duration::from_secs(RECONCILE_INTERVAL_SECONDS);
             start_reconcile_worker(
@@ -229,6 +233,10 @@ pub fn run_blocking(config: DaemonRunConfig) -> Result<(), DaemonRunError> {
                 reconcile_window.clone(),
                 reconcile_tx.clone(),
             );
+        } else if !has_subscribers {
+            // Reconcile is a GUI/IPC freshness fallback. Webhooks still update
+            // state while idle, but don't burn GitHub quota with no listener.
+            next_reconcile_at = now + Duration::from_secs(RECONCILE_INTERVAL_SECONDS);
         }
 
         if now >= next_ship_state_scan_at {
@@ -369,21 +377,69 @@ fn sync_tunnel_registration(
     registrar: &Arc<Mutex<Registrar>>,
     registration_error: &Arc<Mutex<Option<String>>>,
     repos: &[String],
-    active_registration_url: &mut Option<String>,
+    registration_sync: &mut RegistrationSyncState,
+    now: Instant,
 ) {
     let current_registration_url = tunnel_runtime.registration_url();
-    if current_registration_url == *active_registration_url {
-        return;
-    }
     if let (Some(url), Some(secret)) = (
         current_registration_url.as_deref(),
         tunnel_runtime.webhook_secret.as_deref(),
     ) {
-        register_webhooks(registrar, registration_error, repos, url, secret);
+        if !registration_sync.should_attempt(url, now) {
+            return;
+        }
+        if register_webhooks(registrar, registration_error, repos, url, secret) {
+            registration_sync.record_success(url);
+        } else {
+            registration_sync.record_failure(url, now);
+        }
     } else if let Ok(mut status_error) = registration_error.lock() {
         *status_error = None;
     }
-    *active_registration_url = current_registration_url;
+}
+
+#[cfg(unix)]
+#[derive(Debug, Default)]
+struct RegistrationSyncState {
+    registered_url: Option<String>,
+    failed_url: Option<String>,
+    next_retry_at: Option<Instant>,
+}
+
+#[cfg(unix)]
+impl RegistrationSyncState {
+    fn should_attempt(&self, url: &str, now: Instant) -> bool {
+        if self.registered_url.as_deref() == Some(url) {
+            return false;
+        }
+        if self.failed_url.as_deref() == Some(url)
+            && self.next_retry_at.is_some_and(|retry_at| now < retry_at)
+        {
+            return false;
+        }
+        true
+    }
+
+    fn record_success(&mut self, url: &str) {
+        self.registered_url = Some(url.to_owned());
+        self.failed_url = None;
+        self.next_retry_at = None;
+    }
+
+    fn record_failure(&mut self, url: &str, now: Instant) {
+        self.failed_url = Some(url.to_owned());
+        self.next_retry_at = Some(now + WEBHOOK_REGISTRATION_RETRY_INTERVAL);
+    }
+}
+
+#[cfg(unix)]
+fn should_start_reconcile(
+    has_subscribers: bool,
+    reconcile_in_flight: bool,
+    now: Instant,
+    next_reconcile_at: Instant,
+) -> bool {
+    has_subscribers && !reconcile_in_flight && now >= next_reconcile_at
 }
 
 #[cfg(unix)]
@@ -1142,9 +1198,9 @@ fn register_webhooks(
     repos: &[String],
     public_url: &str,
     secret: &str,
-) {
+) -> bool {
     let Ok(mut registrar) = registrar.lock() else {
-        return;
+        return false;
     };
     let mut first_error = None;
     for repo in repos {
@@ -1156,9 +1212,11 @@ fn register_webhooks(
             }
         }
     }
+    let succeeded = first_error.is_none();
     if let Ok(mut status_error) = registration_error.lock() {
         *status_error = first_error;
     }
+    succeeded
 }
 
 #[cfg(unix)]
@@ -1418,10 +1476,10 @@ mod tests {
     use super::resolve_repos;
     #[cfg(unix)]
     use super::{
-        DaemonRunConfig, DaemonRunError, WebhookRequest, archive_closed_pull_request_ship_state,
-        daemon_tunnel_config, handle_webhook_request, load_or_create_webhook_secret,
-        parse_tunnel_enabled, pid_alive, reconcile_healed_event, run_blocking, ship_state_map,
-        start_tunnel_runtime, stop_running,
+        DaemonRunConfig, DaemonRunError, RegistrationSyncState, WebhookRequest,
+        archive_closed_pull_request_ship_state, daemon_tunnel_config, handle_webhook_request,
+        load_or_create_webhook_secret, parse_tunnel_enabled, pid_alive, reconcile_healed_event,
+        run_blocking, ship_state_map, should_start_reconcile, start_tunnel_runtime, stop_running,
     };
     #[cfg(unix)]
     use crate::daemon_ipc::{read_daemon_ship_state_list, read_daemon_status};
@@ -1494,6 +1552,53 @@ mod tests {
         assert!(!parse_tunnel_enabled(Some("0")));
         assert!(!parse_tunnel_enabled(Some("false")));
         assert!(!parse_tunnel_enabled(None));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn registration_sync_suppresses_successful_same_url_after_tunnel_flap() {
+        let now = Instant::now();
+        let mut state = RegistrationSyncState::default();
+        let url = "https://node.tailnet.ts.net/webhook";
+
+        assert!(state.should_attempt(url, now));
+        state.record_success(url);
+
+        assert!(!state.should_attempt(url, now + Duration::from_secs(30)));
+        assert!(state.should_attempt(
+            "https://other.tailnet.ts.net/webhook",
+            now + Duration::from_secs(30)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn registration_sync_backs_off_failed_same_url() {
+        let now = Instant::now();
+        let mut state = RegistrationSyncState::default();
+        let url = "https://node.tailnet.ts.net/webhook";
+
+        assert!(state.should_attempt(url, now));
+        state.record_failure(url, now);
+
+        assert!(!state.should_attempt(url, now + Duration::from_mins(1)));
+        assert!(state.should_attempt(url, now + super::WEBHOOK_REGISTRATION_RETRY_INTERVAL));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reconcile_requires_active_subscriber_and_due_time() {
+        let now = Instant::now();
+
+        assert!(!should_start_reconcile(false, false, now, now));
+        assert!(!should_start_reconcile(true, true, now, now));
+        assert!(!should_start_reconcile(
+            true,
+            false,
+            now,
+            now + Duration::from_secs(1)
+        ));
+        assert!(should_start_reconcile(true, false, now, now));
     }
 
     #[cfg(unix)]

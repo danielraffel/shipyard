@@ -142,6 +142,11 @@ pub(super) enum Command {
         /// Probe configured non-local runner targets for reachability.
         #[arg(long)]
         runners: bool,
+        /// Probe GitHub's REST and GraphQL rate-limit buckets and report
+        /// both separately. Useful when one bucket is exhausted but the other
+        /// has budget.
+        #[arg(long = "rate-limit")]
+        rate_limit: bool,
     },
     /// Validate current HEAD on configured targets.
     Run {
@@ -1071,6 +1076,15 @@ impl MergeMethod {
             Self::Merge => "--merge",
             Self::Squash => "--squash",
             Self::Rebase => "--rebase",
+        }
+    }
+
+    /// Value accepted by GitHub's REST PUT /pulls/:n/merge `merge_method` body field.
+    pub(super) fn rest_value(self) -> &'static str {
+        match self {
+            Self::Merge => "merge",
+            Self::Squash => "squash",
+            Self::Rebase => "rebase",
         }
     }
 }

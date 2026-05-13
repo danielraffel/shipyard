@@ -74,6 +74,7 @@ Shipyard coordinates validation across local, SSH, and cloud targets.
 | Inspect tracked cloud runs | `shipyard cloud status --json` |
 | Environment check | `shipyard doctor --json` |
 | Probe SSH runner reachability | `shipyard doctor --runners --json` |
+| Inspect GitHub REST + GraphQL rate-limit buckets (both separately) | `shipyard doctor --rate-limit --json` |
 | Clean up artifacts | `shipyard cleanup --apply` |
 | Wait for a release to fully upload | `shipyard wait release v0.23.0 --timeout 900 --json` |
 | Wait for a PR's required checks to go green | `shipyard wait pr 151 --state green --timeout 1800 --json` |
@@ -125,6 +126,15 @@ you want to know whether the user has live mode on before
 deciding whether to rely on webhook-speed updates vs polling
 cadence.
 
+**Idle behavior (v0.56.0+):** when no IPC subscriber is attached
+(no `shipyard watch` running, no GUI), the daemon skips the
+periodic `gh` reconcile poll. Webhooks still update state in real
+time, so correctness is unchanged — the daemon just doesn't burn
+GitHub REST budget for ticks no one is watching. The reconcile
+resumes the moment a subscriber attaches. Webhook registration
+also retries on a 5-minute backoff after failure rather than every
+loop iteration.
+
 See [`docs/live-mode.md`](../../docs/live-mode.md) for setup (≈1
 click on a Tailscale-ready Mac) and troubleshooting. The macOS
 menu-bar app (`shipyard-macos-gui`) is a thin subscriber to this
@@ -156,6 +166,13 @@ think the build takes:
 - `auto-merge` is for out-of-session automation (cron, systemd timer,
   GitHub Actions schedule). Not a substitute for `watch` within a live
   agent session.
+- `auto-merge` auto-degrades to REST when GraphQL is rate-limited.
+  `gh pr merge` (used internally) calls GraphQL for the mergeable-state
+  probe; if that fails with `GraphQL: API rate limit already exceeded`,
+  Shipyard falls back to `PUT /repos/:r/pulls/:n/merge` directly (REST
+  has its own 5000/hr bucket). Agents do not need to hand-roll
+  `gh api -X PUT .../merge` anymore. Check both buckets with
+  `shipyard doctor --rate-limit --json`.
 
 Example — agent blocks until merge in-session:
 
