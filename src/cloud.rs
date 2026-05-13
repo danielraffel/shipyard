@@ -463,9 +463,7 @@ impl GitHubActions {
         branch: Option<&str>,
         limit: u32,
     ) -> Result<Vec<QueuedRun>, GitHubError> {
-        let mut path = format!(
-            "repos/{repository}/actions/runs?status={status}&per_page={limit}"
-        );
+        let mut path = format!("repos/{repository}/actions/runs?status={status}&per_page={limit}");
         if let Some(branch) = branch.filter(|value| !value.is_empty()) {
             path.push_str("&branch=");
             path.push_str(&encode_branch(branch));

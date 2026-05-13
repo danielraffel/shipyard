@@ -8,14 +8,8 @@ use std::process::ExitCode;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
-use super::{
-    CliFailure,
-    cli::RescueArgs,
-    wait_cmd::parse_github_repo_slug,
-};
-use crate::cloud::{
-    GitHubActions, QueuedRun, discover_workflows, resolve_cloud_dispatch_plan,
-};
+use super::{CliFailure, cli::RescueArgs, wait_cmd::parse_github_repo_slug};
+use crate::cloud::{GitHubActions, QueuedRun, discover_workflows, resolve_cloud_dispatch_plan};
 use crate::config::LoadedConfig;
 use crate::output::write_json_envelope;
 
@@ -85,7 +79,14 @@ pub(super) fn rescue_with_actions<W: Write>(
     })?;
     let repo_slug = resolve_repo_slug(args.repo.clone(), cwd)?;
     let branch = resolve_branch(args, actions, &repo_slug)?;
-    let candidates = collect_candidates(args, actions, &repo_slug, branch.as_deref(), threshold_secs, now)?;
+    let candidates = collect_candidates(
+        args,
+        actions,
+        &repo_slug,
+        branch.as_deref(),
+        threshold_secs,
+        now,
+    )?;
 
     let workflows = discover_workflows(cwd);
     let mut rows: Vec<BTreeMap<String, Value>> = Vec::with_capacity(candidates.len());
@@ -98,7 +99,14 @@ pub(super) fn rescue_with_actions<W: Write>(
         rows.push(candidate_row(candidate, &outcome));
     }
 
-    let data = rescue_envelope_data(args, &repo_slug, branch.as_deref(), threshold_secs, &candidates, &rows);
+    let data = rescue_envelope_data(
+        args,
+        &repo_slug,
+        branch.as_deref(),
+        threshold_secs,
+        &candidates,
+        &rows,
+    );
     render(stdout, json, data, || {
         render_human_summary(args, &repo_slug, branch.as_deref(), &rows)
     })?;
@@ -199,9 +207,7 @@ fn rescue_envelope_data(
         "runs".to_owned(),
         Value::Array(
             rows.iter()
-                .map(|row| {
-                    Value::Object(row.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
-                })
+                .map(|row| Value::Object(row.iter().map(|(k, v)| (k.clone(), v.clone())).collect()))
                 .collect(),
         ),
     );
@@ -238,9 +244,7 @@ fn process_candidate(
         .find(|(_, def)| def.file == workflow_file)
         .map(|(key, _)| key.clone());
     let Some(workflow_key) = workflow_key else {
-        return RunOutcome::SkippedNoPlan(format!(
-            "no local workflow key matches {workflow_file}"
-        ));
+        return RunOutcome::SkippedNoPlan(format!("no local workflow key matches {workflow_file}"));
     };
     let plan = match resolve_cloud_dispatch_plan(
         config,
@@ -263,9 +267,7 @@ fn process_candidate(
                 return RunOutcome::Planned;
             }
             if let Err(error) = actions.rerun_failed_run(repo_slug, run.database_id) {
-                return RunOutcome::Failed(format!(
-                    "rerun --failed failed: {error}"
-                ));
+                return RunOutcome::Failed(format!("rerun --failed failed: {error}"));
             }
             if let Err(error) = actions.cancel_workflow_run(repo_slug, run.database_id) {
                 return RunOutcome::Failed(format!("cancel failed: {error}"));
@@ -367,10 +369,7 @@ fn render_human_summary(
             args.provider
         )
     } else {
-        format!(
-            "Rescued {scope} (provider: {}).",
-            args.provider
-        )
+        format!("Rescued {scope} (provider: {}).", args.provider)
     };
     lines.push(header);
     for row in rows {
@@ -378,18 +377,9 @@ fn render_human_summary(
             .get("run_id")
             .and_then(Value::as_u64)
             .map_or_else(|| "?".to_owned(), |value| value.to_string());
-        let workflow = row
-            .get("workflow")
-            .and_then(Value::as_str)
-            .unwrap_or("?");
-        let status = row
-            .get("status")
-            .and_then(Value::as_str)
-            .unwrap_or("?");
-        let kind = row
-            .get("kind")
-            .and_then(Value::as_str)
-            .unwrap_or("");
+        let workflow = row.get("workflow").and_then(Value::as_str).unwrap_or("?");
+        let status = row.get("status").and_then(Value::as_str).unwrap_or("?");
+        let kind = row.get("kind").and_then(Value::as_str).unwrap_or("");
         let detail = row
             .get("detail")
             .and_then(Value::as_str)
@@ -626,7 +616,8 @@ mod tests {
             repo: Some("owner/repo".to_owned()),
         };
         let actions = GitHubActions::new(temp.path());
-        let outcome = process_candidate(&candidate, &args, &workflows, &cfg, &actions, "owner/repo");
+        let outcome =
+            process_candidate(&candidate, &args, &workflows, &cfg, &actions, "owner/repo");
         assert_eq!(outcome, RunOutcome::Planned);
     }
 
@@ -656,7 +647,8 @@ mod tests {
             repo: Some("owner/repo".to_owned()),
         };
         let actions = GitHubActions::new(temp.path());
-        let outcome = process_candidate(&candidate, &args, &workflows, &cfg, &actions, "owner/repo");
+        let outcome =
+            process_candidate(&candidate, &args, &workflows, &cfg, &actions, "owner/repo");
         // Skipped because process_candidate is called for cancelled but rerun_failed is off.
         assert_eq!(outcome, RunOutcome::SkippedCompleted);
     }
@@ -681,7 +673,8 @@ mod tests {
             repo: Some("owner/repo".to_owned()),
         };
         let actions = GitHubActions::new(temp.path());
-        let outcome = process_candidate(&candidate, &args, &workflows, &cfg, &actions, "owner/repo");
+        let outcome =
+            process_candidate(&candidate, &args, &workflows, &cfg, &actions, "owner/repo");
         assert!(matches!(outcome, RunOutcome::SkippedNoPlan(_)));
     }
 }

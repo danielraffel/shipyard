@@ -251,9 +251,7 @@ fn handle_operational_variant<W: Write>(
         command @ Command::Cloud { .. } => {
             handle_cloud_variant(command, mode, cwd, &runtime_paths.state_dir, json, stdout)
         }
-        command @ Command::Rescue(_) => {
-            handle_rescue_variant(command, mode, cwd, json, stdout)
-        }
+        command @ Command::Rescue(_) => handle_rescue_variant(command, mode, cwd, json, stdout),
         command @ Command::AutoMerge { .. } => {
             handle_auto_merge_variant(command, &runtime_paths.state_dir, cwd, json, stdout)
         }
