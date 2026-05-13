@@ -3,9 +3,12 @@
 All notable changes to Shipyard are documented here. Each entry links
 to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
-<a id="v0540"></a>
-## [0.55.0]
+<a id="v0550"></a>
+## [0.55.0] - 2026-05-13
 
+- update: add `shipyard update` self-update command (Phase 1) ([#293](https://github.com/danielraffel/Shipyard/pull/293))
+
+<a id="v0540"></a>
 ## [0.54.0] - 2026-05-13
 
 - runner: add --kill-hung-workers to runner watch for auto-recovery ([#291](https://github.com/danielraffel/Shipyard/pull/291))
@@ -511,6 +514,7 @@ to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
 - feat/shipyard phases 1 4 ([#1](https://github.com/danielraffel/Shipyard/pull/1))
 
+[0.55.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.55.0
 [0.54.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.54.0
 [0.53.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.53.0
 [0.52.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.52.0
