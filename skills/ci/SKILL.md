@@ -42,6 +42,7 @@ Shipyard coordinates validation across local, SSH, and cloud targets.
 | **Runner watchdog: list stale queued runs (dry-run)** | `shipyard runner cleanup --dry-run` |
 | **Runner watchdog: cancel stale queued runs** | `shipyard runner cleanup --fix` |
 | **Runner watchdog: daemon mode** | `shipyard runner watch --fix` |
+| **Runner watchdog: auto-kill hung workers (full recovery)** | `shipyard runner watch --kill-hung-workers` (implies `--fix`) |
 | **Stuck-runner: kill specific worker (with recovery)** | `shipyard runner kill --pid <pid> --reason "..." [--retrigger]` |
 | **Stuck-runner: review past kills** | `shipyard runner kill --history` |
 | **Stuck-runner: restore quarantined build after a misclick** | `shipyard runner kill --recover <event-id>` |
@@ -275,6 +276,42 @@ contexts, no destructive ops on the runner host itself.
 `cloud handoff run --apply`). Both `cloud handoff list-stuck` and
 `cloud handoff run` remain available for cases where you need to operate
 on a specific run ID outside the PR-scoped flow.
+
+### Preventing wedges: `runner watch --kill-hung-workers`
+
+`shipyard rescue` recovers from a wedge after the fact. The companion
+preventive surface is the auto-kill mode of `runner watch`:
+
+```sh
+# Daemon mode that auto-cancels stale queued runs AND auto-kills hung Workers
+# whose etime exceeds the watchdog threshold (default 90 min):
+shipyard runner watch --kill-hung-workers
+
+# Adjust the threshold (e.g. for long-running iOS builds):
+shipyard runner watch --kill-hung-workers --interval 300
+```
+
+What it does on every tick (default every 5 min):
+
+1. Calls the same `assess_runner` logic `runner status` uses.
+2. If `Symptom::HungWorker` fires, enumerates local `Runner.Worker`
+   processes via `ps`, finds those whose etime exceeds the
+   `runner.watchdog.max_job_min` threshold, and invokes the same
+   recovery sequence as `shipyard runner kill --pid <pid> --yes`:
+   snapshot → SIGTERM → grace → SIGKILL → reap children → quarantine
+   partial builds → verify `Runner.Listener` → optionally wait for
+   GitHub status to flip.
+3. `--fix` is implied — stale queued runs are cancelled in the same
+   tick so neither the host process nor the Actions side is left
+   wedged.
+4. Emits `runner.watch` JSON envelopes with `event=auto_kill_worker`
+   and per-PID `phase` ∈ {`attempt`, `killed`, `failed`,
+   `no-pid-found`} under `--json`.
+
+Run it as a launchd/systemd service for prevention; pair with
+`shipyard rescue <pr>` for the after-the-fact PR rescue path. Together
+they replace the legacy `runner-watchdog.sh --fix` workflow that today
+masks wedges as required-check failures.
 
 ## Waiting on conditions (`shipyard wait`)
 
