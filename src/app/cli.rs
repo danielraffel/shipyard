@@ -240,6 +240,9 @@ pub(super) enum Command {
         #[command(subcommand)]
         command: CloudCommand,
     },
+    /// One-shot rescue for wedged-runner recovery: cancel + redispatch every
+    /// stuck workflow run on a PR (or the whole repo) to a different provider.
+    Rescue(RescueArgs),
     /// Merge a PR once all ship-state targets are green.
     #[command(name = "auto-merge")]
     AutoMerge {
@@ -850,6 +853,31 @@ pub(super) struct CloudRetargetArgs {
     /// Hidden test hook to control the recorded run ID.
     #[arg(long, hide = true)]
     pub(super) run_id: Option<String>,
+}
+
+#[derive(Clone, Debug, clap::Args)]
+pub(super) struct RescueArgs {
+    /// PR number whose stuck runs should be rescued. Required unless `--all-stuck`.
+    #[arg(required_unless_present = "all_stuck")]
+    pub(super) pr: Option<u64>,
+    /// Rescue every stuck queued run in the repo regardless of PR.
+    #[arg(long = "all-stuck", action = ArgAction::SetTrue, conflicts_with = "pr")]
+    pub(super) all_stuck: bool,
+    /// Runner provider to redispatch to.
+    #[arg(long = "to", default_value = "github-hosted")]
+    pub(super) provider: String,
+    /// Also re-arm completed-as-cancelled runs (e.g. ones a watchdog sweep marked failed) before handoff.
+    #[arg(long = "rerun-failed", action = ArgAction::SetTrue)]
+    pub(super) rerun_failed: bool,
+    /// Plan the rescue without acting.
+    #[arg(long = "dry-run", action = ArgAction::SetTrue)]
+    pub(super) dry_run: bool,
+    /// Minimum queue age for a queued run to count as stuck. Accepts seconds or Ns/Nm/Nh suffixes.
+    #[arg(long, default_value = "30m")]
+    pub(super) threshold: String,
+    /// Owner/repo slug. Defaults to the current git repo.
+    #[arg(long)]
+    pub(super) repo: Option<String>,
 }
 
 #[derive(Clone, Debug, clap::Args)]

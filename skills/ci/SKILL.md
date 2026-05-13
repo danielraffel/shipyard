@@ -61,6 +61,8 @@ Shipyard coordinates validation across local, SSH, and cloud targets.
 | Global warm-pool kill switch | `SHIPYARD_NO_WARM_POOL=1` in the environment |
 | Retarget one lane on an in-flight PR | `shipyard cloud retarget --pr <n> --target macos --provider github-hosted` (dry-run; add `--apply`) |
 | Add a new lane to an in-flight PR | `shipyard cloud add-lane --pr <n> --target windows [--provider github-hosted]` (dry-run; add `--apply`) |
+| Rescue a PR whose runs are wedged on a self-hosted runner | `shipyard rescue <pr>` (cancels + redispatches queued runs to `github-hosted`; add `--dry-run` to preview, `--rerun-failed` for watchdog-cancelled runs) |
+| Rescue every stuck run repo-wide | `shipyard rescue --all-stuck` |
 | Skip a version-bump gate | `shipyard pr --skip-bump sdk --bump-reason "docs only"` |
 | Skip a skill-sync gate | `shipyard pr --skip-skill-update ci --skill-reason "mechanical"` |
 | Deliberately skip one lane | `shipyard run --skip-target windows` (repeatable; no probe run) |
@@ -229,6 +231,50 @@ What it does:
 4. Appends a new `DispatchedRun` to the ShipState so the watch loop joins it into the overall verdict.
 
 See `docs/cloud-retarget.md` for full context; add-lane complements retarget.
+
+## Rescuing wedged runners (`shipyard rescue`)
+
+Use this when a self-hosted runner has wedged — orphaned `Runner.Worker`
+process, queued runs sitting >30m, repo PRs all in
+`mergeable_state=blocked` — and you need to move the work to a different
+provider in one shot:
+
+```sh
+# Most common case: one PR is stuck. Rescue it (default target is github-hosted):
+shipyard rescue 286
+
+# Preview without acting:
+shipyard rescue 286 --dry-run
+
+# Also re-arm runs a watchdog sweep marked failed/cancelled, then hand them off:
+shipyard rescue 286 --rerun-failed
+
+# Repo-wide: rescue every queued run older than 30m:
+shipyard rescue --all-stuck
+
+# Override the queue-age threshold or destination provider:
+shipyard rescue 286 --threshold 10m --to github-hosted
+```
+
+What it does:
+1. Resolves the PR's head branch (skipped under `--all-stuck`).
+2. Lists queued workflow runs and filters to (a) the PR's branch and (b) ones older than `--threshold` (default `30m`).
+3. With `--rerun-failed`, additionally pulls `status=completed conclusion=cancelled` runs on that branch — these get `gh run rerun --failed` first, then the same cancel+redispatch handoff.
+4. For each candidate, cancels the existing run and dispatches a fresh one with `--to <provider>` as the provider override.
+5. Emits a per-run summary (`applied`, `rerun+applied`, `planned`, `skipped-completed`, `skipped-no-plan`, `failed`) with a top-level `event=cloud.rescue` JSON envelope under `--json`.
+
+**Do not reach for `runner-watchdog.sh --fix` instead of `shipyard rescue`.**
+The watchdog's cancellation registers as required-check `failure` on the PR
+without redispatching — it makes the wedge look terminal to branch
+protection. `shipyard rescue` is the safe primitive because it cancels +
+redispatches atomically under one transaction; no orphaned `failure`
+contexts, no destructive ops on the runner host itself.
+
+`shipyard rescue` is the discoverable surface for what was previously a
+5-step recipe (`gh api` + `cloud handoff list-stuck` + per-run
+`cloud handoff run --apply`). Both `cloud handoff list-stuck` and
+`cloud handoff run` remain available for cases where you need to operate
+on a specific run ID outside the PR-scoped flow.
 
 ## Waiting on conditions (`shipyard wait`)
 
