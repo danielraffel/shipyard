@@ -3,9 +3,12 @@
 All notable changes to Shipyard are documented here. Each entry links
 to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
-<a id="v0560"></a>
-## [0.56.1]
+<a id="v0561"></a>
+## [0.56.1] - 2026-05-13
 
+- fix: address Codex review findings on v0.53.0 → v0.56.0 PRs ([#297](https://github.com/danielraffel/Shipyard/pull/297))
+
+<a id="v0560"></a>
 ## [0.56.0] - 2026-05-13
 
 - follow-ups: REST fallback, config.toml fix, daemon idle gating ([#295](https://github.com/danielraffel/Shipyard/pull/295))
@@ -521,6 +524,7 @@ to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
 - feat/shipyard phases 1 4 ([#1](https://github.com/danielraffel/Shipyard/pull/1))
 
+[0.56.1]: https://github.com/danielraffel/Shipyard/releases/tag/v0.56.1
 [0.56.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.56.0
 [0.55.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.55.0
 [0.54.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.54.0
