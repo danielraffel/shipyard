@@ -36,6 +36,7 @@ mod runner_kill_cmd;
 mod ship_cmd;
 mod ship_state_cmd;
 mod targets_cmd;
+mod update_cmd;
 mod wait_cmd;
 mod watch_cmd;
 
@@ -71,6 +72,7 @@ use self::ship_state_cmd::{
     ship_state_discard, ship_state_list, ship_state_reconcile, ship_state_show,
 };
 use self::targets_cmd::targets_command;
+use self::update_cmd::update_command;
 use self::wait_cmd::wait_command;
 use self::watch_cmd::{WatchCommandContext, WatchCommandOptions, watch};
 
@@ -135,6 +137,7 @@ fn dispatch<W: Write, E: Write>(
         Command::Pin { command } => {
             return pin_command(command, &cwd, cli.json, stdout);
         }
+        Command::Update(args) => return update_command(&args, cli.json, stdout),
         Command::Config { command } => {
             return config_command(command, cli.mode.into(), &cwd, cli.json, stdout);
         }
@@ -282,7 +285,8 @@ fn handle_operational_variant<W: Write>(
         | Command::Quarantine { .. }
         | Command::Doctor { .. }
         | Command::Daemon { .. }
-        | Command::Wait { .. } => unreachable!("command handled by top-level dispatch"),
+        | Command::Wait { .. }
+        | Command::Update(_) => unreachable!("command handled by top-level dispatch"),
     }
 }
 

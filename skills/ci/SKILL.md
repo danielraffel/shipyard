@@ -43,6 +43,9 @@ Shipyard coordinates validation across local, SSH, and cloud targets.
 | **Runner watchdog: cancel stale queued runs** | `shipyard runner cleanup --fix` |
 | **Runner watchdog: daemon mode** | `shipyard runner watch --fix` |
 | **Runner watchdog: auto-kill hung workers (full recovery)** | `shipyard runner watch --kill-hung-workers` (implies `--fix`) |
+| **Self-update: check if a new release is available** | `shipyard update --check --json` |
+| **Self-update: apply latest stable** | `shipyard update` (delegates to `install.sh`) |
+| **Self-update: pin / rollback to a specific tag** | `shipyard update --to v0.53.0` |
 | **Stuck-runner: kill specific worker (with recovery)** | `shipyard runner kill --pid <pid> --reason "..." [--retrigger]` |
 | **Stuck-runner: review past kills** | `shipyard runner kill --history` |
 | **Stuck-runner: restore quarantined build after a misclick** | `shipyard runner kill --recover <event-id>` |

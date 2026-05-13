@@ -243,6 +243,8 @@ pub(super) enum Command {
     /// One-shot rescue for wedged-runner recovery: cancel + redispatch every
     /// stuck workflow run on a PR (or the whole repo) to a different provider.
     Rescue(RescueArgs),
+    /// Update the locally-installed Shipyard CLI from a published GitHub Release.
+    Update(UpdateArgs),
     /// Merge a PR once all ship-state targets are green.
     #[command(name = "auto-merge")]
     AutoMerge {
@@ -886,6 +888,31 @@ pub(super) struct RescueArgs {
     /// Owner/repo slug. Defaults to the current git repo.
     #[arg(long)]
     pub(super) repo: Option<String>,
+}
+
+#[derive(Clone, Debug, clap::Args)]
+pub(super) struct UpdateArgs {
+    /// Report installed/available versions without applying.
+    #[arg(long = "check", action = ArgAction::SetTrue)]
+    pub(super) check: bool,
+    /// Install a specific tag (e.g. `v0.53.0`) instead of `latest`.
+    #[arg(long = "to")]
+    pub(super) to: Option<String>,
+    /// Plan the upgrade without applying.
+    #[arg(long = "dry-run", action = ArgAction::SetTrue)]
+    pub(super) dry_run: bool,
+    /// Override the install.sh URL (test hook).
+    #[arg(long = "install-script-url", hide = true)]
+    pub(super) install_script_url: Option<String>,
+    /// Override the releases-API base URL (test hook).
+    #[arg(long = "releases-api-base", hide = true)]
+    pub(super) releases_api_base: Option<String>,
+    /// Override the curl binary (test hook).
+    #[arg(long = "curl-bin", hide = true)]
+    pub(super) curl_bin: Option<PathBuf>,
+    /// Override the shell binary used to pipe install.sh (test hook).
+    #[arg(long = "shell-bin", hide = true)]
+    pub(super) shell_bin: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, clap::Args)]
