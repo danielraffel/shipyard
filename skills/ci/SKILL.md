@@ -166,13 +166,19 @@ think the build takes:
 - `auto-merge` is for out-of-session automation (cron, systemd timer,
   GitHub Actions schedule). Not a substitute for `watch` within a live
   agent session.
-- `auto-merge` auto-degrades to REST when GraphQL is rate-limited.
-  `gh pr merge` (used internally) calls GraphQL for the mergeable-state
-  probe; if that fails with `GraphQL: API rate limit already exceeded`,
-  Shipyard falls back to `PUT /repos/:r/pulls/:n/merge` directly (REST
-  has its own 5000/hr bucket). Agents do not need to hand-roll
-  `gh api -X PUT .../merge` anymore. Check both buckets with
-  `shipyard doctor --rate-limit --json`.
+- `auto-merge` and `wait pr` auto-degrade to REST when GraphQL is
+  rate-limited. `gh pr merge` and `gh pr view --json` (used internally)
+  call GraphQL for the mergeable-state probe; if either fails with
+  `GraphQL: API rate limit already exceeded`, Shipyard falls back to
+  `PUT /repos/:r/pulls/:n/merge` (auto-merge) and `GET /repos/:r/pulls/:n`
+  + `GET /repos/:r/commits/:sha/check-runs` (wait pr) directly. REST
+  has its own 5000/hr bucket, separate from GraphQL. Agents do not
+  need to hand-roll `gh api` calls anymore. Check both buckets with
+  `shipyard doctor --rate-limit --json`. The REST `wait pr` fallback
+  is conservative — all check runs are treated as required, so a
+  green verdict cannot incorrectly fire when non-required checks
+  fail. Snapshot output carries `_rest_fallback: true` when the
+  fallback path served the value.
 
 Example — agent blocks until merge in-session:
 
