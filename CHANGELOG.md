@@ -4,6 +4,8 @@ All notable changes to Shipyard are documented here. Each entry links
 to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
 <a id="v0540"></a>
+## [0.55.0]
+
 ## [0.54.0] - 2026-05-13
 
 - runner: add --kill-hung-workers to runner watch for auto-recovery ([#291](https://github.com/danielraffel/Shipyard/pull/291))
