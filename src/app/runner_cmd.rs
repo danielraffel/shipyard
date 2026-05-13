@@ -1084,12 +1084,24 @@ struct PsRow<'a> {
     command: &'a str,
 }
 
+/// Parse a single line of `ps -ax -o pid=,etime=,command=` output.
+///
+/// `ps` right-pads the PID and etime columns to fixed widths on macOS and
+/// Linux, so adjacent fields are separated by *runs* of spaces — not a single
+/// space. The previous `splitn(3, char::is_whitespace)` would yield an empty
+/// second token whenever the gap was wider than one space, making etime
+/// parsing fail and causing `discover_hung_workers` to silently miss every
+/// real worker on the host (Codex P1 review against #291).
+///
+/// This implementation consumes whitespace runs between fields, but
+/// preserves spaces inside the trailing command string.
 fn parse_ps_pid_etime_command(line: &str) -> Option<PsRow<'_>> {
-    let trimmed = line.trim_start();
-    let mut iter = trimmed.splitn(3, char::is_whitespace);
-    let pid_tok = iter.next()?;
-    let etime_tok = iter.next()?;
-    let command = iter.next()?;
+    let (pid_tok, after_pid) = take_token(line.trim_start())?;
+    let (etime_tok, after_etime) = take_token(after_pid.trim_start())?;
+    let command = after_etime.trim_start();
+    if command.is_empty() {
+        return None;
+    }
     let pid = pid_tok.parse::<u32>().ok()?;
     let etime_min = parse_etime_minutes(etime_tok)?;
     Some(PsRow {
@@ -1097,6 +1109,19 @@ fn parse_ps_pid_etime_command(line: &str) -> Option<PsRow<'_>> {
         etime_min,
         command,
     })
+}
+
+/// Split off the first whitespace-delimited token. Returns `None` if `s` is
+/// empty or starts with whitespace (caller must `trim_start` first).
+fn take_token(s: &str) -> Option<(&str, &str)> {
+    if s.is_empty() {
+        return None;
+    }
+    let end = s.find(char::is_whitespace).unwrap_or(s.len());
+    if end == 0 {
+        return None;
+    }
+    Some((&s[..end], &s[end..]))
 }
 
 /// Parse `ps`-style `etime` strings (`MM:SS`, `HH:MM:SS`, or `DD-HH:MM:SS`)
@@ -1163,6 +1188,33 @@ mod tests {
     #[test]
     fn parse_ps_row_rejects_non_numeric_pid() {
         assert!(parse_ps_pid_etime_command("abcd 01:30:00 /bin/Runner.Worker").is_none());
+    }
+
+    #[test]
+    fn parse_ps_row_collapses_multispace_columns() {
+        // Real `ps -ax -o pid=,etime=,command=` output pads PID + etime to
+        // fixed-width columns separated by runs of spaces, not single spaces.
+        // The previous splitn-based parser silently rejected these rows.
+        let row = parse_ps_pid_etime_command(
+            "  12345    01:30:00    /Users/foo/actions-runner/bin/Runner.Worker spawnclient 0 0",
+        )
+        .expect("row");
+        assert_eq!(row.pid, 12345);
+        assert_eq!(row.etime_min, 90);
+        assert!(
+            row.command
+                .starts_with("/Users/foo/actions-runner/bin/Runner.Worker")
+        );
+    }
+
+    #[test]
+    fn parse_ps_row_preserves_command_internal_spaces() {
+        // After collapsing the column gaps, internal spaces in the command
+        // (e.g. argv tokens) must survive unchanged.
+        let row =
+            parse_ps_pid_etime_command(" 1 00:01 /bin/Runner.Worker arg with multiple   spaces")
+                .expect("row");
+        assert!(row.command.contains("arg with multiple   spaces"));
     }
 
     #[test]

@@ -455,6 +455,31 @@ impl GitHubActions {
         parse_queued_runs(&stdout)
     }
 
+    /// Like `list_queued_runs` but paginates up to `max_pages` (`per_page=100` each)
+    /// so callers can cover busy repos with more than one page of queued runs.
+    /// Stops early when a page returns no items.
+    pub fn list_queued_runs_paginated(
+        &self,
+        repository: &str,
+        max_pages: u32,
+    ) -> Result<Vec<QueuedRun>, GitHubError> {
+        let mut out = Vec::new();
+        for page in 1..=max_pages.max(1) {
+            let args = vec![
+                "api".to_owned(),
+                format!("repos/{repository}/actions/runs?status=queued&`per_page=100`&page={page}"),
+            ];
+            let stdout = self.run_gh(&args)?;
+            let page_runs = parse_queued_runs(&stdout)?;
+            let count = page_runs.len();
+            out.extend(page_runs);
+            if count < 100 {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
     /// List workflow runs filtered by status (and optional branch).
     pub fn list_runs_with_status(
         &self,
@@ -471,6 +496,36 @@ impl GitHubActions {
         let args = vec!["api".to_owned(), path];
         let stdout = self.run_gh(&args)?;
         parse_queued_runs(&stdout)
+    }
+
+    /// Like `list_runs_with_status` but paginates up to `max_pages` (`per_page=100`
+    /// each). Stops early when a page returns no items.
+    pub fn list_runs_with_status_paginated(
+        &self,
+        repository: &str,
+        status: &str,
+        branch: Option<&str>,
+        max_pages: u32,
+    ) -> Result<Vec<QueuedRun>, GitHubError> {
+        let mut out = Vec::new();
+        for page in 1..=max_pages.max(1) {
+            let mut path = format!(
+                "repos/{repository}/actions/runs?status={status}&`per_page=100`&page={page}"
+            );
+            if let Some(branch) = branch.filter(|value| !value.is_empty()) {
+                path.push_str("&branch=");
+                path.push_str(&encode_branch(branch));
+            }
+            let args = vec!["api".to_owned(), path];
+            let stdout = self.run_gh(&args)?;
+            let page_runs = parse_queued_runs(&stdout)?;
+            let count = page_runs.len();
+            out.extend(page_runs);
+            if count < 100 {
+                break;
+            }
+        }
+        Ok(out)
     }
 
     /// Re-arm the failed jobs of a workflow run (`gh run rerun --failed`).

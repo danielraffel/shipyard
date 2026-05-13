@@ -233,11 +233,15 @@ pub fn run_blocking(config: DaemonRunConfig) -> Result<(), DaemonRunError> {
                 reconcile_window.clone(),
                 reconcile_tx.clone(),
             );
-        } else if !has_subscribers {
-            // Reconcile is a GUI/IPC freshness fallback. Webhooks still update
-            // state while idle, but don't burn GitHub quota with no listener.
-            next_reconcile_at = now + Duration::from_secs(RECONCILE_INTERVAL_SECONDS);
         }
+        // Note: we deliberately do NOT push `next_reconcile_at` forward while
+        // idle. Doing so would force a freshly-attached subscriber to wait up
+        // to a full interval before its first reconcile fires, even though
+        // state may have drifted during the idle window. Leaving the deadline
+        // stale means the next `should_start_reconcile` call after subscribe
+        // sees `now >= next_reconcile_at` immediately. The GitHub-quota
+        // savings still hold because `should_start_reconcile` gates on
+        // `has_subscribers`.
 
         if now >= next_ship_state_scan_at {
             next_ship_state_scan_at = now + SHIP_STATE_SCAN_INTERVAL;
@@ -1599,6 +1603,24 @@ mod tests {
             now + Duration::from_secs(1)
         ));
         assert!(should_start_reconcile(true, false, now, now));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reconcile_fires_immediately_after_subscriber_attaches() {
+        // A stale `next_reconcile_at` (well in the past, from a long idle
+        // window) plus a freshly-attached subscriber must reconcile on the
+        // *very next* loop iteration — not on the iteration after that.
+        // The previous bug pushed `next_reconcile_at = now + interval`
+        // every idle tick, so attach → wait up to a full interval.
+        let now = Instant::now();
+        let stale_deadline = now.checked_sub(Duration::from_mins(10)).unwrap_or(now);
+        // No subscribers → gate stays closed (the loop must not have rewritten
+        // the deadline forward during idle).
+        assert!(!should_start_reconcile(false, false, now, stale_deadline));
+        // Subscriber attaches; deadline is still the stale value. Gate fires
+        // immediately on this iteration.
+        assert!(should_start_reconcile(true, false, now, stale_deadline));
     }
 
     #[cfg(unix)]
