@@ -4,6 +4,8 @@ All notable changes to Shipyard are documented here. Each entry links
 to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
 <a id="v0560"></a>
+## [0.56.1]
+
 ## [0.56.0] - 2026-05-13
 
 - follow-ups: REST fallback, config.toml fix, daemon idle gating ([#295](https://github.com/danielraffel/Shipyard/pull/295))
