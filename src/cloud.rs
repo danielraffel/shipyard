@@ -127,6 +127,10 @@ pub struct QueuedRun {
     pub url: Option<String>,
     /// Workflow path, e.g. `.github/workflows/ci.yml`.
     pub path: String,
+    /// GitHub Actions status (`queued`, `in_progress`, `completed`, ...).
+    pub status: String,
+    /// Terminal conclusion when the run is completed.
+    pub conclusion: Option<String>,
 }
 
 /// Metadata for a single workflow run.
@@ -449,6 +453,37 @@ impl GitHubActions {
         ];
         let stdout = self.run_gh(&args)?;
         parse_queued_runs(&stdout)
+    }
+
+    /// List workflow runs filtered by status (and optional branch).
+    pub fn list_runs_with_status(
+        &self,
+        repository: &str,
+        status: &str,
+        branch: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<QueuedRun>, GitHubError> {
+        let mut path = format!("repos/{repository}/actions/runs?status={status}&per_page={limit}");
+        if let Some(branch) = branch.filter(|value| !value.is_empty()) {
+            path.push_str("&branch=");
+            path.push_str(&encode_branch(branch));
+        }
+        let args = vec!["api".to_owned(), path];
+        let stdout = self.run_gh(&args)?;
+        parse_queued_runs(&stdout)
+    }
+
+    /// Re-arm the failed jobs of a workflow run (`gh run rerun --failed`).
+    pub fn rerun_failed_run(&self, repository: &str, run_id: u64) -> Result<(), GitHubError> {
+        let args = vec![
+            "run".to_owned(),
+            "rerun".to_owned(),
+            run_id.to_string(),
+            "--failed".to_owned(),
+            "--repo".to_owned(),
+            repository.to_owned(),
+        ];
+        self.run_gh(&args).map(|_| ())
     }
 
     /// Fetch metadata for a workflow run.
@@ -815,6 +850,16 @@ pub fn parse_queued_runs(stdout: &str) -> Result<Vec<QueuedRun>, GitHubError> {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_owned();
+        let status = run
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let conclusion = run
+            .get("conclusion")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
         out.push(QueuedRun {
             database_id,
             workflow_name: name.clone(),
@@ -827,6 +872,8 @@ pub fn parse_queued_runs(stdout: &str) -> Result<Vec<QueuedRun>, GitHubError> {
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned),
             path,
+            status,
+            conclusion,
         });
     }
     Ok(out)
@@ -858,6 +905,24 @@ pub fn parse_run_metadata(stdout: &str) -> Result<RunMetadata, GitHubError> {
             .unwrap_or_default()
             .to_owned(),
     })
+}
+
+fn encode_branch(branch: &str) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(branch.len());
+    for ch in branch.chars() {
+        match ch {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' | '~' | '/' => out.push(ch),
+            _ => {
+                let mut buf = [0u8; 4];
+                let encoded = ch.encode_utf8(&mut buf);
+                for byte in encoded.bytes() {
+                    write!(out, "%{byte:02X}").expect("write to String");
+                }
+            }
+        }
+    }
+    out
 }
 
 fn workflow_run_from_value(value: &Value) -> Result<WorkflowRun, GitHubError> {

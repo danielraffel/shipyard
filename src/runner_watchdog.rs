@@ -314,6 +314,8 @@ mod tests {
             workflow_name: workflow.to_owned(),
             url: Some(format!("https://github.com/owner/repo/actions/runs/{id}")),
             path: ".github/workflows/ci.yml".to_owned(),
+            status: "queued".to_owned(),
+            conclusion: None,
         }
     }
 

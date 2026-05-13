@@ -29,6 +29,7 @@ mod pr_cmd;
 mod quarantine_cmd;
 mod queue_cmd;
 mod release_bot_cmd;
+mod rescue_cmd;
 mod run_cmd;
 mod runner_cmd;
 mod runner_kill_cmd;
@@ -59,6 +60,7 @@ use self::queue_cmd::{
     bump_command, cancel_command, evidence_command, logs_command, queue_command, status_command,
 };
 use self::release_bot_cmd::release_bot_command;
+use self::rescue_cmd::rescue_command;
 use self::run_cmd::{
     FailFastMode, ReachabilityPolicy, RootMismatchPolicy, RunCommandArgs, TreeDriftPolicy,
     WarmPolicy, run_command,
@@ -249,6 +251,7 @@ fn handle_operational_variant<W: Write>(
         command @ Command::Cloud { .. } => {
             handle_cloud_variant(command, mode, cwd, &runtime_paths.state_dir, json, stdout)
         }
+        command @ Command::Rescue(_) => handle_rescue_variant(command, mode, cwd, json, stdout),
         command @ Command::AutoMerge { .. } => {
             handle_auto_merge_variant(command, &runtime_paths.state_dir, cwd, json, stdout)
         }
@@ -281,6 +284,21 @@ fn handle_operational_variant<W: Write>(
         | Command::Daemon { .. }
         | Command::Wait { .. } => unreachable!("command handled by top-level dispatch"),
     }
+}
+
+fn handle_rescue_variant<W: Write>(
+    command: Command,
+    mode: RuntimeMode,
+    cwd: &Path,
+    json: bool,
+    stdout: &mut W,
+) -> Result<ExitCode, CliFailure> {
+    let Command::Rescue(args) = command else {
+        unreachable!("rescue variant required")
+    };
+    let config = LoadedConfig::load_from_cwd(mode, cwd)
+        .map_err(|error| CliFailure::new(1, error.to_string()))?;
+    rescue_command(&args, &config, cwd, json, stdout)
 }
 
 fn handle_setup_command<W: Write>(

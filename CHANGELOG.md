@@ -9,6 +9,8 @@ to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 - feat(runner): watchdog + kill subcommand for stuck self-hosted runners ([#284](https://github.com/danielraffel/Shipyard/pull/284))
 
 <a id="v0512"></a>
+## [0.53.0]
+
 ## [0.51.2] - 2026-05-05
 
 - daemon: surface webhook registration warnings ([#271](https://github.com/danielraffel/Shipyard/pull/271))
