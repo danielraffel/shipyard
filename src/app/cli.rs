@@ -371,13 +371,21 @@ pub(super) enum RunnerCommand {
         /// Polling cadence in seconds.
         #[arg(long)]
         interval: Option<u64>,
-        /// Auto-cancel stale queued runs (still does NOT kill workers).
+        /// Auto-cancel stale queued runs.
         #[arg(long = "fix")]
         fix: bool,
+        /// Auto-kill hung `Runner.Worker` processes (etime above the watchdog
+        /// threshold) using the same recovery sequence as `runner kill`.
+        /// Implies `--fix`.
+        #[arg(long = "kill-hung-workers")]
+        kill_hung_workers: bool,
         /// Maximum number of iterations to run before exiting. Defaults to
         /// looping forever. Test hook.
         #[arg(long = "max-iterations", hide = true)]
         max_iterations: Option<u32>,
+        /// Override the SIGTERM-to-SIGKILL grace window in seconds for auto-kill. Test hook.
+        #[arg(long = "kill-grace-secs", hide = true)]
+        kill_grace_secs: Option<u64>,
     },
     /// Explicitly kill a hung `Runner.Worker` process with full recovery
     /// sequence: snapshot, SIGTERM with grace, SIGKILL, reap children,

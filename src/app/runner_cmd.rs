@@ -78,26 +78,9 @@ pub(super) fn runner_command<W: Write>(
             json,
             stdout,
         ),
-        RunnerCommand::Watch {
-            runner_id,
-            repo,
-            runner_dir,
-            interval,
-            fix,
-            max_iterations,
-        } => watch_command(
-            config,
-            cwd,
-            &actions,
-            runner_id,
-            repo,
-            runner_dir,
-            interval,
-            fix,
-            max_iterations,
-            json,
-            stdout,
-        ),
+        command @ RunnerCommand::Watch { .. } => {
+            dispatch_watch(command, config, cwd, &actions, json, stdout)
+        }
         RunnerCommand::Kill {
             pid,
             reason,
@@ -466,25 +449,82 @@ fn emit_cleanup_report<W: Write>(
 // ---------- watch ----------
 
 #[allow(clippy::too_many_arguments)]
-fn watch_command<W: Write>(
+fn dispatch_watch<W: Write>(
+    command: RunnerCommand,
     config: &LoadedConfig,
     cwd: &Path,
     actions: &GitHubActions,
-    runner_id_override: Option<u64>,
-    repo_override: Option<String>,
-    runner_dir_override: Option<PathBuf>,
-    interval_override: Option<u64>,
-    fix: bool,
-    max_iterations: Option<u32>,
     json: bool,
     stdout: &mut W,
 ) -> Result<ExitCode, CliFailure> {
+    let RunnerCommand::Watch {
+        runner_id,
+        repo,
+        runner_dir,
+        interval,
+        fix,
+        kill_hung_workers,
+        max_iterations,
+        kill_grace_secs,
+    } = command
+    else {
+        unreachable!("dispatch_watch only handles Watch")
+    };
+    watch_command(WatchCommandArgs {
+        config,
+        cwd,
+        actions,
+        runner_id_override: runner_id,
+        repo_override: repo,
+        runner_dir_override: runner_dir,
+        interval_override: interval,
+        fix: fix || kill_hung_workers,
+        kill_hung_workers,
+        max_iterations,
+        kill_grace_secs,
+        json,
+        stdout,
+    })
+}
+
+pub(super) struct WatchCommandArgs<'a, W: Write> {
+    pub(super) config: &'a LoadedConfig,
+    pub(super) cwd: &'a Path,
+    pub(super) actions: &'a GitHubActions,
+    pub(super) runner_id_override: Option<u64>,
+    pub(super) repo_override: Option<String>,
+    pub(super) runner_dir_override: Option<PathBuf>,
+    pub(super) interval_override: Option<u64>,
+    pub(super) fix: bool,
+    pub(super) kill_hung_workers: bool,
+    pub(super) max_iterations: Option<u32>,
+    pub(super) kill_grace_secs: Option<u64>,
+    pub(super) json: bool,
+    pub(super) stdout: &'a mut W,
+}
+
+fn watch_command<W: Write>(args: WatchCommandArgs<'_, W>) -> Result<ExitCode, CliFailure> {
+    let WatchCommandArgs {
+        config,
+        cwd,
+        actions,
+        runner_id_override,
+        repo_override,
+        runner_dir_override,
+        interval_override,
+        fix,
+        kill_hung_workers,
+        max_iterations,
+        kill_grace_secs,
+        json,
+        stdout,
+    } = args;
     let settings = resolve_watchdog_settings(
         config,
         cwd,
         runner_id_override,
-        repo_override,
-        runner_dir_override,
+        repo_override.clone(),
+        runner_dir_override.clone(),
         None,
         None,
         interval_override,
@@ -506,6 +546,17 @@ fn watch_command<W: Write>(
                 if fix && report.health == RunnerHealth::Stuck {
                     cancel_stale_inline(actions, &settings, &report, stdout, json)?;
                 }
+                if kill_hung_workers && report_has_hung_worker(&report) {
+                    auto_kill_hung_workers(
+                        config,
+                        cwd,
+                        actions,
+                        &settings,
+                        kill_grace_secs,
+                        json,
+                        stdout,
+                    )?;
+                }
                 report.health
             }
             (Err(err), _) | (_, Err(err)) => {
@@ -523,6 +574,119 @@ fn watch_command<W: Write>(
         sleep(interval);
     };
     Ok(ExitCode::from(last_health.exit_code()))
+}
+
+fn report_has_hung_worker(report: &crate::runner_watchdog::RunnerReport) -> bool {
+    use crate::runner_watchdog::Symptom;
+    report
+        .symptoms
+        .iter()
+        .any(|s| matches!(s, Symptom::HungWorker { .. }))
+}
+
+fn auto_kill_hung_workers<W: Write>(
+    config: &LoadedConfig,
+    cwd: &Path,
+    actions: &GitHubActions,
+    settings: &WatchdogSettings,
+    grace_secs: Option<u64>,
+    json: bool,
+    stdout: &mut W,
+) -> Result<(), CliFailure> {
+    let workers = discover_hung_workers(&settings.runner_dir, settings.thresholds.max_job_min);
+    if workers.is_empty() {
+        emit_kill_event(
+            stdout,
+            &settings.repo_slug,
+            json,
+            "no-pid-found",
+            None,
+            None,
+        )?;
+        return Ok(());
+    }
+    for worker in workers {
+        let reason = format!(
+            "watchdog: worker etime {}min exceeds threshold {}min",
+            worker.etime_min, settings.thresholds.max_job_min
+        );
+        emit_kill_event(
+            stdout,
+            &settings.repo_slug,
+            json,
+            "attempt",
+            Some(worker.pid),
+            Some(&reason),
+        )?;
+        let kill_args = super::runner_kill_cmd::KillCommandArgs {
+            config,
+            cwd,
+            actions,
+            pid: Some(worker.pid),
+            reason: Some(reason.clone()),
+            retrigger: false,
+            yes: true,
+            repo_override: Some(settings.repo_slug.clone()),
+            runner_dir_override: Some(settings.runner_dir.clone()),
+            history: false,
+            last: None,
+            recover: None,
+            grace_secs,
+            recovery_log_override: None,
+            quarantine_root_override: None,
+            no_wait_github: false,
+            json,
+        };
+        let outcome = super::runner_kill_cmd::kill_command(kill_args, stdout);
+        match outcome {
+            Ok(_code) => emit_kill_event(
+                stdout,
+                &settings.repo_slug,
+                json,
+                "killed",
+                Some(worker.pid),
+                None,
+            )?,
+            Err(err) => emit_kill_event(
+                stdout,
+                &settings.repo_slug,
+                json,
+                "failed",
+                Some(worker.pid),
+                Some(&err.message),
+            )?,
+        }
+    }
+    Ok(())
+}
+
+fn emit_kill_event<W: Write>(
+    stdout: &mut W,
+    repo: &str,
+    json: bool,
+    phase: &str,
+    pid: Option<u32>,
+    detail: Option<&str>,
+) -> Result<(), CliFailure> {
+    if json {
+        let mut data = BTreeMap::new();
+        data.insert("event".to_owned(), Value::from("auto_kill_worker"));
+        data.insert("phase".to_owned(), Value::from(phase.to_owned()));
+        data.insert("repo".to_owned(), Value::from(repo.to_owned()));
+        if let Some(pid) = pid {
+            data.insert("pid".to_owned(), Value::from(pid));
+        }
+        if let Some(detail) = detail {
+            data.insert("detail".to_owned(), Value::from(detail.to_owned()));
+        }
+        return write_json_envelope(stdout, "runner.watch", data)
+            .map_err(|error| CliFailure::new(1, error.to_string()));
+    }
+    let ts = Utc::now().format("%H:%M:%S");
+    let pid_part = pid.map_or_else(String::new, |p| format!(" pid={p}"));
+    let detail_part = detail.map_or_else(String::new, |d| format!(" — {d}"));
+    writeln!(stdout, "[{ts}] auto-kill {phase}{pid_part}{detail_part}")
+        .map_err(|error| CliFailure::new(1, error.to_string()))
 }
 
 fn emit_watch_tick<W: Write>(
@@ -870,6 +1034,71 @@ fn inspect_local_workers(runner_dir: &Path) -> (usize, Option<i64>) {
     (count, oldest_age_min)
 }
 
+/// One Runner.Worker process flagged for auto-kill.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct HungWorker {
+    pub(super) pid: u32,
+    pub(super) etime_min: i64,
+}
+
+/// Enumerate Runner.Worker processes whose etime exceeds `max_job_min`.
+/// Returns oldest-first so callers can apply quotas.
+pub(super) fn discover_hung_workers(runner_dir: &Path, max_job_min: i64) -> Vec<HungWorker> {
+    let output = match Command::new("ps")
+        .args(["-ax", "-o", "pid=,etime=,command="])
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return Vec::new(),
+    };
+    let runner_dir_str = runner_dir.display().to_string();
+    let bin_marker = format!("{runner_dir_str}/bin");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut hung = Vec::new();
+    for line in stdout.lines() {
+        let Some(parsed) = parse_ps_pid_etime_command(line) else {
+            continue;
+        };
+        if !parsed.command.contains("Runner.Worker") {
+            continue;
+        }
+        if !parsed.command.contains(&bin_marker) && !parsed.command.contains(&runner_dir_str) {
+            continue;
+        }
+        if parsed.etime_min < max_job_min {
+            continue;
+        }
+        hung.push(HungWorker {
+            pid: parsed.pid,
+            etime_min: parsed.etime_min,
+        });
+    }
+    hung.sort_by_key(|w| std::cmp::Reverse(w.etime_min));
+    hung
+}
+
+#[derive(Clone, Debug)]
+struct PsRow<'a> {
+    pid: u32,
+    etime_min: i64,
+    command: &'a str,
+}
+
+fn parse_ps_pid_etime_command(line: &str) -> Option<PsRow<'_>> {
+    let trimmed = line.trim_start();
+    let mut iter = trimmed.splitn(3, char::is_whitespace);
+    let pid_tok = iter.next()?;
+    let etime_tok = iter.next()?;
+    let command = iter.next()?;
+    let pid = pid_tok.parse::<u32>().ok()?;
+    let etime_min = parse_etime_minutes(etime_tok)?;
+    Some(PsRow {
+        pid,
+        etime_min,
+        command,
+    })
+}
+
 /// Parse `ps`-style `etime` strings (`MM:SS`, `HH:MM:SS`, or `DD-HH:MM:SS`)
 /// into whole minutes. Mirrors the awk pipeline in the prototype.
 fn parse_etime_minutes(raw: &str) -> Option<i64> {
@@ -910,6 +1139,30 @@ mod tests {
     #[test]
     fn parse_etime_rejects_garbage() {
         assert_eq!(parse_etime_minutes("not-a-time"), None);
+    }
+
+    #[test]
+    fn parse_ps_row_handles_typical_macos_line() {
+        let row = parse_ps_pid_etime_command(
+            " 12345 01:30:00 /Users/foo/actions-runner/bin/Runner.Worker spawnclient 0 0",
+        )
+        .expect("row");
+        assert_eq!(row.pid, 12345);
+        assert_eq!(row.etime_min, 90);
+        assert!(
+            row.command
+                .starts_with("/Users/foo/actions-runner/bin/Runner.Worker")
+        );
+    }
+
+    #[test]
+    fn parse_ps_row_rejects_missing_command() {
+        assert!(parse_ps_pid_etime_command("12345 01:30:00").is_none());
+    }
+
+    #[test]
+    fn parse_ps_row_rejects_non_numeric_pid() {
+        assert!(parse_ps_pid_etime_command("abcd 01:30:00 /bin/Runner.Worker").is_none());
     }
 
     #[test]
