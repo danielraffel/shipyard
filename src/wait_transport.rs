@@ -269,8 +269,14 @@ pub fn fetch_release_snapshot(repo: &str, tag: &str, cwd: &Path) -> WaitResult<O
 }
 
 /// Fetch a GitHub PR snapshot.
+///
+/// First tries `gh pr view --json …` (GraphQL under the hood). When GraphQL
+/// is rate-limited, falls back to synthesising the same shape from REST:
+/// `gh api repos/:r/pulls/:n` for the PR fields plus
+/// `gh api repos/:r/commits/:sha/check-runs` for the check rollup. Matches
+/// the same fallback pattern `src/pr.rs` and `src/app/auto_merge_cmd.rs` use.
 pub fn fetch_pr_snapshot(repo: &str, pr_number: u64, cwd: &Path) -> WaitResult<Option<Value>> {
-    run_gh_json(
+    match run_gh_capturing(
         &[
             "pr".to_owned(),
             "view".to_owned(),
@@ -282,8 +288,116 @@ pub fn fetch_pr_snapshot(repo: &str, pr_number: u64, cwd: &Path) -> WaitResult<O
                 .to_owned(),
         ],
         cwd,
-        20.0,
-    )
+    )? {
+        GhOutcome::Success(stdout) => {
+            let value = serde_json::from_slice::<Value>(&stdout)?;
+            Ok(value.is_object().then_some(value))
+        }
+        GhOutcome::GraphqlRateLimited => fetch_pr_snapshot_rest(repo, pr_number, cwd),
+        GhOutcome::OtherFailure => Ok(None),
+    }
+}
+
+/// REST fallback for `fetch_pr_snapshot`. Synthesises the GraphQL-shape value
+/// `evaluate_pr_green` / `evaluate_pr_state` consume.
+///
+/// Note: REST `check-runs` does NOT carry per-check `isRequired`; we emit the
+/// rollup without that field. `evaluate_pr_check_rollup` then falls back to
+/// `entry.get("isRequired").as_bool().unwrap_or(true)`-equivalent semantics
+/// — every check is treated as required. That's stricter than GraphQL but
+/// safe: a green REST evaluation cannot incorrectly report green when
+/// non-required checks fail.
+pub fn fetch_pr_snapshot_rest(repo: &str, pr_number: u64, cwd: &Path) -> WaitResult<Option<Value>> {
+    let pr_value = match run_gh_capturing(
+        &[
+            "api".to_owned(),
+            format!("repos/{repo}/pulls/{pr_number}"),
+            "-H".to_owned(),
+            "Accept: application/vnd.github+json".to_owned(),
+        ],
+        cwd,
+    )? {
+        GhOutcome::Success(stdout) => serde_json::from_slice::<Value>(&stdout)?,
+        GhOutcome::GraphqlRateLimited | GhOutcome::OtherFailure => return Ok(None),
+    };
+
+    let head_sha = pr_value
+        .get("head")
+        .and_then(|h| h.get("sha"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    let check_runs = if head_sha.is_empty() {
+        Value::Object(serde_json::Map::new())
+    } else {
+        match run_gh_capturing(
+            &[
+                "api".to_owned(),
+                format!("repos/{repo}/commits/{head_sha}/check-runs?per_page=100"),
+                "-H".to_owned(),
+                "Accept: application/vnd.github+json".to_owned(),
+            ],
+            cwd,
+        )? {
+            GhOutcome::Success(stdout) => serde_json::from_slice::<Value>(&stdout)?,
+            GhOutcome::GraphqlRateLimited | GhOutcome::OtherFailure => {
+                Value::Object(serde_json::Map::new())
+            }
+        }
+    };
+
+    Ok(Some(synthesize_pr_snapshot_from_rest(
+        pr_number,
+        &pr_value,
+        &check_runs,
+    )))
+}
+
+/// Pure transform: combine `gh api repos/:r/pulls/:n` + `gh api repos/:r/commits/:sha/check-runs`
+/// into the GraphQL `gh pr view --json` shape that `evaluate_pr_green` /
+/// `evaluate_pr_state` consume. Carries a `_rest_fallback: true` marker so
+/// debug output / tests can disambiguate the source.
+pub fn synthesize_pr_snapshot_from_rest(pr_number: u64, pr: &Value, check_runs: &Value) -> Value {
+    let head_sha = pr
+        .get("head")
+        .and_then(|h| h.get("sha"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let state = pr
+        .get("state")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_uppercase();
+    let merged = pr.get("merged").and_then(Value::as_bool).unwrap_or(false);
+    let mergeable = pr.get("mergeable").cloned().unwrap_or(Value::Null);
+    let mergeable_state = pr
+        .get("mergeable_state")
+        .and_then(Value::as_str)
+        .unwrap_or("UNKNOWN")
+        .to_uppercase();
+    let mut rollup: Vec<Value> = Vec::new();
+    if let Some(runs) = check_runs.get("check_runs").and_then(Value::as_array) {
+        for run in runs {
+            let name = run.get("name").and_then(Value::as_str).unwrap_or("");
+            let status = run.get("status").and_then(Value::as_str).unwrap_or("");
+            let conclusion = run.get("conclusion").cloned().unwrap_or(Value::Null);
+            rollup.push(serde_json::json!({
+                "name": name,
+                "state": status,
+                "conclusion": conclusion,
+            }));
+        }
+    }
+    serde_json::json!({
+        "number": pr_number,
+        "headRefOid": head_sha,
+        "state": state,
+        "merged": merged,
+        "mergeable": mergeable,
+        "mergeStateStatus": mergeable_state,
+        "statusCheckRollup": rollup,
+        "_rest_fallback": true,
+    })
 }
 
 /// Fetch a GitHub Actions workflow-run snapshot.
@@ -388,6 +502,26 @@ fn run_gh_json(args: &[String], cwd: &Path, timeout_seconds: f64) -> WaitResult<
     Ok(value.is_object().then_some(value))
 }
 
+/// Outcome of a `gh` invocation, classified by whether stderr looks like a
+/// GraphQL rate-limit (so callers can opt into a REST fallback).
+enum GhOutcome {
+    Success(Vec<u8>),
+    GraphqlRateLimited,
+    OtherFailure,
+}
+
+fn run_gh_capturing(args: &[String], cwd: &Path) -> WaitResult<GhOutcome> {
+    let output = Command::new("gh").args(args).current_dir(cwd).output()?;
+    if output.status.success() {
+        return Ok(GhOutcome::Success(output.stdout));
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if crate::pr::is_graphql_rate_limited(&stderr) {
+        return Ok(GhOutcome::GraphqlRateLimited);
+    }
+    Ok(GhOutcome::OtherFailure)
+}
+
 #[cfg(unix)]
 fn try_connect(socket_path: &Path) -> Option<DaemonConnection> {
     if !socket_path.exists() {
@@ -442,7 +576,7 @@ mod tests {
 
     use super::{
         WaitOutcome, pr_event_filter, read_snapshot_file, release_event_filter, run_event_filter,
-        wait_for_condition,
+        synthesize_pr_snapshot_from_rest, wait_for_condition,
     };
     #[cfg(unix)]
     use crate::daemon_ipc::{IpcServer, IpcState};
@@ -757,6 +891,77 @@ mod tests {
             "kind": "release",
             "payload": {"tag_name": "v9.9.9", "repo": "o/r"}
         })));
+    }
+
+    #[test]
+    fn rest_fallback_synthesis_matches_graphql_shape_for_green_pr() {
+        let pr = serde_json::json!({
+            "number": 287,
+            "state": "open",
+            "merged": false,
+            "mergeable": true,
+            "mergeable_state": "clean",
+            "head": { "sha": "abc123" },
+        });
+        let check_runs = serde_json::json!({
+            "total_count": 2,
+            "check_runs": [
+                {"name": "CI", "status": "completed", "conclusion": "success"},
+                {"name": "Coverage >= 75%", "status": "completed", "conclusion": "success"},
+            ],
+        });
+        let snapshot = synthesize_pr_snapshot_from_rest(287, &pr, &check_runs);
+        assert_eq!(snapshot["number"], 287);
+        assert_eq!(snapshot["headRefOid"], "abc123");
+        assert_eq!(snapshot["state"], "OPEN");
+        assert_eq!(snapshot["mergeStateStatus"], "CLEAN");
+        assert_eq!(snapshot["merged"], false);
+        assert_eq!(snapshot["mergeable"], true);
+        assert_eq!(snapshot["_rest_fallback"], true);
+        let rollup = snapshot["statusCheckRollup"].as_array().expect("rollup");
+        assert_eq!(rollup.len(), 2);
+        assert_eq!(rollup[0]["name"], "CI");
+        assert_eq!(rollup[0]["state"], "completed");
+        assert_eq!(rollup[0]["conclusion"], "success");
+    }
+
+    #[test]
+    fn rest_fallback_synthesis_handles_missing_check_runs_array() {
+        // If the check-runs call failed (GhOutcome::OtherFailure path) we pass
+        // an empty object — the rollup should come out as an empty array, not
+        // an error.
+        let pr = serde_json::json!({
+            "number": 1,
+            "state": "open",
+            "merged": false,
+            "mergeable": null,
+            "mergeable_state": "unknown",
+            "head": { "sha": "deadbeef" },
+        });
+        let check_runs = serde_json::json!({});
+        let snapshot = synthesize_pr_snapshot_from_rest(1, &pr, &check_runs);
+        assert_eq!(snapshot["headRefOid"], "deadbeef");
+        assert_eq!(snapshot["mergeStateStatus"], "UNKNOWN");
+        assert_eq!(snapshot["statusCheckRollup"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn rest_fallback_synthesis_uppercases_state_and_mergeable_state() {
+        // GraphQL emits these in SCREAMING_CASE; REST gives lowercase.
+        // The evaluator's upper_entry_value already handles either case, but
+        // synthesise to GraphQL's shape to minimise downstream surprise.
+        let pr = serde_json::json!({
+            "number": 9,
+            "state": "closed",
+            "merged": true,
+            "mergeable": false,
+            "mergeable_state": "behind",
+            "head": { "sha": "h" },
+        });
+        let snapshot = synthesize_pr_snapshot_from_rest(9, &pr, &serde_json::json!({}));
+        assert_eq!(snapshot["state"], "CLOSED");
+        assert_eq!(snapshot["mergeStateStatus"], "BEHIND");
+        assert_eq!(snapshot["merged"], true);
     }
 
     #[test]

@@ -13,6 +13,10 @@ shipyard ship              # validate, open PR, merge on green
 shipyard watch             # live-tail an in-flight ship
 shipyard wait pr 151 --state green  # wait on release / PR / run conditions
 shipyard auto-merge <pr>   # cron-friendly one-shot merge-on-green
+shipyard rescue <pr>       # cancel + redispatch every stuck queued run on a PR
+shipyard runner watch --kill-hung-workers  # daemon-mode prevent + auto-kill hung Workers
+shipyard update            # self-update the CLI (or `--check` to peek)
+shipyard doctor --rate-limit  # inspect REST + GraphQL buckets separately
 shipyard release-bot setup # guided RELEASE_BOT_TOKEN setup
 shipyard cloud retarget    # switch one target's runner mid-flight
 shipyard cloud add-lane    # append a new lane to an in-flight PR
@@ -37,43 +41,53 @@ shipyard changelog init    # opt in to post-release CHANGELOG auto-sync
   Xcode, Rust, Go, Node (pnpm/bun/yarn/npm), Python (uv/poetry/pip),
   Gradle, Maven, .NET, Flutter, Dart, Deno, Ruby, Elixir, PHP.
 - **Self-hosted runner watchdog.** `shipyard runner status` /
-  `cleanup --fix` / `watch --fix` detect and auto-recover the
-  stuck-runner failure mode (orphaned busy state, hung worker, stale
-  queued runs). See [docs/runner-watchdog.md](docs/runner-watchdog.md).
+  `cleanup --fix` / `watch --fix` / `watch --kill-hung-workers` detect
+  and auto-recover the stuck-runner failure mode (orphaned busy state,
+  hung worker, stale queued runs). `runner kill --pid <pid>` is the
+  explicit one-shot equivalent. See [docs/runner-watchdog.md](docs/runner-watchdog.md).
+- **One-shot PR rescue.** `shipyard rescue <pr>` cancels and
+  redispatches every stuck queued workflow run on a PR onto
+  `github-hosted` (or any provider via `--to`). `--rerun-failed`
+  also re-arms watchdog-cancelled runs; `--all-stuck` is the
+  repo-wide variant. Pairs with the watchdog to form a complete
+  prevent → recover toolkit.
+- **In-tool self-update.** `shipyard update` is the discoverable
+  upgrade path (no more curl-pipe to remember); `--check` reports
+  installed-vs-available, `--to v0.55.0` pins a specific tag for
+  rollback.
+- **Graceful GraphQL rate-limit degradation.** `shipyard auto-merge`
+  and `shipyard wait pr` fall back to REST automatically when
+  GraphQL exhausts (separate 5000/hr bucket). `shipyard doctor
+  --rate-limit` shows both buckets so you can see which one is hot.
 
 ## Installation
 
 ### Claude Code (recommended)
 
-**Step 1:** Add the Shipyard marketplace to `~/.claude/settings.json`:
+Two commands to register the marketplace and install the plugin:
 
-```json
-{
-  "extraKnownMarketplaces": {
-    "shipyard": {
-      "source": {
-        "source": "github",
-        "repo": "danielraffel/Shipyard"
-      }
-    }
-  }
-}
+```bash
+claude plugin marketplace add danielraffel/Shipyard
+claude plugin install shipyard
 ```
 
-**Step 2:** Install the plugin:
-
-```
-/plugin install shipyard@shipyard
-```
-
-**Step 3:** Set up your project:
+Then set up your project:
 
 ```
 /shipyard:init
 ```
 
-The plugin uses the CLI under the hood. If the `shipyard` binary isn't
-installed, the plugin will offer to install it for you.
+The plugin uses the CLI under the hood. On first session start it
+auto-installs the binary if it can't find `shipyard` on PATH — and
+skips the install if it can. If you've already installed the CLI
+(via `install.sh` or a project pinner like pulp's
+`tools/install-shipyard.sh`), make sure its bin directory is on
+PATH before you install the plugin; that way the plugin respects
+your existing pin instead of installing its own copy alongside it.
+
+Plugin + CLI are independently versioned; the plugin's version
+covers slash commands / skills / hooks, while the CLI's version
+covers the binary. It's safe to have both.
 
 ### Codex / CLI
 
@@ -236,9 +250,8 @@ Shipyard doesn't leave much footprint, but here's the complete list:
 # 1. Stop + unregister the daemon (if running)
 shipyard daemon stop
 
-# 2. Uninstall the CLI (method depends on how you installed)
-pip uninstall shipyard                # if installed via pip
-rm -rf ~/.pulp                        # if installed via install.sh
+# 2. Uninstall the CLI binary (install.sh writes here regardless of source)
+rm -f ~/.local/bin/shipyard ~/.local/bin/sy
 
 # 3. Remove state directory (ship-state, daemon config, webhook secret)
 #    macOS:
