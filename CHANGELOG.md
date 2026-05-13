@@ -4,6 +4,8 @@ All notable changes to Shipyard are documented here. Each entry links
 to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
 <a id="v0530"></a>
+## [0.54.0]
+
 ## [0.53.0] - 2026-05-13
 
 - rescue: add top-level shipyard rescue for wedged-runner recovery ([#287](https://github.com/danielraffel/Shipyard/pull/287))
