@@ -180,17 +180,21 @@ fn find_pr_for_branch_rest(
         .next()
         .filter(|owner| !owner.is_empty())
         .ok_or_else(|| PrError::new(format!("could not derive owner from repo {repo:?}")))?;
-    let endpoint = format!("repos/{repo}/pulls");
+    // Build a query-string URL so `gh api` issues a GET. Passing `-f`
+    // without `-X GET` makes gh send the parameters as a request body
+    // and switch to POST against `repos/:r/pulls` — which is the
+    // *create-PR* endpoint. GitHub then 422s on missing `base`, which
+    // is the symptom captured in #282. Force GET semantics explicitly.
     let head = format!("{owner}:{branch}");
+    let endpoint = format!(
+        "repos/{repo}/pulls?head={}&state=open&per_page=1",
+        url_encode(&head)
+    );
     let args = vec![
         "api".to_owned(),
+        "-X".to_owned(),
+        "GET".to_owned(),
         endpoint,
-        "-f".to_owned(),
-        format!("head={head}"),
-        "-f".to_owned(),
-        "state=open".to_owned(),
-        "-F".to_owned(),
-        "per_page=1".to_owned(),
     ];
     let output = gh(gh_command)
         .args(args)
@@ -286,6 +290,26 @@ fn repo_slug(cwd: &Path) -> Result<String, PrError> {
             remote.trim()
         ))
     })
+}
+
+/// Minimal percent-encoder for query-string values used by REST fallbacks.
+/// Encodes the characters `gh api` needs us to escape (`:` `/` `?` `&` `=` `#`
+/// and spaces) so query parameters survive without pulling in a dependency.
+fn url_encode(value: &str) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => out.push(ch),
+            _ => {
+                let mut buf = [0u8; 4];
+                for byte in ch.encode_utf8(&mut buf).as_bytes() {
+                    write!(&mut out, "%{byte:02X}").expect("write to String");
+                }
+            }
+        }
+    }
+    out
 }
 
 fn parse_github_remote_slug(remote: &str) -> Option<String> {
@@ -399,7 +423,7 @@ fn nested_string_field(value: &Value, path: &[&str]) -> Result<String, PrError> 
 mod tests {
     use super::{
         PrInfo, is_graphql_rate_limited, parse_github_remote_slug, parse_pr_info, parse_pr_list,
-        parse_pr_rest_info, parse_pr_rest_list, selector_pr_number,
+        parse_pr_rest_info, parse_pr_rest_list, selector_pr_number, url_encode,
     };
 
     #[test]
@@ -456,6 +480,23 @@ mod tests {
             "GraphQL: API rate limit already exceeded for user ID 123"
         ));
         assert!(!is_graphql_rate_limited("HTTP 500: something else failed"));
+    }
+
+    #[test]
+    fn url_encode_escapes_query_string_specials() {
+        // `:` and `/` appear in `owner:branch` and `refs/heads/...` query
+        // values; both must survive in the URL or the GET hits the wrong
+        // endpoint. Issue #282 saw `gh api repos/.../pulls -f head=owner:branch`
+        // get turned into POST → 422 missing base. Forcing GET + encoding
+        // the value keeps it a real GET.
+        assert_eq!(url_encode("owner:branch"), "owner%3Abranch");
+        assert_eq!(url_encode("refs/heads/main"), "refs%2Fheads%2Fmain");
+        assert_eq!(
+            url_encode("danielraffel:feat/298-waitpr-rest-fallback"),
+            "danielraffel%3Afeat%2F298-waitpr-rest-fallback"
+        );
+        // Letters / digits / unreserved punctuation pass through unchanged.
+        assert_eq!(url_encode("AbC-_.~123"), "AbC-_.~123");
     }
 
     #[test]
