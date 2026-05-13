@@ -3,9 +3,12 @@
 All notable changes to Shipyard are documented here. Each entry links
 to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
-<a id="v0512"></a>
-## [0.52.0]
+<a id="v0520"></a>
+## [0.52.0] - 2026-05-12
 
+- feat(runner): watchdog + kill subcommand for stuck self-hosted runners ([#284](https://github.com/danielraffel/Shipyard/pull/284))
+
+<a id="v0512"></a>
 ## [0.51.2] - 2026-05-05
 
 - daemon: surface webhook registration warnings ([#271](https://github.com/danielraffel/Shipyard/pull/271))
@@ -496,6 +499,7 @@ to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
 - feat/shipyard phases 1 4 ([#1](https://github.com/danielraffel/Shipyard/pull/1))
 
+[0.52.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.52.0
 [0.51.2]: https://github.com/danielraffel/Shipyard/releases/tag/v0.51.2
 [0.51.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.51.0
 [0.50.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.50.0
