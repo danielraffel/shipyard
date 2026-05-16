@@ -89,6 +89,7 @@ pub fn find_pr_for_branch(
     if !output.status.success() {
         let message = stderr_or_stdout(&output);
         if is_graphql_rate_limited(&message) {
+            report_rate_limit_fallback("gh pr list", cwd);
             return find_pr_for_branch_rest(cwd, gh_command, branch);
         }
         return Err(PrError::new(format!("gh pr list failed: {message}")));
@@ -116,6 +117,7 @@ pub fn create_pr(
     if !output.status.success() {
         let message = stderr_or_stdout(&output);
         if is_graphql_rate_limited(&message) {
+            report_rate_limit_fallback("gh pr create", cwd);
             return create_pr_rest(cwd, gh_command, branch, base, title, body);
         }
         return Err(PrError::new(format!("gh pr create failed: {message}")));
@@ -141,6 +143,7 @@ pub fn get_pr_status(
     if !output.status.success() {
         let message = stderr_or_stdout(&output);
         if is_graphql_rate_limited(&message) {
+            report_rate_limit_fallback("gh pr view", cwd);
             return get_pr_status_rest(cwd, gh_command, selector);
         }
         return Err(PrError::new(format!("gh pr view failed: {message}")));
@@ -352,6 +355,47 @@ fn selector_pr_number(selector: &str) -> Option<u64> {
 pub(crate) fn is_graphql_rate_limited(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     lower.contains("graphql") && lower.contains("rate limit")
+}
+
+/// Print a one-line user-facing notice that GraphQL is exhausted and
+/// the operation is falling back to REST. Best-effort: probes
+/// `gh api rate_limit` (a separate quota that does not consume
+/// GraphQL budget) to surface the reset time; silently omits the
+/// time if the probe fails (network glitch, gh not on PATH, etc.).
+///
+/// Issue #266: prior to v0.56.x the fallback happened silently so
+/// users couldn't tell GraphQL had bailed. Surfacing this on stderr
+/// keeps the operation succeeding while making the cost visible.
+pub(crate) fn report_rate_limit_fallback(operation: &str, cwd: &std::path::Path) {
+    let reset_suffix = fetch_graphql_reset_unix(cwd)
+        .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
+        .map(|dt| format!("; reset at {} UTC", dt.format("%H:%M:%S")))
+        .unwrap_or_default();
+    eprintln!(
+        "shipyard: GraphQL rate limit hit for {operation}{reset_suffix}. Falling back to REST."
+    );
+}
+
+/// Probe `gh api rate_limit --jq .resources.graphql.reset` for the
+/// unix timestamp at which the GraphQL bucket refills. Returns None
+/// if the probe fails for any reason — caller falls back to omitting
+/// the reset time from its user-facing message.
+///
+/// `rate_limit` is in its own GitHub API quota bucket (the "shared"
+/// REST core bucket), so this probe does NOT itself consume GraphQL
+/// budget and is safe to call from inside a GraphQL-rate-limited
+/// recovery path.
+fn fetch_graphql_reset_unix(cwd: &std::path::Path) -> Option<i64> {
+    let output = crate::supervised::gh_supervised(None)
+        .args(["api", "rate_limit", "--jq", ".resources.graphql.reset"])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.trim().parse::<i64>().ok()
 }
 
 fn parse_pr_rest_list(text: &str) -> Result<Option<PrInfo>, PrError> {

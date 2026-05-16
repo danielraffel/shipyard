@@ -292,7 +292,10 @@ pub fn fetch_pr_snapshot(repo: &str, pr_number: u64, cwd: &Path) -> WaitResult<O
             let value = serde_json::from_slice::<Value>(&stdout)?;
             Ok(value.is_object().then_some(value))
         }
-        GhOutcome::GraphqlRateLimited => fetch_pr_snapshot_rest(repo, pr_number, cwd),
+        GhOutcome::GraphqlRateLimited => {
+            crate::pr::report_rate_limit_fallback("gh pr snapshot", cwd);
+            fetch_pr_snapshot_rest(repo, pr_number, cwd)
+        }
         GhOutcome::OtherFailure => Ok(None),
     }
 }
