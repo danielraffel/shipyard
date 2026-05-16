@@ -48,7 +48,9 @@ impl Error for PrError {}
 
 /// Push the current branch before PR lookup/create.
 pub fn push_branch(cwd: &Path, branch: &str) -> Result<(), PrError> {
-    let output = Command::new("git")
+    // Supervised git push — sets SHIPYARD_PR_RUNNING=1 so downstream
+    // pre-push hooks know this push originated from `shipyard pr`.
+    let output = crate::supervised::git_supervised()
         .args(["push", "-u", "origin", branch])
         .current_dir(cwd)
         .output()
@@ -149,7 +151,10 @@ pub fn get_pr_status(
 const PR_JSON_FIELDS: &str = "number,url,title,state,headRefName,baseRefName";
 
 fn gh(gh_command: Option<&Path>) -> Command {
-    gh_command.map_or_else(|| Command::new("gh"), Command::new)
+    // Mark every supervised `gh` invocation with SHIPYARD_PR_RUNNING=1
+    // so downstream pre-push hooks can detect Shipyard-orchestrated
+    // pushes (issue #266).
+    crate::supervised::gh_supervised(gh_command)
 }
 
 fn stderr_or_stdout(output: &std::process::Output) -> String {
@@ -272,7 +277,7 @@ fn get_pr_status_rest(
 }
 
 fn repo_slug(cwd: &Path) -> Result<String, PrError> {
-    let output = Command::new("git")
+    let output = crate::supervised::git_supervised()
         .args(["config", "--get", "remote.origin.url"])
         .current_dir(cwd)
         .output()

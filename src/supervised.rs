@@ -1,0 +1,119 @@
+//! Subprocess helpers that mark child processes as orchestrated by
+//! Shipyard.
+//!
+//! When `shipyard pr` / `shipyard ship` / `shipyard auto-merge` /
+//! `shipyard overflow` spawn `git` or `gh`, downstream consumers
+//! (notably the Pulp pre-push hook in
+//! [`danielraffel/pulp#1406`](https://github.com/danielraffel/pulp/pull/1406))
+//! want to distinguish a supervised push from a raw `git push`. We
+//! set `SHIPYARD_PR_RUNNING=1` on the child environment so the hook
+//! can read it without the user having to remember a project-local
+//! fallback like `PULP_VIA_SHIPYARD=1`.
+//!
+//! Scope discipline (see issue #266): only flows that participate in
+//! the supervised PR / ship / merge pipeline route through these
+//! helpers. Diagnostic subcommands (`doctor`, `pin`, `runner`,
+//! `cleanup`, ad-hoc `cloud`) are intentionally left unmodified —
+//! they are not "supervised pushes" and giving them the marker would
+//! confuse the audit trail.
+
+use std::path::Path;
+use std::process::Command;
+
+/// Environment-variable name set on every supervised subprocess.
+///
+/// Externally observable contract; do not rename without coordinating
+/// with downstream consumers (see crate-level docs).
+pub const SUPERVISED_ENV_VAR: &str = "SHIPYARD_PR_RUNNING";
+
+/// Value set on every supervised subprocess.
+pub const SUPERVISED_ENV_VALUE: &str = "1";
+
+/// Mark a `Command` as supervised. Returns the same command for
+/// fluent chaining.
+pub fn supervised(mut command: Command) -> Command {
+    command.env(SUPERVISED_ENV_VAR, SUPERVISED_ENV_VALUE);
+    command
+}
+
+/// Build a `gh` invocation marked as supervised. Mirrors the
+/// existing `gh(gh_command)` helper at `src/pr.rs:151` — pass
+/// `Some(path)` from tests that inject a fake `gh` shim, `None`
+/// for production code that should resolve `gh` on `$PATH`.
+pub fn gh_supervised(gh_command: Option<&Path>) -> Command {
+    supervised(gh_command.map_or_else(|| Command::new("gh"), Command::new))
+}
+
+/// Build a `git` invocation marked as supervised.
+pub fn git_supervised() -> Command {
+    supervised(Command::new("git"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsString;
+
+    fn env_value(command: &Command, key: &str) -> Option<OsString> {
+        command.get_envs().find_map(|(k, v)| {
+            if k == key {
+                v.map(std::ffi::OsStr::to_owned)
+            } else {
+                None
+            }
+        })
+    }
+
+    #[test]
+    fn supervised_sets_marker_on_a_plain_command() {
+        let cmd = supervised(Command::new("true"));
+        assert_eq!(
+            env_value(&cmd, SUPERVISED_ENV_VAR).as_deref(),
+            Some(OsString::from("1").as_os_str())
+        );
+    }
+
+    #[test]
+    fn gh_supervised_uses_path_when_provided_and_sets_marker() {
+        let fake = Path::new("/tmp/fake-gh");
+        let cmd = gh_supervised(Some(fake));
+        assert_eq!(cmd.get_program(), fake.as_os_str());
+        assert_eq!(
+            env_value(&cmd, SUPERVISED_ENV_VAR).as_deref(),
+            Some(OsString::from("1").as_os_str())
+        );
+    }
+
+    #[test]
+    fn gh_supervised_falls_back_to_gh_on_path_when_none() {
+        let cmd = gh_supervised(None);
+        assert_eq!(cmd.get_program(), std::ffi::OsStr::new("gh"));
+        assert_eq!(
+            env_value(&cmd, SUPERVISED_ENV_VAR).as_deref(),
+            Some(OsString::from("1").as_os_str())
+        );
+    }
+
+    #[test]
+    fn git_supervised_uses_git_and_sets_marker() {
+        let cmd = git_supervised();
+        assert_eq!(cmd.get_program(), std::ffi::OsStr::new("git"));
+        assert_eq!(
+            env_value(&cmd, SUPERVISED_ENV_VAR).as_deref(),
+            Some(OsString::from("1").as_os_str())
+        );
+    }
+
+    #[test]
+    fn marker_propagates_to_child_process() {
+        // End-to-end: spawn a real subprocess and assert it sees the env.
+        // Uses `sh -c 'echo $SHIPYARD_PR_RUNNING'` because that is portable
+        // across the macOS / Linux runners shipyard supports.
+        let output = supervised(Command::new("sh"))
+            .args(["-c", "echo $SHIPYARD_PR_RUNNING"])
+            .output()
+            .expect("spawn sh");
+        let stdout = String::from_utf8(output.stdout).expect("utf8");
+        assert_eq!(stdout.trim(), SUPERVISED_ENV_VALUE);
+    }
+}

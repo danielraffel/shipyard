@@ -241,7 +241,7 @@ fn append_trailers_to_tip(
     cwd: &Path,
     trailers: &[String],
 ) -> Result<Vec<String>, TrailerAmendError> {
-    let index = Command::new("git")
+    let index = crate::supervised::git_supervised()
         .args(["diff", "--cached", "--quiet"])
         .current_dir(cwd)
         .output()
@@ -276,7 +276,7 @@ fn append_trailers_to_tip(
         return Ok(added);
     }
 
-    let amend = Command::new("git")
+    let amend = crate::supervised::git_supervised()
         .args(["commit", "--amend", "--allow-empty", "-m", &message])
         .current_dir(cwd)
         .stdout(Stdio::null())
@@ -357,7 +357,7 @@ fn interpret_trailer(
     message: &str,
     trailer: &str,
 ) -> Result<String, TrailerAmendError> {
-    let mut child = Command::new("git")
+    let mut child = crate::supervised::git_supervised()
         .args([
             "interpret-trailers",
             "--if-exists",
@@ -404,7 +404,7 @@ fn commit_bumped_files(repo_root: &Path, bumped_files: &[String]) -> Result<(), 
     ];
     args.extend(bumped_files.iter().cloned());
     let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
-    let output = Command::new("git")
+    let output = crate::supervised::git_supervised()
         .args(&refs)
         .current_dir(repo_root)
         .output()
@@ -423,7 +423,7 @@ fn warn_missing_release_bot_token<W: Write>(stdout: &mut W, cwd: &Path) {
     let Some(repo) = detect_repo_from_remote(cwd, None) else {
         return;
     };
-    let Ok(output) = Command::new("gh")
+    let Ok(output) = crate::supervised::gh_supervised(None)
         .args([
             "api",
             &format!("repos/{repo}/actions/secrets"),
@@ -456,7 +456,7 @@ fn warn_missing_release_bot_token<W: Write>(stdout: &mut W, cwd: &Path) {
 }
 
 fn git_output(cwd: &Path, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("git")
+    let output = crate::supervised::git_supervised()
         .args(args)
         .current_dir(cwd)
         .output()
@@ -517,7 +517,7 @@ mod tests {
 
     #[cfg(unix)]
     fn git(cwd: &Path, args: &[&str]) {
-        let output = Command::new("git")
+        let output = crate::supervised::git_supervised()
             .args(args)
             .current_dir(cwd)
             .output()

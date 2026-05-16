@@ -226,7 +226,7 @@ fn pr_is_merged(pr: u64, cwd: &Path, snapshot_file: Option<&Path>) -> bool {
     let payload = if let Some(path) = snapshot_file {
         std::fs::read_to_string(path).ok()
     } else {
-        let output = Command::new("gh")
+        let output = crate::supervised::gh_supervised(None)
             .args(["pr", "view", &pr.to_string(), "--json", "state"])
             .current_dir(cwd)
             .output()
@@ -316,7 +316,7 @@ fn merge_pr_rest(
 ) -> Result<(), String> {
     let repo = repo_slug_for_rest(cwd)?;
     let endpoint = format!("repos/{repo}/pulls/{pr}/merge");
-    let output = Command::new("gh")
+    let output = crate::supervised::gh_supervised(None)
         .args([
             "api",
             "-X",
@@ -339,7 +339,7 @@ fn merge_pr_rest(
     if delete_branch && let Ok(branch) = pr_head_branch_rest(&repo, pr, cwd) {
         // Best-effort delete; mirrors `gh pr merge --delete-branch` which
         // also tolerates a missing branch silently.
-        let _ = Command::new("gh")
+        let _ = crate::supervised::gh_supervised(None)
             .args([
                 "api",
                 "-X",
@@ -353,7 +353,7 @@ fn merge_pr_rest(
 }
 
 fn repo_slug_for_rest(cwd: &Path) -> Result<String, String> {
-    let output = Command::new("git")
+    let output = crate::supervised::git_supervised()
         .args(["config", "--get", "remote.origin.url"])
         .current_dir(cwd)
         .output()
@@ -391,7 +391,7 @@ fn parse_github_remote_slug(remote: &str) -> Option<String> {
 }
 
 fn pr_head_branch_rest(repo: &str, pr: u64, cwd: &Path) -> Result<String, String> {
-    let output = Command::new("gh")
+    let output = crate::supervised::gh_supervised(None)
         .args(["api", &format!("repos/{repo}/pulls/{pr}")])
         .current_dir(cwd)
         .output()

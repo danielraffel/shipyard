@@ -5,7 +5,6 @@ use std::io::{BufRead, BufReader, Write};
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::Path;
-use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -490,7 +489,7 @@ pub fn release_event_filter(tag: &str, repo: &str) -> impl Fn(&Value) -> bool {
 }
 
 fn run_gh_json(args: &[String], cwd: &Path, timeout_seconds: f64) -> WaitResult<Option<Value>> {
-    let output = Command::new("gh").args(args).current_dir(cwd).output()?;
+    let output = crate::supervised::gh_supervised(None).args(args).current_dir(cwd).output()?;
 
     let _ = timeout_seconds;
 
@@ -511,7 +510,7 @@ enum GhOutcome {
 }
 
 fn run_gh_capturing(args: &[String], cwd: &Path) -> WaitResult<GhOutcome> {
-    let output = Command::new("gh").args(args).current_dir(cwd).output()?;
+    let output = crate::supervised::gh_supervised(None).args(args).current_dir(cwd).output()?;
     if output.status.success() {
         return Ok(GhOutcome::Success(output.stdout));
     }
