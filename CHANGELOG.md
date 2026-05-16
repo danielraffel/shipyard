@@ -4,6 +4,8 @@ All notable changes to Shipyard are documented here. Each entry links
 to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
 <a id="v0562"></a>
+## [0.57.0]
+
 ## [0.56.2] - 2026-05-13
 
 - feat(wait): REST fallback for wait pr + README audit + bundle #131 ([#299](https://github.com/danielraffel/Shipyard/pull/299))

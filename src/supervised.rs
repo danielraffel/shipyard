@@ -104,15 +104,30 @@ mod tests {
         );
     }
 
+    // End-to-end: spawn a real subprocess and assert it sees the env.
+    // Per-platform implementations because Windows runners may not have
+    // `sh` on PATH and posix runners may not have `cmd`. Codex P1 on
+    // shipyard PR #302 — the original unconditional `sh` spawn failed
+    // the Windows CI matrix.
+    #[cfg(unix)]
     #[test]
-    fn marker_propagates_to_child_process() {
-        // End-to-end: spawn a real subprocess and assert it sees the env.
-        // Uses `sh -c 'echo $SHIPYARD_PR_RUNNING'` because that is portable
-        // across the macOS / Linux runners shipyard supports.
+    fn marker_propagates_to_child_process_unix() {
         let output = supervised(Command::new("sh"))
             .args(["-c", "echo $SHIPYARD_PR_RUNNING"])
             .output()
             .expect("spawn sh");
+        let stdout = String::from_utf8(output.stdout).expect("utf8");
+        assert_eq!(stdout.trim(), SUPERVISED_ENV_VALUE);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn marker_propagates_to_child_process_windows() {
+        // `cmd /C` echoes the env var with `%VAR%` expansion.
+        let output = supervised(Command::new("cmd"))
+            .args(["/C", "echo %SHIPYARD_PR_RUNNING%"])
+            .output()
+            .expect("spawn cmd");
         let stdout = String::from_utf8(output.stdout).expect("utf8");
         assert_eq!(stdout.trim(), SUPERVISED_ENV_VALUE);
     }

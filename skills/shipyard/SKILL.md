@@ -124,6 +124,52 @@ watch_interval_seconds = 300
 auto_fix = false
 ```
 
+## Supervised Subprocess Marker (issue #266)
+
+Every `git` / `gh` child process spawned by the supervised
+`pr` / `ship` / `auto-merge` / `overflow` / `wait` flows is launched
+with `SHIPYARD_PR_RUNNING=1` in its environment. Downstream tooling
+(notably Pulp's pre-push hook in `danielraffel/pulp#1406`) uses this
+to distinguish a Shipyard-orchestrated push from a raw `git push`.
+
+When adding a new subprocess spawn site inside one of those flows,
+route through the helpers in `src/supervised.rs`:
+
+- `crate::supervised::gh_supervised(gh_command)` instead of
+  `Command::new("gh")` (mirrors the existing `gh(gh_command)`
+  helper in `src/pr.rs`).
+- `crate::supervised::git_supervised()` instead of
+  `Command::new("git")`.
+- `crate::supervised::supervised(cmd)` when wrapping an
+  injection-style `git_command.map_or_else(..., Command::new)`
+  pattern (see `src/branch.rs` for the precedent).
+
+Diagnostic subcommands (`doctor`, `pin`, `runner`, `cleanup`,
+`cloud`, `governance`, `release_bot`, `reconcile`) deliberately
+skip the marker — they are not "supervised pushes" per the
+audit-log use case. If you add a brand new orchestrated flow,
+extend the scope deliberately rather than blanket-supervising
+everything.
+
+## GraphQL Rate-Limit Fallback Behaviour (issue #266)
+
+Five operations detect `is_graphql_rate_limited` in `gh` stderr and
+fall through to a REST equivalent: PR list, PR create, PR view, PR
+snapshot (in `wait_transport`), and PR merge (in
+`app/auto_merge_cmd`). When that happens, `pr::report_rate_limit_fallback(operation, cwd)`
+prints a one-line user-visible notice on stderr, including the
+GraphQL reset time when a best-effort `gh api rate_limit` probe
+succeeds. Add this call to any new REST-fallback dispatch site so
+the operator-visible signal stays consistent.
+
+The REST merge path (`merge_pr_rest`) passes the original head SHA
+as `-f sha=<oid>` on the PUT so GitHub enforces the merge race-guard
+server-side. On a `405 Base branch was modified` response, it
+refetches head info via `pr_head_info_rest` and retries exactly once
+if and only if the head SHA is unchanged. A changed head SHA means
+a new commit landed during the merge attempt — the retry is refused
+because the prior green evidence may no longer apply.
+
 ## Validation Gates
 
 Prefer non-mutating checks first:

@@ -85,6 +85,29 @@ Shipyard coordinates validation across local, SSH, and cloud targets.
 | Quarantine a flaky target | `shipyard quarantine add <target> --reason "..."` |
 | Remove from quarantine | `shipyard quarantine remove <target>` |
 
+## Supervised-Push Signal (`SHIPYARD_PR_RUNNING=1`)
+
+Every `git` / `gh` subprocess spawned by `shipyard pr` / `ship` /
+`auto-merge` / `overflow` / `wait` runs with `SHIPYARD_PR_RUNNING=1`
+in its environment. Consumer-side pre-push hooks (notably
+[`danielraffel/pulp#1406`](https://github.com/danielraffel/pulp/pull/1406))
+use this to differentiate a Shipyard-orchestrated push (full local
+validation, version-bump gate, etc.) from a raw `git push` that
+bypasses those gates and turns CI into the discovery channel.
+
+Quick smoke from a checkout that wants to verify the hook side:
+
+```sh
+SHIPYARD_PR_RUNNING=1 git push --dry-run    # what shipyard pr looks like to the hook
+unset SHIPYARD_PR_RUNNING ; git push --dry-run    # what a raw push looks like
+```
+
+The marker is set inside `src/supervised.rs` and routed through
+every supervised spawn site. Diagnostic subcommands (`doctor`,
+`pin`, `runner`, `cleanup`) intentionally do not set it. See
+`skills/shipyard/SKILL.md` → "Supervised Subprocess Marker" for the
+helper API.
+
 ## Runner Provider Defaults
 
 Shipyard's own workflows default to GitHub-hosted runners for Linux, macOS, and
