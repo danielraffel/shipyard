@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::ExitCode;
 
 use serde_json::{Value, json};
 
@@ -255,7 +255,7 @@ fn maybe_auto_create_base_branch(
         return;
     };
     let refspec = format!("{base_sha}:refs/heads/{base}");
-    let Ok(push) = Command::new("git")
+    let Ok(push) = crate::supervised::git_supervised()
         .args(["push", "origin", &refspec])
         .current_dir(cwd)
         .output()
@@ -275,7 +275,7 @@ fn maybe_auto_create_base_branch(
 }
 
 fn origin_branch_exists(cwd: &Path, branch: &str) -> Option<bool> {
-    let output = Command::new("git")
+    let output = crate::supervised::git_supervised()
         .args(["ls-remote", "--exit-code", "--heads", "origin", branch])
         .current_dir(cwd)
         .output()
@@ -284,7 +284,7 @@ fn origin_branch_exists(cwd: &Path, branch: &str) -> Option<bool> {
 }
 
 fn origin_branch_sha(cwd: &Path, branch: &str) -> Option<String> {
-    let output = Command::new("git")
+    let output = crate::supervised::git_supervised()
         .args([
             "ls-remote",
             "--exit-code",
@@ -457,7 +457,7 @@ fn git_required(cwd: &Path, args: &[&str]) -> Result<String, CliFailure> {
 }
 
 fn git_optional(cwd: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
+    let output = crate::supervised::git_supervised()
         .args(args)
         .current_dir(cwd)
         .output()
@@ -479,7 +479,7 @@ fn fields(items: impl IntoIterator<Item = (&'static str, Value)>) -> BTreeMap<St
 mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
-    use std::process::{Command, ExitCode, Stdio};
+    use std::process::{ExitCode, Stdio};
 
     use toml::Table;
 
@@ -490,7 +490,7 @@ mod tests {
     use crate::paths::RuntimePaths;
 
     fn git(args: &[&str], cwd: &std::path::Path) {
-        let status = Command::new("git")
+        let status = crate::supervised::git_supervised()
             .args(args)
             .current_dir(cwd)
             .env("GIT_AUTHOR_NAME", "T")
@@ -868,7 +868,7 @@ exit 2
         assert_eq!(output["ship_state"]["pr_title"], "Existing PR");
         assert!(
             String::from_utf8_lossy(
-                &Command::new("git")
+                &crate::supervised::git_supervised()
                     .args(["show-ref", "refs/heads/feature/test"])
                     .current_dir(&remote)
                     .output()
@@ -964,7 +964,7 @@ exit 2
         assert_eq!(output["ship_state"]["pr_title"], "Add autopilot");
         assert!(
             String::from_utf8_lossy(
-                &Command::new("git")
+                &crate::supervised::git_supervised()
                     .args(["show-ref", "refs/heads/develop/test"])
                     .current_dir(&remote)
                     .output()

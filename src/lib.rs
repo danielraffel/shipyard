@@ -70,6 +70,11 @@ pub mod runner_watchdog;
 pub mod ship;
 /// Durable in-flight ship-state model and store.
 pub mod ship_state;
+/// Subprocess helpers that mark supervised child processes with
+/// `SHIPYARD_PR_RUNNING=1` (issue #266). Used by every `git` / `gh`
+/// spawn site that participates in the supervised PR / ship / merge
+/// pipeline; diagnostic subcommands deliberately skip this.
+pub mod supervised;
 /// Working-tree drift detection shared by future `shipyard run` wiring.
 pub mod tree_drift;
 /// Tunnel readiness, Tailscale probe decoding, and supervisor retry policy.

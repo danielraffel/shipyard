@@ -280,7 +280,12 @@ fn run_git(
     args: &[&str],
     timeout: Duration,
 ) -> Result<ShellOutput, String> {
-    let mut command = git_command.map_or_else(|| Command::new("git"), Command::new);
+    // Supervised git invocation — sets SHIPYARD_PR_RUNNING=1 even when
+    // a test injects an alternative `git_command` shim, so coverage of
+    // the env-var contract extends through every code path.
+    let mut command = crate::supervised::supervised(
+        git_command.map_or_else(|| Command::new("git"), Command::new),
+    );
     command
         .args(args)
         .current_dir(cwd)

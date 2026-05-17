@@ -226,7 +226,7 @@ fn pr_is_merged(pr: u64, cwd: &Path, snapshot_file: Option<&Path>) -> bool {
     let payload = if let Some(path) = snapshot_file {
         std::fs::read_to_string(path).ok()
     } else {
-        let output = Command::new("gh")
+        let output = crate::supervised::gh_supervised(None)
             .args(["pr", "view", &pr.to_string(), "--json", "state"])
             .current_dir(cwd)
             .output()
@@ -295,6 +295,7 @@ fn merge_pr(
     // rather than failing the ship. Matches src/pr.rs's pattern for
     // gh pr list / create / view.
     if !custom_command && crate::pr::is_graphql_rate_limited(&message) {
+        crate::pr::report_rate_limit_fallback("gh pr merge", cwd);
         return merge_pr_rest(pr, cwd, merge_method, delete_branch);
     }
     Err(message)
@@ -308,6 +309,14 @@ fn merge_pr(
 /// budget left. This function bypasses the GraphQL probe and calls REST
 /// directly through `gh api`, then optionally deletes the head branch the
 /// same way `gh pr merge --delete-branch` would.
+///
+/// Race protection (issue #266): the original head SHA is fetched first
+/// and passed to the merge PUT as `sha=<oid>`, so GitHub rejects the
+/// merge server-side if the head changed between our snapshot and the
+/// PUT. On a "Base branch was modified" 405, we re-fetch the head once
+/// and retry exactly once if and only if the head SHA is unchanged
+/// (i.e., the modification was purely on the base branch — typical
+/// when a sibling PR lands during our merge attempt).
 fn merge_pr_rest(
     pr: u64,
     cwd: &Path,
@@ -315,36 +324,40 @@ fn merge_pr_rest(
     delete_branch: bool,
 ) -> Result<(), String> {
     let repo = repo_slug_for_rest(cwd)?;
+    let info = pr_head_info_rest(&repo, pr, cwd)?;
     let endpoint = format!("repos/{repo}/pulls/{pr}/merge");
-    let output = Command::new("gh")
-        .args([
-            "api",
-            "-X",
-            "PUT",
-            &endpoint,
-            "-f",
-            &format!("merge_method={}", merge_method.rest_value()),
-        ])
-        .current_dir(cwd)
-        .output()
-        .map_err(|error| format!("REST fallback: failed to invoke gh api: {error}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        return Err(format!(
-            "REST fallback: gh api PUT {endpoint} failed: {}",
-            if stderr.is_empty() { stdout } else { stderr }
-        ));
+
+    let first = attempt_merge_put(&endpoint, &info.sha, merge_method, cwd);
+    match first {
+        Ok(()) => {}
+        Err(error) if is_base_modified_405(&error) => {
+            // Re-fetch head; only retry if the head SHA is unchanged
+            // (i.e., a new commit did NOT land on the head branch).
+            // Codex review on PR construction: head_sha invariance is
+            // the load-bearing check; `mergeable` can be stale.
+            let refreshed = pr_head_info_rest(&repo, pr, cwd)?;
+            if refreshed.sha != info.sha {
+                return Err(format!(
+                    "REST fallback: PR head moved from {} to {} between merge attempts; refusing to retry",
+                    short_sha(&info.sha),
+                    short_sha(&refreshed.sha)
+                ));
+            }
+            attempt_merge_put(&endpoint, &refreshed.sha, merge_method, cwd)
+                .map_err(|second| format!("{error} (retry: {second})"))?;
+        }
+        Err(error) => return Err(error),
     }
-    if delete_branch && let Ok(branch) = pr_head_branch_rest(&repo, pr, cwd) {
+
+    if delete_branch {
         // Best-effort delete; mirrors `gh pr merge --delete-branch` which
         // also tolerates a missing branch silently.
-        let _ = Command::new("gh")
+        let _ = crate::supervised::gh_supervised(None)
             .args([
                 "api",
                 "-X",
                 "DELETE",
-                &format!("repos/{repo}/git/refs/heads/{branch}"),
+                &format!("repos/{repo}/git/refs/heads/{}", info.head_ref),
             ])
             .current_dir(cwd)
             .status();
@@ -352,8 +365,93 @@ fn merge_pr_rest(
     Ok(())
 }
 
+/// Issue the PUT /repos/:r/pulls/:n/merge call with the merge method
+/// and a server-side `sha` race guard. Returns Ok on 2xx, Err with
+/// the gh stderr (or stdout when stderr empty) on any non-2xx.
+fn attempt_merge_put(
+    endpoint: &str,
+    head_sha: &str,
+    merge_method: MergeMethod,
+    cwd: &Path,
+) -> Result<(), String> {
+    let output = crate::supervised::gh_supervised(None)
+        .args([
+            "api",
+            "-X",
+            "PUT",
+            endpoint,
+            "-f",
+            &format!("merge_method={}", merge_method.rest_value()),
+            "-f",
+            &format!("sha={head_sha}"),
+        ])
+        .current_dir(cwd)
+        .output()
+        .map_err(|error| format!("REST fallback: failed to invoke gh api: {error}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    Err(format!(
+        "REST fallback: gh api PUT {endpoint} failed: {}",
+        if stderr.is_empty() { stdout } else { stderr }
+    ))
+}
+
+/// Detect the canonical GitHub error body for "the base branch
+/// advanced between the merge check and the merge call". GitHub
+/// returns this as HTTP 405 with body
+/// `{"message":"Base branch was modified. ..."}`. The 405 itself
+/// surfaces in `gh api` stderr alongside the body text, so a
+/// substring match on the message is the reliable detector.
+pub(crate) fn is_base_modified_405(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("405") && lower.contains("base branch was modified")
+}
+
+fn short_sha(sha: &str) -> &str {
+    if sha.len() > 7 { &sha[..7] } else { sha }
+}
+
+/// Subset of the PR REST payload that the REST merge path needs.
+struct PrHeadInfo {
+    head_ref: String,
+    sha: String,
+}
+
+fn pr_head_info_rest(repo: &str, pr: u64, cwd: &Path) -> Result<PrHeadInfo, String> {
+    let output = crate::supervised::gh_supervised(None)
+        .args(["api", &format!("repos/{repo}/pulls/{pr}")])
+        .current_dir(cwd)
+        .output()
+        .map_err(|error| format!("REST fallback: gh api PR fetch failed: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "REST fallback: gh api repos/{repo}/pulls/{pr} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let value: Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("REST fallback: failed to parse PR JSON: {error}"))?;
+    let head = value
+        .get("head")
+        .ok_or_else(|| "REST fallback: PR JSON missing head".to_owned())?;
+    let head_ref = head
+        .get("ref")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "REST fallback: PR JSON missing head.ref".to_owned())?
+        .to_owned();
+    let sha = head
+        .get("sha")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "REST fallback: PR JSON missing head.sha".to_owned())?
+        .to_owned();
+    Ok(PrHeadInfo { head_ref, sha })
+}
+
 fn repo_slug_for_rest(cwd: &Path) -> Result<String, String> {
-    let output = Command::new("git")
+    let output = crate::supervised::git_supervised()
         .args(["config", "--get", "remote.origin.url"])
         .current_dir(cwd)
         .output()
@@ -390,27 +488,9 @@ fn parse_github_remote_slug(remote: &str) -> Option<String> {
     Some(slug)
 }
 
-fn pr_head_branch_rest(repo: &str, pr: u64, cwd: &Path) -> Result<String, String> {
-    let output = Command::new("gh")
-        .args(["api", &format!("repos/{repo}/pulls/{pr}")])
-        .current_dir(cwd)
-        .output()
-        .map_err(|error| format!("REST fallback: gh api PR fetch failed: {error}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "REST fallback: gh api repos/{repo}/pulls/{pr} failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    let value: Value = serde_json::from_slice(&output.stdout)
-        .map_err(|error| format!("REST fallback: failed to parse PR JSON: {error}"))?;
-    value
-        .get("head")
-        .and_then(|head| head.get("ref"))
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| "REST fallback: PR JSON missing head.ref".to_owned())
-}
+// (`pr_head_branch_rest` was superseded by `pr_head_info_rest` which
+//  returns both the head ref and the head SHA so the merge PUT can
+//  use the SHA as a race-guard. See issue #266.)
 
 fn merge_error_confirms_merged(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
@@ -496,4 +576,53 @@ fn fields(items: impl IntoIterator<Item = (&'static str, Value)>) -> BTreeMap<St
         .into_iter()
         .map(|(key, value)| (key.to_owned(), value))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── 405 base-branch-modified detector (issue #266) ──────────────────
+
+    #[test]
+    fn is_base_modified_405_matches_canonical_github_error_body() {
+        let msg = "HTTP 405: Base branch was modified. Review and try the merge again.";
+        assert!(is_base_modified_405(msg));
+    }
+
+    #[test]
+    fn is_base_modified_405_is_case_insensitive() {
+        let msg = "http 405: BASE BRANCH WAS MODIFIED";
+        assert!(is_base_modified_405(msg));
+    }
+
+    #[test]
+    fn is_base_modified_405_rejects_unrelated_405_errors() {
+        // 405 on a different endpoint or with a different message must not match —
+        // we only retry the merge for the specific base-modified case.
+        assert!(!is_base_modified_405(
+            "HTTP 405: Method Not Allowed (Required status check is pending)"
+        ));
+    }
+
+    #[test]
+    fn is_base_modified_405_rejects_base_modified_without_405_code() {
+        // Defense: only retry when GitHub returned the 405 status, not on
+        // arbitrary text containing the phrase.
+        assert!(!is_base_modified_405("Base branch was modified."));
+    }
+
+    // ── short_sha helper ────────────────────────────────────────────────
+
+    #[test]
+    fn short_sha_truncates_full_sha_to_seven_chars() {
+        let full = "deadbeefcafef00d1234567890abcdef12345678";
+        assert_eq!(short_sha(full), "deadbee");
+    }
+
+    #[test]
+    fn short_sha_returns_input_when_already_short() {
+        assert_eq!(short_sha("abc"), "abc");
+        assert_eq!(short_sha(""), "");
+    }
 }

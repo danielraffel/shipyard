@@ -1,11 +1,9 @@
 //! Submission preflight checks for `ship --pr`.
 
+use serde_json::{Value, json};
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::path::{Path, PathBuf};
-use std::process::Command;
-
-use serde_json::{Value, json};
 
 use crate::config::LoadedConfig;
 use crate::daemon_version::{DaemonVersionRelation, read_daemon_version_relation};
@@ -311,7 +309,7 @@ fn expected_root(config: &LoadedConfig) -> Option<PathBuf> {
 }
 
 fn git_root_for(cwd: &Path) -> Option<PathBuf> {
-    let output = Command::new("git")
+    let output = crate::supervised::git_supervised()
         .args(["rev-parse", "--show-toplevel"])
         .current_dir(cwd)
         .output()
