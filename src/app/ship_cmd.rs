@@ -479,7 +479,7 @@ fn fields(items: impl IntoIterator<Item = (&'static str, Value)>) -> BTreeMap<St
 mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
-    use std::process::{Command, ExitCode, Stdio};
+    use std::process::{ExitCode, Stdio};
 
     use toml::Table;
 

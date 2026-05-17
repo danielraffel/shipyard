@@ -31,6 +31,7 @@ pub const SUPERVISED_ENV_VALUE: &str = "1";
 
 /// Mark a `Command` as supervised. Returns the same command for
 /// fluent chaining.
+#[must_use]
 pub fn supervised(mut command: Command) -> Command {
     command.env(SUPERVISED_ENV_VAR, SUPERVISED_ENV_VALUE);
     command
@@ -40,11 +41,13 @@ pub fn supervised(mut command: Command) -> Command {
 /// existing `gh(gh_command)` helper at `src/pr.rs:151` — pass
 /// `Some(path)` from tests that inject a fake `gh` shim, `None`
 /// for production code that should resolve `gh` on `$PATH`.
+#[must_use]
 pub fn gh_supervised(gh_command: Option<&Path>) -> Command {
     supervised(gh_command.map_or_else(|| Command::new("gh"), Command::new))
 }
 
 /// Build a `git` invocation marked as supervised.
+#[must_use]
 pub fn git_supervised() -> Command {
     supervised(Command::new("git"))
 }

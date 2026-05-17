@@ -344,7 +344,7 @@ fn merge_pr_rest(
                 ));
             }
             attempt_merge_put(&endpoint, &refreshed.sha, merge_method, cwd)
-                .map_err(|second| format!("{first_err} (retry: {second})", first_err = error))?;
+                .map_err(|second| format!("{error} (retry: {second})"))?;
         }
         Err(error) => return Err(error),
     }
