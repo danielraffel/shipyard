@@ -1,9 +1,9 @@
 //! Submission preflight checks for `ship --pr`.
 
+use serde_json::{Value, json};
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::path::{Path, PathBuf};
-use serde_json::{Value, json};
 
 use crate::config::LoadedConfig;
 use crate::daemon_version::{DaemonVersionRelation, read_daemon_version_relation};
