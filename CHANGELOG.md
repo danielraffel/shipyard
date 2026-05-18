@@ -3,9 +3,12 @@
 All notable changes to Shipyard are documented here. Each entry links
 to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
-<a id="v0570"></a>
-## [0.58.0]
+<a id="v0580"></a>
+## [0.58.0] - 2026-05-18
 
+- feat: Phase 1 failure diagnostics (closes #303) ([#304](https://github.com/danielraffel/Shipyard/pull/304))
+
+<a id="v0570"></a>
 ## [0.57.0] - 2026-05-16
 
 - feat(pr): #266 env var + GraphQL rate-limit polish + 405 sha-gated merge retry ([#302](https://github.com/danielraffel/Shipyard/pull/302))
@@ -536,6 +539,7 @@ to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
 - feat/shipyard phases 1 4 ([#1](https://github.com/danielraffel/Shipyard/pull/1))
 
+[0.58.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.58.0
 [0.57.0]: https://github.com/danielraffel/Shipyard/releases/tag/v0.57.0
 [0.56.2]: https://github.com/danielraffel/Shipyard/releases/tag/v0.56.2
 [0.56.1]: https://github.com/danielraffel/Shipyard/releases/tag/v0.56.1
