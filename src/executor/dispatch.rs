@@ -49,6 +49,10 @@ pub struct ResolvedTarget {
     pub backend: ResolvedBackend,
     /// Backend-specific validation settings.
     pub validation: ResolvedValidation,
+    /// Issue #303: optional failure parser selection from
+    /// `[targets.<name>] failure_parser = "ctest|catch2|pytest|go|auto"`.
+    /// Defaults to `auto` when absent.
+    pub failure_parser: Option<String>,
 }
 
 impl ResolvedTarget {
@@ -516,7 +520,7 @@ fn resolve_backend_target(
         "local" => resolved_local(name, platform, table, validation_table),
         "ssh" => resolved_ssh(name, platform, backend_name, table, validation_table),
         "ssh-windows" => resolved_windows(name, platform, backend_name, table, validation_table),
-        "cloud" => Ok(resolved_cloud(data, name, platform, table)),
+        "cloud" => resolved_cloud(data, name, platform, table),
         backend => Err(DispatchError::UnsupportedBackend {
             target: name.to_owned(),
             backend: backend.to_owned(),
@@ -552,6 +556,7 @@ fn resolved_local(
         host: None,
         backend: ResolvedBackend::Local(target),
         validation: ResolvedValidation::Local(validation),
+        failure_parser: parse_failure_parser_field(name, table)?,
     })
 }
 
@@ -588,6 +593,7 @@ fn resolved_ssh(
             validation: ssh_validation(validation_table),
             contract: parse_contract(name, validation_table.get("contract"))?,
         },
+        failure_parser: parse_failure_parser_field(name, table)?,
     })
 }
 
@@ -631,10 +637,16 @@ fn resolved_windows(
             validation: windows_validation(validation_table),
             contract: parse_contract(name, validation_table.get("contract"))?,
         },
+        failure_parser: parse_failure_parser_field(name, table)?,
     })
 }
 
-fn resolved_cloud(data: &Table, name: &str, platform: &str, table: &Table) -> ResolvedTarget {
+fn resolved_cloud(
+    data: &Table,
+    name: &str,
+    platform: &str,
+    table: &Table,
+) -> Result<ResolvedTarget, DispatchError> {
     let provider = optional_string(table, "runner_provider")
         .or_else(|| optional_string(table, "provider"))
         .or_else(|| dotted_string(data, "cloud.provider"))
@@ -663,8 +675,9 @@ fn resolved_cloud(data: &Table, name: &str, platform: &str, table: &Table) -> Re
         .or_else(|| u64_value(table, "max_poll_secs"))
         .or_else(|| dotted_u64(data, "cloud.max_poll_secs"))
         .unwrap_or(3_600);
+    target.failure_parser = parse_failure_parser_field(name, table)?;
 
-    ResolvedTarget {
+    Ok(ResolvedTarget {
         name: name.to_owned(),
         platform: platform.to_owned(),
         backend_name: "cloud".to_owned(),
@@ -672,7 +685,8 @@ fn resolved_cloud(data: &Table, name: &str, platform: &str, table: &Table) -> Re
         host: None,
         backend: ResolvedBackend::Cloud(target),
         validation: ResolvedValidation::Cloud,
-    }
+        failure_parser: parse_failure_parser_field(name, table)?,
+    })
 }
 
 fn resolved_fallback(
@@ -735,6 +749,7 @@ fn resolved_fallback(
             heartbeat_stale_secs: u64_value(table, "heartbeat_stale_secs").unwrap_or(90),
         }),
         validation: ResolvedValidation::Fallback,
+        failure_parser: parse_failure_parser_field(name, table)?,
     })
 }
 
@@ -1194,6 +1209,18 @@ fn invalid_target(target: &str, reason: String) -> DispatchError {
         target: target.to_owned(),
         reason,
     }
+}
+
+/// Parse `[targets.<name>] failure_parser = "..."` against Shipyard's
+/// allow-list. See `crate::diagnostics::ALLOWED_PARSERS`. Returns `Ok(None)`
+/// when unset and `Err(_)` when set to a value not in the registry.
+fn parse_failure_parser_field(name: &str, table: &Table) -> Result<Option<String>, DispatchError> {
+    let Some(raw) = optional_string(table, "failure_parser") else {
+        return Ok(None);
+    };
+    crate::diagnostics::validate_parser_name(&raw)
+        .map(Some)
+        .map_err(|error| invalid_target(name, error.to_string()))
 }
 
 fn invalid_validation(target: &str, reason: String) -> DispatchError {

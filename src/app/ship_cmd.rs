@@ -12,10 +12,14 @@ use super::{
     wait_cmd::parse_github_repo_slug,
 };
 use crate::config::LoadedConfig;
+use crate::diagnostics::{
+    FailureDiagnostics, FailureKind, GhDiagnosticsFetcher, fetch_failed_job_diagnostics,
+    select_parser,
+};
 use crate::evidence::EvidenceStore;
 use crate::executor::dispatch::{ExecutorDispatcher, ResolvedTarget, resolve_targets};
 use crate::governance::{put_branch_protection, resolve_branch_rules};
-use crate::job::{Priority, ValidationMode};
+use crate::job::{Job, Priority, TargetResult, TargetStatus, ValidationMode};
 use crate::lane_policy::{LanePolicy, resolve_lane_policy};
 use crate::output::write_json_envelope;
 use crate::paths::RuntimePaths;
@@ -130,16 +134,89 @@ pub(super) fn ship_command<W: Write>(
         args.merge_command,
         args.merge_result,
     )?;
-    if json_mode {
-        render_json(stdout, pr_context.number, &outcome, render_state.merged())?;
+    // Issue #303: when validation failed, resolve failing-job + log diagnostics
+    // before we render so the human / JSON output points the user at the
+    // failing test list, not just "Validation failed".
+    let diagnostics = if render_state == ShipRenderState::ValidationFailed {
+        collect_failure_diagnostics(&request.repo, &outcome.job)
     } else {
-        render_human(stdout, pr_context.number, render_state)?;
+        Vec::new()
+    };
+    if json_mode {
+        render_json(
+            stdout,
+            pr_context.number,
+            &outcome,
+            render_state.merged(),
+            &diagnostics,
+        )?;
+    } else {
+        render_human(stdout, pr_context.number, render_state, &diagnostics)?;
     }
     Ok(if render_state == ShipRenderState::ValidationFailed {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
     })
+}
+
+/// One element per failed target. Built by `collect_failure_diagnostics`.
+#[derive(Clone, Debug)]
+pub(super) struct RenderedDiagnostics {
+    pub(super) target: TargetResult,
+    pub(super) kind: FailureKind,
+    pub(super) details: Option<FailureDiagnostics>,
+}
+
+fn collect_failure_diagnostics(repo: &str, job: &Job) -> Vec<RenderedDiagnostics> {
+    let fetcher = GhDiagnosticsFetcher;
+    let mut out = Vec::new();
+    for result in job.results.values() {
+        if matches!(
+            result.status,
+            TargetStatus::Pass | TargetStatus::Pending | TargetStatus::Running
+        ) {
+            continue;
+        }
+        let kind = match result.status {
+            TargetStatus::Cancelled => FailureKind::Cancelled,
+            // FailureClass::Timeout maps to TargetStatus::Error today; the
+            // executor sets the human error_message accordingly. We classify
+            // by the failure_class string when present.
+            TargetStatus::Error if result.failure_class.as_deref() == Some("timeout") => {
+                FailureKind::TimedOut
+            }
+            _ => FailureKind::Failed,
+        };
+        let mut target = result.clone();
+        let details = if let (Some(run_id), Some(slug)) =
+            (result.cloud_run_id, (!repo.is_empty()).then_some(repo))
+        {
+            let parser = select_parser(result.failure_parser.as_deref());
+            let resolved = fetch_failed_job_diagnostics(
+                &fetcher,
+                slug,
+                run_id,
+                &result.target_name,
+                parser.as_ref(),
+            );
+            if let Some(job) = resolved.job.as_ref() {
+                target.cloud_job_id = Some(job.job_id);
+                target.cloud_job_name = Some(job.name.clone());
+                target.cloud_job_url = Some(job.html_url.clone());
+                target.cloud_failed_step.clone_from(&job.failed_step);
+            }
+            Some(resolved)
+        } else {
+            None
+        };
+        out.push(RenderedDiagnostics {
+            target,
+            kind,
+            details,
+        });
+    }
+    out
 }
 
 fn prepare_ship_targets<W: Write>(
@@ -412,7 +489,23 @@ fn render_json<W: Write>(
     pr: u64,
     outcome: &crate::ship::ShipExecutionOutcome,
     merged: bool,
+    diagnostics: &[RenderedDiagnostics],
 ) -> Result<(), CliFailure> {
+    let diag_payload: Vec<Value> = diagnostics
+        .iter()
+        .map(|entry| {
+            json!({
+                "failed_target": entry.target.target_name,
+                "status": entry.target.status,
+                "kind": failure_kind_label(entry.kind),
+                "cloud_run_id": entry.target.cloud_run_id,
+                "cloud_job_id": entry.target.cloud_job_id,
+                "cloud_job_url": entry.target.cloud_job_url,
+                "failed_step": entry.target.cloud_failed_step,
+                "details": entry.details,
+            })
+        })
+        .collect();
     write_json_envelope(
         stdout,
         "ship",
@@ -425,6 +518,7 @@ fn render_json<W: Write>(
                 "resumed_existing_state",
                 Value::Bool(outcome.resumed_existing_state),
             ),
+            ("diagnostics", Value::Array(diag_payload)),
         ]),
     )
     .map_err(|error| CliFailure::new(1, error.to_string()))
@@ -434,17 +528,113 @@ fn render_human<W: Write>(
     stdout: &mut W,
     pr: u64,
     state: ShipRenderState,
+    diagnostics: &[RenderedDiagnostics],
 ) -> Result<(), CliFailure> {
-    match state {
-        ShipRenderState::ValidationFailed => {
-            writeln!(stdout, "Validation failed. PR #{pr} not merged.")
-        }
+    let result = match state {
+        ShipRenderState::ValidationFailed => render_validation_failed(stdout, pr, diagnostics),
         ShipRenderState::Merged => writeln!(stdout, "PR #{pr} merged. All green."),
         ShipRenderState::GreenNotMerged => {
             writeln!(stdout, "All green but merge failed for PR #{pr}.")
         }
+    };
+    result.map_err(|error| CliFailure::new(1, error.to_string()))
+}
+
+fn render_validation_failed<W: Write>(
+    stdout: &mut W,
+    pr: u64,
+    diagnostics: &[RenderedDiagnostics],
+) -> std::io::Result<()> {
+    writeln!(stdout, "\u{2717} Validation failed. PR #{pr} not merged.")?;
+    if diagnostics.is_empty() {
+        writeln!(
+            stdout,
+            "  (no per-target diagnostics; rerun with --json for raw run state)"
+        )?;
+        return Ok(());
     }
-    .map_err(|error| CliFailure::new(1, error.to_string()))
+    for (idx, entry) in diagnostics.iter().enumerate() {
+        if idx > 0 {
+            writeln!(stdout)?;
+        }
+        match entry.kind {
+            FailureKind::Cancelled => {
+                writeln!(
+                    stdout,
+                    "  \u{223C} Validation cancelled (concurrency-replaced or skipped); not a failure"
+                )?;
+                writeln!(stdout, "    Target:  {}", entry.target.target_name)?;
+            }
+            FailureKind::TimedOut => {
+                writeln!(
+                    stdout,
+                    "  \u{2717} Validation timed out{}",
+                    entry
+                        .target
+                        .error_message
+                        .as_deref()
+                        .map(|m| format!(" — {m}"))
+                        .unwrap_or_default(),
+                )?;
+                writeln!(stdout, "    Target:  {}", entry.target.target_name)?;
+            }
+            FailureKind::Failed => {
+                let provider = entry
+                    .target
+                    .provider
+                    .as_deref()
+                    .map(|p| format!(" (cloud={p})"))
+                    .unwrap_or_default();
+                writeln!(
+                    stdout,
+                    "    Target:  {}{provider}",
+                    entry.target.target_name
+                )?;
+                if let Some(details) = entry.details.as_ref() {
+                    if let Some(job) = details.job.as_ref() {
+                        writeln!(stdout, "    Job:     {}", job.name)?;
+                        if !job.html_url.is_empty() {
+                            writeln!(stdout, "    URL:     {}", job.html_url)?;
+                        }
+                        if let Some(step) = job.failed_step.as_deref() {
+                            writeln!(stdout, "    Step:    \"{step}\"")?;
+                        }
+                    } else if let Some(run_id) = details.run_id {
+                        writeln!(
+                            stdout,
+                            "    Run ID:  {run_id} (failed-job lookup unavailable)"
+                        )?;
+                    }
+                    if !details.failure_summary.is_empty() {
+                        writeln!(stdout, "    Tests:")?;
+                        for line in &details.failure_summary {
+                            writeln!(stdout, "      {line}")?;
+                        }
+                        if details.failure_summary_truncated {
+                            writeln!(stdout, "      (truncated; see job log for full list)")?;
+                        }
+                    } else if details.log_tail.is_some() {
+                        writeln!(stdout, "    Tests:   (no recognised footer; see job URL)")?;
+                    }
+                } else if let Some(message) = entry.target.error_message.as_deref() {
+                    writeln!(stdout, "    Error:   {message}")?;
+                }
+            }
+        }
+    }
+    writeln!(
+        stdout,
+        "    Action:  run `shipyard watch --pr {pr}` to follow recovery, or push fix."
+    )?;
+    Ok(())
+}
+
+fn failure_kind_label(kind: FailureKind) -> &'static str {
+    match kind {
+        FailureKind::Cancelled => "cancelled",
+        FailureKind::TimedOut => "timed_out",
+        FailureKind::Failed => "failed",
+    }
 }
 
 fn git_repo_slug(cwd: &Path) -> Option<String> {

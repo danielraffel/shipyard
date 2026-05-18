@@ -619,7 +619,13 @@ fn dispatched_run(
                     |target| target.backend_name.clone(),
                 )
             }),
-        run_id: job.id.clone(),
+        // Issue #303: prefer the cloud (GHA) workflow run id when present so
+        // the dispatched-run record actually points at the workflow run a user
+        // can open in the browser. Fall back to the internal Shipyard job id
+        // for local/SSH/Windows backends that don't yield a GHA run.
+        run_id: result
+            .cloud_run_id
+            .map_or_else(|| job.id.clone(), |id| id.to_string()),
         status: if result.passed() {
             "completed".to_owned()
         } else {

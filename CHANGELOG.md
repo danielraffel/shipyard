@@ -4,6 +4,8 @@ All notable changes to Shipyard are documented here. Each entry links
 to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
 <a id="v0570"></a>
+## [0.58.0]
+
 ## [0.57.0] - 2026-05-16
 
 - feat(pr): #266 env var + GraphQL rate-limit polish + 405 sha-gated merge retry ([#302](https://github.com/danielraffel/Shipyard/pull/302))

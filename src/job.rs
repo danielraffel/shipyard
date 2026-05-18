@@ -154,6 +154,24 @@ pub struct TargetResult {
     /// Ancestor SHA reused for evidence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reused_from: Option<String>,
+    /// GitHub Actions workflow run ID (cloud backend only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud_run_id: Option<u64>,
+    /// GitHub Actions job database ID for the failing job (cloud backend only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud_job_id: Option<u64>,
+    /// GitHub Actions job display name (cloud backend only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud_job_name: Option<String>,
+    /// GitHub Actions job HTML URL (cloud backend only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud_job_url: Option<String>,
+    /// Name of the failing step inside the failing job (cloud backend only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud_failed_step: Option<String>,
+    /// Per-target failure parser selection from `.shipyard/config.toml`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_parser: Option<String>,
 }
 
 impl TargetResult {
@@ -189,6 +207,12 @@ impl TargetResult {
             contract_violation: None,
             failure_class: None,
             reused_from: None,
+            cloud_run_id: None,
+            cloud_job_id: None,
+            cloud_job_name: None,
+            cloud_job_url: None,
+            cloud_failed_step: None,
+            failure_parser: None,
         }
     }
 
