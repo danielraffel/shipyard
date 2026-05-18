@@ -104,6 +104,8 @@ pub struct CloudTargetConfig {
     pub dispatch_settle_secs: u64,
     /// Maximum wait for the workflow run to complete.
     pub max_poll_secs: u64,
+    /// Optional per-target failure parser name (issue #303).
+    pub failure_parser: Option<String>,
 }
 
 impl CloudTargetConfig {
@@ -121,6 +123,7 @@ impl CloudTargetConfig {
             poll_interval_secs: DEFAULT_POLL_INTERVAL_SECS,
             dispatch_settle_secs: DEFAULT_DISPATCH_SETTLE_SECS,
             max_poll_secs: DEFAULT_MAX_POLL_SECS,
+            failure_parser: None,
         }
     }
 }
@@ -316,19 +319,35 @@ impl<C: CloudActionsClient> CloudExecutor<C> {
                     emit_progress(&mut request.progress_callback, phase);
                     if run.status == "completed" {
                         let passed = run.conclusion.as_deref() == Some("success");
-                        return terminal_result(
+                        let cancelled =
+                            matches!(run.conclusion.as_deref(), Some("cancelled" | "skipped"));
+                        let status = if passed {
+                            TargetStatus::Pass
+                        } else if cancelled {
+                            TargetStatus::Cancelled
+                        } else {
+                            TargetStatus::Fail
+                        };
+                        let failure_class = (!passed && !cancelled).then_some(FailureClass::Test);
+                        let mut result = terminal_result(
                             &request.target,
                             started_at,
                             started,
                             &request.log_path,
-                            if passed {
-                                TargetStatus::Pass
-                            } else {
-                                TargetStatus::Fail
-                            },
+                            status,
                             None,
-                            (!passed).then_some(FailureClass::Test),
+                            failure_class,
                         );
+                        // Persist the GHA run_id so downstream renderers can
+                        // resolve the failing job + log via `gh api`.
+                        // See issue #303: previous behavior dropped this so
+                        // `ship.rs:dispatched_run` had to overwrite with the
+                        // internal Shipyard job id, which was useless for
+                        // failure diagnostics.
+                        if !passed {
+                            result.cloud_run_id = Some(run.database_id);
+                        }
+                        return result;
                     }
                 }
                 Err(error) => {
@@ -409,6 +428,10 @@ fn terminal_result(
     result.last_heartbeat_at = Some(completed_at);
     result.error_message = error_message;
     result.failure_class = failure_class.map(|class| class.as_str().to_owned());
+    // Issue #303: thread the per-target failure parser selection through to
+    // the target result so the renderer in `ship_cmd.rs` knows which parser
+    // to pick when diagnosing the failure.
+    result.failure_parser.clone_from(&target.failure_parser);
     result
 }
 

@@ -24,6 +24,10 @@ pub mod daemon_ipc;
 pub mod daemon_runtime;
 /// Shared daemon/CLI version comparison helpers.
 pub mod daemon_version;
+/// Phase 1 failure diagnostics for cloud (GitHub Actions) targets.
+/// Fetches failing-job metadata + parses a bounded log tail so
+/// `Validation failed.` becomes an actionable, structured block.
+pub mod diagnostics;
 /// Doctor report generation for machine and environment checks.
 pub mod doctor;
 /// Durable evidence records and cross-branch lookup helpers.
