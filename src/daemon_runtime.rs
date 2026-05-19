@@ -47,6 +47,7 @@ use crate::webhook::{decode_webhook_event, is_valid_signature};
 
 #[cfg(unix)]
 const SHIP_STATE_SCAN_INTERVAL: Duration = Duration::from_secs(1);
+#[cfg(unix)]
 const WEBHOOK_REGISTRATION_RETRY_INTERVAL: Duration = Duration::from_mins(5);
 
 /// Foreground daemon runtime configuration.
