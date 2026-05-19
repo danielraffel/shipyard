@@ -51,7 +51,10 @@ pub(super) fn pr_command<W: Write>(
     json_mode: bool,
     stdout: &mut W,
 ) -> Result<ExitCode, CliFailure> {
-    args.base = normalize_base(&args.base).to_owned();
+    // `clone_into(&mut args.base)` would alias-violate because the source
+    // slice points INTO args.base; introduce a temporary to decouple.
+    let normalized = normalize_base(&args.base).to_owned();
+    args.base = normalized;
 
     if !args.skip_bump.is_empty() && args.bump_reason.is_none() {
         return Err(CliFailure::new(
