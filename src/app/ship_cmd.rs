@@ -480,9 +480,7 @@ fn post_run_merge_state(
         AutoMergeOutcome::Merged { .. } | AutoMergeOutcome::AlreadyMerged => {
             Ok(ShipRenderState::Merged)
         }
-        AutoMergeOutcome::MergeFailed { error } => {
-            Ok(ShipRenderState::GreenNotMerged(error))
-        }
+        AutoMergeOutcome::MergeFailed { error } => Ok(ShipRenderState::GreenNotMerged(error)),
         AutoMergeOutcome::PrNotFound
         | AutoMergeOutcome::InFlight { .. }
         | AutoMergeOutcome::TargetFailed { .. } => Err(CliFailure::new(
@@ -552,11 +550,7 @@ fn render_human<W: Write>(
 /// (e.g. GHA-hosted Linux/Windows still in_progress while local
 /// macOS already passed). Surface the underlying error verbatim
 /// and point the user at the two unblocks they can pick from.
-fn render_green_not_merged<W: Write>(
-    stdout: &mut W,
-    pr: u64,
-    error: &str,
-) -> std::io::Result<()> {
+fn render_green_not_merged<W: Write>(stdout: &mut W, pr: u64, error: &str) -> std::io::Result<()> {
     writeln!(
         stdout,
         "Shipyard-validated targets passed, but the merge attempt was rejected for PR #{pr}:"
