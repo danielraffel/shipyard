@@ -5,10 +5,12 @@ use std::thread;
 use std::time::Duration;
 
 use super::CliFailure;
+use crate::diagnostics::{DiagnosticsFetcher, GhDiagnosticsFetcher};
 use crate::evidence::EvidenceStore;
 use crate::ship_state::ShipStateStore;
 use crate::watch::{
-    active_pr_for_current_branch, emit_watch_event, emit_watch_snapshot, reused_evidence_map,
+    WatchDiagnosticsCache, active_pr_for_current_branch, collect_watch_diagnostics,
+    emit_watch_event, emit_watch_snapshot_with_diagnostics, reused_evidence_map,
     ship_terminal_verdict, watch_event_signature,
 };
 
@@ -32,6 +34,21 @@ pub(super) fn watch<W: Write>(
     options: WatchCommandOptions,
     stdout: &mut W,
 ) -> Result<ExitCode, CliFailure> {
+    let fetcher = GhDiagnosticsFetcher;
+    watch_with_fetcher(context, options, &fetcher, stdout)
+}
+
+/// Run the watch loop with an injectable diagnostics fetcher.
+///
+/// Production callers use [`watch`], which passes [`GhDiagnosticsFetcher`].
+/// Tests substitute a fake fetcher so the terminal-failure diagnostics path
+/// can be exercised without a real GitHub API surface.
+pub(super) fn watch_with_fetcher<W: Write, F: DiagnosticsFetcher + ?Sized>(
+    context: WatchCommandContext<'_>,
+    options: WatchCommandOptions,
+    fetcher: &F,
+    stdout: &mut W,
+) -> Result<ExitCode, CliFailure> {
     let target_pr = options
         .pr
         .or_else(|| active_pr_for_current_branch(context.store, context.cwd));
@@ -44,6 +61,7 @@ pub(super) fn watch<W: Write>(
 
     let mut last_signature = None;
     let mut observed_any_state = false;
+    let mut diagnostics_cache = WatchDiagnosticsCache::new();
 
     loop {
         let state = context.store.get(target_pr);
@@ -79,8 +97,20 @@ pub(super) fn watch<W: Write>(
         let reuse_map = reused_evidence_map(context.evidence_store, &state);
         let signature = watch_event_signature(&state, &reuse_map);
         if last_signature.as_deref() != Some(signature.as_str()) {
-            emit_watch_snapshot(&state, &reuse_map, options.json, stdout)
-                .map_err(|error| CliFailure::new(1, error.to_string()))?;
+            // Phase 2 (issue #303): on each new state signature, resolve
+            // diagnostics for any target that has just entered a terminal
+            // failure state. The cache key `(target, run_id)` guarantees we
+            // fetch at most once per terminal-failure transition for the
+            // lifetime of this `shipyard watch` invocation.
+            let diagnostics = collect_watch_diagnostics(&state, fetcher, &mut diagnostics_cache);
+            emit_watch_snapshot_with_diagnostics(
+                &state,
+                &reuse_map,
+                &diagnostics,
+                options.json,
+                stdout,
+            )
+            .map_err(|error| CliFailure::new(1, error.to_string()))?;
             last_signature = Some(signature);
         }
 
@@ -107,7 +137,8 @@ mod tests {
     use chrono::Utc;
     use serde_json::Value;
 
-    use super::{WatchCommandContext, WatchCommandOptions, watch};
+    use super::{WatchCommandContext, WatchCommandOptions, watch, watch_with_fetcher};
+    use crate::diagnostics::{DiagnosticsError, DiagnosticsFetcher};
     use crate::evidence::EvidenceStore;
     use crate::ship_state::{DispatchedRun, ShipState, ShipStateStore};
 
@@ -277,5 +308,149 @@ mod tests {
         assert!(text.contains("PR #42"));
         assert!(text.contains("linux"));
         assert!(text.contains("fail"));
+    }
+
+    // ----- Phase 2 (issue #303) ------------------------------------------
+
+    struct CountingFakeFetcher {
+        jobs_json: String,
+        log: String,
+        jobs_calls: std::cell::Cell<usize>,
+        log_calls: std::cell::Cell<usize>,
+    }
+
+    impl CountingFakeFetcher {
+        fn new(jobs_json: String, log: String) -> Self {
+            Self {
+                jobs_json,
+                log,
+                jobs_calls: std::cell::Cell::new(0),
+                log_calls: std::cell::Cell::new(0),
+            }
+        }
+    }
+
+    impl DiagnosticsFetcher for CountingFakeFetcher {
+        fn fetch_jobs_json(&self, _repo: &str, _run_id: u64) -> Result<String, DiagnosticsError> {
+            self.jobs_calls.set(self.jobs_calls.get() + 1);
+            Ok(self.jobs_json.clone())
+        }
+
+        fn fetch_job_log(&self, _repo: &str, _job_id: u64) -> Result<String, DiagnosticsError> {
+            self.log_calls.set(self.log_calls.get() + 1);
+            Ok(self.log.clone())
+        }
+    }
+
+    fn jobs_payload() -> String {
+        serde_json::json!({
+            "total_count": 1,
+            "jobs": [{
+                "id": 76_630_095_261u64,
+                "name": "macOS (ARM64) [namespace]",
+                "html_url": "https://github.com/danielraffel/pulp/actions/runs/26063806409/job/76630095261",
+                "conclusion": "failure",
+                "steps": [{"name": "Test (non-Windows)", "conclusion": "failure"}],
+                "labels": ["namespace-profile-generouscorp-macos"]
+            }]
+        })
+        .to_string()
+    }
+
+    fn ctest_log() -> String {
+        "noise\nThe following tests FAILED:\n\t1236 - FontResolver: animation respects LRU cache cap (Failed)\nErrors while running CTest\n".to_owned()
+    }
+
+    fn cloud_failed_state(pr: u64, run_id: u64) -> ShipState {
+        let mut state = ShipState::new(
+            pr,
+            "danielraffel/pulp",
+            "feature/test",
+            "main",
+            "abcdef0123456789abcdef0123456789abcdef01",
+            "policy",
+        );
+        let now = Utc::now();
+        state.dispatched_runs.push(DispatchedRun {
+            target: "mac".to_owned(),
+            provider: "namespace".to_owned(),
+            run_id: run_id.to_string(),
+            status: "failed".to_owned(),
+            started_at: now,
+            updated_at: now,
+            attempt: 1,
+            last_heartbeat_at: None,
+            phase: Some("test".to_owned()),
+            required: true,
+        });
+        state
+            .evidence_snapshot
+            .insert("mac".to_owned(), "fail".to_owned());
+        state
+    }
+
+    #[test]
+    fn watch_human_render_includes_phase2_diagnostics_block() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (store, evidence) = stores(&temp);
+        store
+            .save(&cloud_failed_state(42, 26_063_806_409))
+            .expect("state");
+        let fetcher = CountingFakeFetcher::new(jobs_payload(), ctest_log());
+        let mut out = Vec::new();
+
+        let code = watch_with_fetcher(
+            context(&store, &evidence, temp.path()),
+            options(Some(42), false, false),
+            &fetcher,
+            &mut out,
+        )
+        .expect("watch");
+
+        assert_eq!(code, ExitCode::from(1));
+        let text = String::from_utf8(out).expect("utf8");
+        assert!(
+            text.contains(
+                "https://github.com/danielraffel/pulp/actions/runs/26063806409/job/76630095261"
+            ),
+            "human render must include failing job URL:\n{text}"
+        );
+        assert!(
+            text.contains("Test (non-Windows)"),
+            "human render must surface the failing step:\n{text}"
+        );
+        assert!(
+            text.contains("FontResolver"),
+            "human render must show parsed CTest footer:\n{text}"
+        );
+    }
+
+    #[test]
+    fn watch_json_render_includes_phase2_diagnostics_block() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (store, evidence) = stores(&temp);
+        store
+            .save(&cloud_failed_state(42, 26_063_806_409))
+            .expect("state");
+        let fetcher = CountingFakeFetcher::new(jobs_payload(), ctest_log());
+        let mut out = Vec::new();
+
+        let code = watch_with_fetcher(
+            context(&store, &evidence, temp.path()),
+            options(Some(42), false, true),
+            &fetcher,
+            &mut out,
+        )
+        .expect("watch");
+
+        assert_eq!(code, ExitCode::from(1));
+        let payload: Value = serde_json::from_slice(&out).expect("json payload");
+        let diag = &payload["diagnostics"][0];
+        assert_eq!(diag["failed_target"], "mac");
+        assert_eq!(diag["run_id"], 26_063_806_409u64);
+        assert_eq!(diag["provider"], "namespace");
+        assert_eq!(diag["kind"], "failed");
+        assert_eq!(diag["cloud_job_id"], 76_630_095_261u64);
+        assert_eq!(diag["failed_step"], "Test (non-Windows)");
     }
 }

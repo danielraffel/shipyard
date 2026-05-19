@@ -3,6 +3,11 @@
 All notable changes to Shipyard are documented here. Each entry links
 to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
+<a id="v0590"></a>
+## [0.59.0]
+
+- feat(watch): Phase 2 failure diagnostics — render the Phase 1 failing-job URL + step + parsed test footer on every `shipyard watch --pr N --follow` transition where a target enters a terminal failure state.
+
 <a id="v0580"></a>
 ## [0.58.0] - 2026-05-18
 
