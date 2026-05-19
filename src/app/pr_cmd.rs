@@ -31,14 +31,28 @@ struct PrGates {
     versioning_config: PathBuf,
 }
 
+/// Issue #301 (1/3): strip a leading `origin/` from `--base` so both
+/// `--base main` and `--base origin/main` work. Without this, the two
+/// `format!("origin/{base}")` sites below double-prefix the value into
+/// `origin/origin/main`, which fails the skill-sync `git diff origin/
+/// origin/main..HEAD` call with a Python traceback. Multi-remote setups
+/// should still pass the bare branch name; arbitrary prefixes are NOT
+/// stripped (we only special-case the `origin` remote because that's
+/// what Shipyard appends internally).
+fn normalize_base(input: &str) -> &str {
+    input.strip_prefix("origin/").unwrap_or(input)
+}
+
 pub(super) fn pr_command<W: Write>(
-    args: PrCommandArgs,
+    mut args: PrCommandArgs,
     config: &LoadedConfig,
     cwd: &Path,
     runtime_paths: &RuntimePaths,
     json_mode: bool,
     stdout: &mut W,
 ) -> Result<ExitCode, CliFailure> {
+    args.base = normalize_base(&args.base).to_owned();
+
     if !args.skip_bump.is_empty() && args.bump_reason.is_none() {
         return Err(CliFailure::new(
             2,
@@ -480,6 +494,20 @@ mod tests {
     use crate::config::{LoadedConfig, LocalOverlaySource};
 
     use super::*;
+
+    #[test]
+    fn normalize_base_strips_origin_prefix() {
+        // Both forms a CLAUDE.md-following user would type must resolve
+        // to the same internal base. See issue #301 (1/3).
+        assert_eq!(normalize_base("main"), "main");
+        assert_eq!(normalize_base("origin/main"), "main");
+        assert_eq!(normalize_base("origin/develop/foo"), "develop/foo");
+        // Other remotes are NOT special-cased — pass the bare name.
+        assert_eq!(normalize_base("upstream/main"), "upstream/main");
+        // Defensive: empty / weird shapes pass through unchanged.
+        assert_eq!(normalize_base(""), "");
+        assert_eq!(normalize_base("origin/"), "");
+    }
 
     fn pr_args() -> PrCommandArgs {
         PrCommandArgs {
