@@ -44,6 +44,10 @@ pub(super) struct ShipCommandArgs {
     pub(super) merge_command: Option<PathBuf>,
     pub(super) merge_result: Option<MergeResult>,
     pub(super) gh_command: Option<PathBuf>,
+    /// Test hook: bypass `gh pr view` for archived-PR checks in the
+    /// auto-merge handoff. Mirrors `auto-merge --pr-snapshot-file`. See
+    /// Shipyard issue #296 for the failure mode this guards against.
+    pub(super) pr_snapshot_file: Option<PathBuf>,
     pub(super) allow_unreachable_targets: bool,
     pub(super) skip_targets: Vec<String>,
 }
@@ -133,6 +137,7 @@ pub(super) fn ship_command<W: Write>(
         outcome.job.passed(),
         args.merge_command,
         args.merge_result,
+        args.pr_snapshot_file,
     )?;
     // Issue #303: when validation failed, resolve failing-job + log diagnostics
     // before we render so the human / JSON output points the user at the
@@ -461,6 +466,7 @@ fn post_run_merge_state(
     validation_passed: bool,
     merge_command: Option<PathBuf>,
     merge_result: Option<MergeResult>,
+    pr_snapshot_file: Option<PathBuf>,
 ) -> Result<ShipRenderState, CliFailure> {
     if !validation_passed {
         return Ok(ShipRenderState::ValidationFailed);
@@ -470,7 +476,7 @@ fn post_run_merge_state(
         merge_method: MergeMethod::Squash,
         delete_branch: true,
         admin: false,
-        pr_snapshot_file: None,
+        pr_snapshot_file,
         merge_command,
         merge_result,
     };
@@ -912,6 +918,7 @@ mod tests {
                 merge_command: None,
                 merge_result: Some(MergeResult::Success),
                 gh_command: None,
+                pr_snapshot_file: None,
                 allow_unreachable_targets: false,
                 skip_targets: Vec::new(),
             },
@@ -940,13 +947,19 @@ mod tests {
         );
     }
 
-    // FIXME(danielraffel/Shipyard#296): pre-existing deterministic-on-some-hosts
-    // failure on origin/main — `merged: Bool(true)` is observed when the test
-    // expects `false`, suggesting a state-store race where the synthetic
-    // `merge_result: Failure` path doesn't always reach `MergeFailed`. Ignored
-    // here so unrelated PRs can land; the real fix needs a separate
-    // investigation of the ship_command/execute_auto_merge interaction.
-    #[ignore = "pre-existing flake — Shipyard issue #296"]
+    // Regression coverage for Shipyard issue #296. The synthetic
+    // `MergeResult::Failure` injects `Err("simulated merge failure")` in
+    // `merge_pr`. `execute_auto_merge` then evaluates
+    // `merge_error_confirms_merged(error) || pr_is_merged(...)` as a
+    // "did the merge actually succeed despite the error?" escape hatch.
+    // `pr_is_merged` shells out to `gh pr view <pr> --json state` against
+    // the temp repo's `origin` remote (https://github.com/danielraffel/pulp).
+    // PR #43 *is* merged in that upstream repo, so on hosts with a fresh
+    // GraphQL budget `pr_is_merged` returns true and the failure path
+    // archives the state and returns `Merged` — producing the observed
+    // `merged: true`. Pinning `--pr-snapshot-file` (via the new
+    // `pr_snapshot_file` field on `ShipCommandArgs`) keeps `pr_is_merged`
+    // offline and deterministic.
     #[test]
     fn ship_command_green_merge_failure_keeps_active_state_and_exits_success() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -957,6 +970,8 @@ mod tests {
             Some(temp.path().join("global")),
             Some(temp.path().join("state")),
         );
+        let snapshot = temp.path().join("pr.json");
+        std::fs::write(&snapshot, r#"{"state":"OPEN"}"#).expect("write snapshot");
         let mut stdout = Vec::new();
 
         let code = ship_command(
@@ -969,6 +984,7 @@ mod tests {
                 merge_command: None,
                 merge_result: Some(MergeResult::Failure),
                 gh_command: None,
+                pr_snapshot_file: Some(snapshot),
                 allow_unreachable_targets: false,
                 skip_targets: Vec::new(),
             },
@@ -1015,6 +1031,7 @@ mod tests {
                 merge_command: None,
                 merge_result: Some(MergeResult::Success),
                 gh_command: None,
+                pr_snapshot_file: None,
                 allow_unreachable_targets: false,
                 skip_targets: Vec::new(),
             },
@@ -1060,6 +1077,7 @@ mod tests {
                 merge_command: None,
                 merge_result: Some(MergeResult::Success),
                 gh_command: None,
+                pr_snapshot_file: None,
                 allow_unreachable_targets: false,
                 skip_targets: vec!["linux".to_owned()],
             },
@@ -1121,6 +1139,7 @@ exit 2
                 merge_command: None,
                 merge_result: Some(MergeResult::Success),
                 gh_command: Some(gh),
+                pr_snapshot_file: None,
                 allow_unreachable_targets: false,
                 skip_targets: Vec::new(),
             },
@@ -1220,6 +1239,7 @@ exit 2
                 merge_command: None,
                 merge_result: Some(MergeResult::Success),
                 gh_command: Some(gh),
+                pr_snapshot_file: None,
                 allow_unreachable_targets: false,
                 skip_targets: Vec::new(),
             },
