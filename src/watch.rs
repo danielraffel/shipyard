@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::Path;
 use std::process::Command;
@@ -6,11 +6,27 @@ use std::process::Command;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
+use crate::diagnostics::{
+    DiagnosticsFetcher, FailureDiagnostics, FailureKind, GhDiagnosticsFetcher,
+    fetch_failed_job_diagnostics, select_parser,
+};
 use crate::evidence::EvidenceStore;
 use crate::output::write_json_envelope;
 use crate::ship_state::{DispatchedRun, ShipState, ShipStateStore};
 
 const QUEUED_STATUSES: [&str; 3] = ["queued", "pending", "waiting"];
+
+/// Statuses on a `DispatchedRun` that indicate a terminal failure for which
+/// `shipyard watch` should fetch and render Phase 1 diagnostics on the
+/// transition that first observes them.
+const TERMINAL_FAILURE_RUN_STATUSES: [&str; 6] = [
+    "failed",
+    "failure",
+    "completed_failure",
+    "cancelled",
+    "canceled",
+    "timed_out",
+];
 
 /// Determine the active PR for the current git branch, if any.
 #[must_use]
@@ -142,6 +158,134 @@ pub fn ship_terminal_verdict(state: &ShipState) -> Option<bool> {
     )
 }
 
+/// Phase 1 diagnostics resolved for a single failed target during a
+/// `shipyard watch` poll. Built by [`collect_watch_diagnostics`] and rendered
+/// by [`emit_watch_snapshot_with_diagnostics`].
+#[derive(Clone, Debug)]
+pub struct WatchTargetDiagnostics {
+    /// Logical Shipyard target name (e.g. `mac`).
+    pub target_name: String,
+    /// Provider label captured on the dispatched run (e.g. `namespace`,
+    /// `github-hosted`).
+    pub provider: String,
+    /// GitHub Actions workflow run ID this evidence refers to.
+    pub run_id: u64,
+    /// Failure-cause classification used to pick a verb in the human render
+    /// and to label the JSON event.
+    pub kind: FailureKind,
+    /// Resolved failing-job metadata + parsed footer.
+    pub diagnostics: FailureDiagnostics,
+}
+
+/// Per-watch-session cache keyed by `(target, run_id)` so a target that has
+/// already been reported as terminally failed is not refetched on every poll
+/// (issue #303 Phase 2). The cache is intentionally process-local — it lives
+/// for the duration of a single `shipyard watch` invocation.
+#[derive(Clone, Debug, Default)]
+pub struct WatchDiagnosticsCache {
+    seen: BTreeSet<(String, u64)>,
+}
+
+impl WatchDiagnosticsCache {
+    /// Create an empty cache.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Whether the cache has already resolved diagnostics for this
+    /// `(target, run_id)` pair.
+    #[must_use]
+    pub fn contains(&self, target: &str, run_id: u64) -> bool {
+        self.seen.contains(&(target.to_owned(), run_id))
+    }
+
+    /// Mark `(target, run_id)` as resolved so subsequent polls skip refetching.
+    pub fn mark(&mut self, target: &str, run_id: u64) {
+        self.seen.insert((target.to_owned(), run_id));
+    }
+}
+
+/// Resolve Phase 1 diagnostics for any `DispatchedRun` that has just entered
+/// a terminal failure state and has not yet been recorded in `cache`.
+///
+/// At most one log fetch is performed per terminal-failure transition; the
+/// cache key `(target, run_id)` guarantees that subsequent polls observing
+/// the same state are no-ops. `run_id` must parse as a `u64` (cloud workflow
+/// run IDs) — local / SSH / Windows targets carry non-numeric Shipyard job
+/// IDs in their dispatched-run record and are skipped here because the GHA
+/// API surface does not know how to address them.
+#[must_use]
+pub fn collect_watch_diagnostics<F: DiagnosticsFetcher + ?Sized>(
+    state: &ShipState,
+    fetcher: &F,
+    cache: &mut WatchDiagnosticsCache,
+) -> Vec<WatchTargetDiagnostics> {
+    let mut out = Vec::new();
+    if state.repo.is_empty() {
+        return out;
+    }
+    for run in &state.dispatched_runs {
+        if !is_terminal_failure_status(&run.status) {
+            continue;
+        }
+        let Ok(run_id) = run.run_id.parse::<u64>() else {
+            // Non-numeric run IDs come from local / SSH / Windows backends
+            // (the Shipyard internal job ID); skip — the GHA API can't
+            // address them.
+            continue;
+        };
+        if cache.contains(&run.target, run_id) {
+            continue;
+        }
+        let parser = select_parser(None);
+        let resolved = fetch_failed_job_diagnostics(
+            fetcher,
+            &state.repo,
+            run_id,
+            &run.target,
+            parser.as_ref(),
+        );
+        let kind = match run.status.as_str() {
+            "cancelled" | "canceled" => FailureKind::Cancelled,
+            "timed_out" => FailureKind::TimedOut,
+            _ => FailureKind::Failed,
+        };
+        cache.mark(&run.target, run_id);
+        out.push(WatchTargetDiagnostics {
+            target_name: run.target.clone(),
+            provider: run.provider.clone(),
+            run_id,
+            kind,
+            diagnostics: resolved,
+        });
+    }
+    out
+}
+
+/// Convenience overload of [`collect_watch_diagnostics`] that uses the
+/// production [`GhDiagnosticsFetcher`].
+#[must_use]
+pub fn collect_watch_diagnostics_gh(
+    state: &ShipState,
+    cache: &mut WatchDiagnosticsCache,
+) -> Vec<WatchTargetDiagnostics> {
+    let fetcher = GhDiagnosticsFetcher;
+    collect_watch_diagnostics(state, &fetcher, cache)
+}
+
+fn is_terminal_failure_status(status: &str) -> bool {
+    TERMINAL_FAILURE_RUN_STATUSES.contains(&status)
+}
+
+fn failure_kind_label(kind: FailureKind) -> &'static str {
+    match kind {
+        FailureKind::Cancelled => "cancelled",
+        FailureKind::TimedOut => "timed_out",
+        FailureKind::Failed => "failed",
+    }
+}
+
 /// Emit one watch snapshot, either as a JSON update event or human-readable text.
 pub fn emit_watch_snapshot<W: Write>(
     state: &ShipState,
@@ -149,16 +293,29 @@ pub fn emit_watch_snapshot<W: Write>(
     json: bool,
     stdout: &mut W,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    emit_watch_snapshot_with_diagnostics(state, reuse_map, &[], json, stdout)
+}
+
+/// Emit one watch snapshot, optionally appending the Phase 2 diagnostics block
+/// for any target that has just entered a terminal-failure state.
+pub fn emit_watch_snapshot_with_diagnostics<W: Write>(
+    state: &ShipState,
+    reuse_map: &BTreeMap<String, String>,
+    diagnostics: &[WatchTargetDiagnostics],
+    json: bool,
+    stdout: &mut W,
+) -> Result<(), Box<dyn std::error::Error>> {
     let now = Utc::now();
     if json {
-        return emit_watch_json_snapshot(state, reuse_map, now, stdout);
+        return emit_watch_json_snapshot(state, reuse_map, diagnostics, now, stdout);
     }
-    emit_watch_human_snapshot(state, reuse_map, now, stdout)
+    emit_watch_human_snapshot(state, reuse_map, diagnostics, now, stdout)
 }
 
 fn emit_watch_json_snapshot<W: Write>(
     state: &ShipState,
     reuse_map: &BTreeMap<String, String>,
+    diagnostics: &[WatchTargetDiagnostics],
     now: DateTime<Utc>,
     stdout: &mut W,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -182,12 +339,34 @@ fn emit_watch_json_snapshot<W: Write>(
                 .collect::<Result<Vec<_>, _>>()?,
         ),
     );
+    if !diagnostics.is_empty() {
+        data.insert(
+            "diagnostics".to_owned(),
+            Value::Array(diagnostics.iter().map(json_diagnostics).collect()),
+        );
+    }
     data.insert(
         "updated_at".to_owned(),
         Value::from(state.updated_at.to_rfc3339()),
     );
     write_json_envelope(stdout, "watch", data)?;
     Ok(())
+}
+
+fn json_diagnostics(entry: &WatchTargetDiagnostics) -> Value {
+    let details = &entry.diagnostics;
+    let job = details.job.as_ref();
+    serde_json::json!({
+        "failed_target": entry.target_name,
+        "provider": entry.provider,
+        "run_id": entry.run_id,
+        "kind": failure_kind_label(entry.kind),
+        "cloud_job_id": job.map(|info| info.job_id),
+        "cloud_job_name": job.map(|info| info.name.clone()),
+        "cloud_job_url": job.map(|info| info.html_url.clone()),
+        "failed_step": job.and_then(|info| info.failed_step.clone()),
+        "details": details,
+    })
 }
 
 fn json_evidence_snapshot(
@@ -219,6 +398,7 @@ fn json_evidence_snapshot(
 fn emit_watch_human_snapshot<W: Write>(
     state: &ShipState,
     reuse_map: &BTreeMap<String, String>,
+    diagnostics: &[WatchTargetDiagnostics],
     now: DateTime<Utc>,
     stdout: &mut W,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -296,6 +476,75 @@ fn emit_watch_human_snapshot<W: Write>(
         )?;
     }
 
+    render_watch_diagnostics(diagnostics, stdout)?;
+
+    Ok(())
+}
+
+/// Render the Phase 1 diagnostics block, mirroring the shape used by
+/// `render_validation_failed` in `src/app/ship_cmd.rs` so users see the same
+/// "Job / URL / Step / Tests" layout regardless of which command surfaced the
+/// failure.
+fn render_watch_diagnostics<W: Write>(
+    diagnostics: &[WatchTargetDiagnostics],
+    stdout: &mut W,
+) -> std::io::Result<()> {
+    if diagnostics.is_empty() {
+        return Ok(());
+    }
+    writeln!(
+        stdout,
+        "  \u{2717} {} terminal-failure transition{} this poll:",
+        diagnostics.len(),
+        if diagnostics.len() == 1 { "" } else { "s" }
+    )?;
+    for entry in diagnostics {
+        match entry.kind {
+            FailureKind::Cancelled => {
+                writeln!(
+                    stdout,
+                    "    \u{223C} Validation cancelled (concurrency-replaced or skipped); not a failure"
+                )?;
+                writeln!(stdout, "      Target:  {}", entry.target_name)?;
+            }
+            FailureKind::TimedOut => {
+                writeln!(stdout, "    \u{2717} Validation timed out")?;
+                writeln!(stdout, "      Target:  {}", entry.target_name)?;
+            }
+            FailureKind::Failed => {
+                writeln!(
+                    stdout,
+                    "      Target:  {} (cloud={})",
+                    entry.target_name, entry.provider
+                )?;
+                if let Some(job) = entry.diagnostics.job.as_ref() {
+                    writeln!(stdout, "      Job:     {}", job.name)?;
+                    if !job.html_url.is_empty() {
+                        writeln!(stdout, "      URL:     {}", job.html_url)?;
+                    }
+                    if let Some(step) = job.failed_step.as_deref() {
+                        writeln!(stdout, "      Step:    \"{step}\"")?;
+                    }
+                } else if let Some(run_id) = entry.diagnostics.run_id {
+                    writeln!(
+                        stdout,
+                        "      Run ID:  {run_id} (failed-job lookup unavailable)"
+                    )?;
+                }
+                if !entry.diagnostics.failure_summary.is_empty() {
+                    writeln!(stdout, "      Tests:")?;
+                    for line in &entry.diagnostics.failure_summary {
+                        writeln!(stdout, "        {line}")?;
+                    }
+                    if entry.diagnostics.failure_summary_truncated {
+                        writeln!(stdout, "        (truncated; see job log for full list)")?;
+                    }
+                } else if entry.diagnostics.log_tail.is_some() {
+                    writeln!(stdout, "      Tests:   (no recognised footer; see job URL)")?;
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -472,9 +721,12 @@ mod tests {
     use chrono::{Duration, Utc};
 
     use super::{
-        emit_watch_snapshot, format_stuck_queued_duration, is_stuck_queued, queued_for_secs,
-        reused_evidence_map, ship_terminal_verdict, watch_event_signature, watch_signature,
+        WatchDiagnosticsCache, collect_watch_diagnostics, emit_watch_snapshot,
+        emit_watch_snapshot_with_diagnostics, format_stuck_queued_duration, is_stuck_queued,
+        queued_for_secs, reused_evidence_map, ship_terminal_verdict, watch_event_signature,
+        watch_signature,
     };
+    use crate::diagnostics::{DiagnosticsError, DiagnosticsFetcher};
     use crate::evidence::{EvidenceRecord, EvidenceStore};
     use crate::ship_state::{DispatchedRun, ShipState};
 
@@ -661,5 +913,298 @@ mod tests {
             ],
         );
         assert_eq!(ship_terminal_verdict(&state), None);
+    }
+
+    // ----- Phase 2 (issue #303) -----
+
+    /// Fake [`DiagnosticsFetcher`] that returns canned responses and counts
+    /// the number of jobs / log fetches it received, so tests can assert that
+    /// the watch cache really prevents refetching across polls.
+    struct FakeFetcher {
+        jobs_json: String,
+        log: String,
+        jobs_calls: std::cell::Cell<usize>,
+        log_calls: std::cell::Cell<usize>,
+    }
+
+    impl FakeFetcher {
+        fn new(jobs_json: String, log: String) -> Self {
+            Self {
+                jobs_json,
+                log,
+                jobs_calls: std::cell::Cell::new(0),
+                log_calls: std::cell::Cell::new(0),
+            }
+        }
+    }
+
+    impl DiagnosticsFetcher for FakeFetcher {
+        fn fetch_jobs_json(&self, _repo: &str, _run_id: u64) -> Result<String, DiagnosticsError> {
+            self.jobs_calls.set(self.jobs_calls.get() + 1);
+            Ok(self.jobs_json.clone())
+        }
+
+        fn fetch_job_log(&self, _repo: &str, _job_id: u64) -> Result<String, DiagnosticsError> {
+            self.log_calls.set(self.log_calls.get() + 1);
+            Ok(self.log.clone())
+        }
+    }
+
+    fn failed_jobs_payload() -> String {
+        serde_json::json!({
+            "total_count": 1,
+            "jobs": [{
+                "id": 12_345,
+                "name": "macOS (ARM64) [namespace]",
+                "html_url": "https://github.com/owner/repo/actions/runs/9999/job/12345",
+                "conclusion": "failure",
+                "steps": [{"name": "Test", "conclusion": "failure"}],
+                "labels": ["namespace-profile-foo"]
+            }]
+        })
+        .to_string()
+    }
+
+    fn failed_ctest_log() -> String {
+        "noise\nThe following tests FAILED:\n\t10 - synth_test (Failed)\nErrors while running CTest\n".to_owned()
+    }
+
+    fn failed_run(target: &str, provider: &str, run_id: u64) -> DispatchedRun {
+        let mut run = run(target, "failed", &run_id.to_string(), true);
+        run.provider = provider.to_owned();
+        run
+    }
+
+    #[test]
+    fn collect_watch_diagnostics_fetches_for_terminal_failure() {
+        let state = state(
+            42,
+            &[("mac", "fail")],
+            vec![failed_run("mac", "namespace", 9_999)],
+        );
+        let fetcher = FakeFetcher::new(failed_jobs_payload(), failed_ctest_log());
+        let mut cache = WatchDiagnosticsCache::new();
+
+        let diagnostics = collect_watch_diagnostics(&state, &fetcher, &mut cache);
+
+        assert_eq!(diagnostics.len(), 1);
+        let entry = &diagnostics[0];
+        assert_eq!(entry.target_name, "mac");
+        assert_eq!(entry.provider, "namespace");
+        assert_eq!(entry.run_id, 9_999);
+        let job = entry
+            .diagnostics
+            .job
+            .as_ref()
+            .expect("job metadata present");
+        assert_eq!(job.job_id, 12_345);
+        assert!(job.html_url.contains("/runs/9999/job/12345"));
+        assert_eq!(entry.diagnostics.failure_summary.len(), 1);
+        assert!(entry.diagnostics.failure_summary[0].contains("synth_test"));
+    }
+
+    #[test]
+    fn collect_watch_diagnostics_caches_repeat_polls() {
+        let state = state(
+            42,
+            &[("mac", "fail")],
+            vec![failed_run("mac", "namespace", 9_999)],
+        );
+        let fetcher = FakeFetcher::new(failed_jobs_payload(), failed_ctest_log());
+        let mut cache = WatchDiagnosticsCache::new();
+
+        let first = collect_watch_diagnostics(&state, &fetcher, &mut cache);
+        let second = collect_watch_diagnostics(&state, &fetcher, &mut cache);
+
+        assert_eq!(first.len(), 1, "first poll fetches");
+        assert!(
+            second.is_empty(),
+            "second poll on identical terminal-fail state must not refetch"
+        );
+        assert_eq!(
+            fetcher.jobs_calls.get(),
+            1,
+            "expected exactly one jobs fetch across two polls"
+        );
+        assert_eq!(
+            fetcher.log_calls.get(),
+            1,
+            "expected exactly one log fetch across two polls"
+        );
+    }
+
+    #[test]
+    fn collect_watch_diagnostics_skips_local_run_ids() {
+        // Local/SSH/Windows backends store the Shipyard internal job ID, which
+        // is not numeric. We must not call GHA for those.
+        let state = state(
+            42,
+            &[("mac", "fail")],
+            vec![{
+                let mut r = run("mac", "failed", "shipyard-internal-id-xyz", true);
+                r.provider = "local".to_owned();
+                r
+            }],
+        );
+        let fetcher = FakeFetcher::new(failed_jobs_payload(), failed_ctest_log());
+        let mut cache = WatchDiagnosticsCache::new();
+
+        let diagnostics = collect_watch_diagnostics(&state, &fetcher, &mut cache);
+
+        assert!(diagnostics.is_empty());
+        assert_eq!(fetcher.jobs_calls.get(), 0);
+        assert_eq!(fetcher.log_calls.get(), 0);
+    }
+
+    #[test]
+    fn collect_watch_diagnostics_skips_non_terminal_runs() {
+        let state = state(
+            42,
+            &[],
+            vec![{
+                let mut r = run("mac", "in_progress", "9999", true);
+                r.provider = "namespace".to_owned();
+                r
+            }],
+        );
+        let fetcher = FakeFetcher::new(failed_jobs_payload(), failed_ctest_log());
+        let mut cache = WatchDiagnosticsCache::new();
+
+        let diagnostics = collect_watch_diagnostics(&state, &fetcher, &mut cache);
+
+        assert!(diagnostics.is_empty());
+        assert_eq!(fetcher.jobs_calls.get(), 0);
+    }
+
+    #[test]
+    fn watch_human_render_contains_failing_job_url() {
+        let state = state(
+            42,
+            &[("mac", "fail")],
+            vec![failed_run("mac", "namespace", 9_999)],
+        );
+        let fetcher = FakeFetcher::new(failed_jobs_payload(), failed_ctest_log());
+        let mut cache = WatchDiagnosticsCache::new();
+        let diagnostics = collect_watch_diagnostics(&state, &fetcher, &mut cache);
+        let mut stdout = Vec::new();
+
+        emit_watch_snapshot_with_diagnostics(
+            &state,
+            &std::collections::BTreeMap::new(),
+            &diagnostics,
+            false,
+            &mut stdout,
+        )
+        .expect("watch snapshot");
+        let text = String::from_utf8(stdout).expect("utf8");
+
+        assert!(
+            text.contains("https://github.com/owner/repo/actions/runs/9999/job/12345"),
+            "human render must include failing job URL:\n{text}"
+        );
+        assert!(
+            text.contains("macOS (ARM64) [namespace]"),
+            "human render must name the failing job:\n{text}"
+        );
+        assert!(
+            text.contains("synth_test"),
+            "human render must include parsed CTest footer:\n{text}"
+        );
+    }
+
+    #[test]
+    fn watch_json_render_includes_diagnostics_block() {
+        let state = state(
+            42,
+            &[("mac", "fail")],
+            vec![failed_run("mac", "namespace", 9_999)],
+        );
+        let fetcher = FakeFetcher::new(failed_jobs_payload(), failed_ctest_log());
+        let mut cache = WatchDiagnosticsCache::new();
+        let diagnostics = collect_watch_diagnostics(&state, &fetcher, &mut cache);
+        let mut stdout = Vec::new();
+
+        emit_watch_snapshot_with_diagnostics(
+            &state,
+            &std::collections::BTreeMap::new(),
+            &diagnostics,
+            true,
+            &mut stdout,
+        )
+        .expect("json snapshot");
+        let value: serde_json::Value = serde_json::from_slice(&stdout).expect("json");
+
+        let diag_array = value["diagnostics"]
+            .as_array()
+            .expect("diagnostics array on transition payload");
+        assert_eq!(diag_array.len(), 1);
+        let diag = &diag_array[0];
+        assert_eq!(diag["failed_target"], "mac");
+        assert_eq!(diag["run_id"], 9_999);
+        assert_eq!(diag["provider"], "namespace");
+        assert_eq!(diag["kind"], "failed");
+        assert_eq!(diag["cloud_job_id"], 12_345);
+        assert!(
+            diag["cloud_job_url"]
+                .as_str()
+                .expect("job url string")
+                .contains("/runs/9999/job/12345")
+        );
+        assert_eq!(diag["failed_step"], "Test");
+        assert_eq!(
+            diag["details"]["failed_target"], "mac",
+            "details should round-trip through Phase 1's FailureDiagnostics schema"
+        );
+    }
+
+    #[test]
+    fn watch_json_render_omits_diagnostics_when_empty() {
+        let state = state(42, &[], vec![]);
+        let mut stdout = Vec::new();
+
+        emit_watch_snapshot(
+            &state,
+            &std::collections::BTreeMap::new(),
+            true,
+            &mut stdout,
+        )
+        .expect("json snapshot");
+        let value: serde_json::Value = serde_json::from_slice(&stdout).expect("json");
+
+        assert!(
+            value.get("diagnostics").is_none(),
+            "in-flight watch payloads must not include an empty diagnostics array"
+        );
+    }
+
+    #[test]
+    fn collect_watch_diagnostics_classifies_cancelled_and_timed_out() {
+        let mut state = state(
+            42,
+            &[("mac", "fail")],
+            vec![{
+                let mut r = run("mac", "cancelled", "9999", true);
+                r.provider = "namespace".to_owned();
+                r
+            }],
+        );
+        let fetcher = FakeFetcher::new(failed_jobs_payload(), failed_ctest_log());
+        let mut cache = WatchDiagnosticsCache::new();
+        let diagnostics = collect_watch_diagnostics(&state, &fetcher, &mut cache);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(matches!(
+            diagnostics[0].kind,
+            crate::diagnostics::FailureKind::Cancelled
+        ));
+
+        // Now flip to timed_out and force a new run_id so the cache lets it through.
+        state.dispatched_runs[0].status = "timed_out".to_owned();
+        state.dispatched_runs[0].run_id = "10000".to_owned();
+        let diagnostics = collect_watch_diagnostics(&state, &fetcher, &mut cache);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(matches!(
+            diagnostics[0].kind,
+            crate::diagnostics::FailureKind::TimedOut
+        ));
     }
 }
