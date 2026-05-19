@@ -160,9 +160,23 @@ impl Display for ShipPreflightError {
                     writeln!(formatter, "{note}")?;
                 }
                 writeln!(formatter)?;
+                // Issue #301 (3/3): cite the `--skip-target` escape hatch in
+                // the error itself so an agent following CLAUDE.md doesn't
+                // need to re-derive it. Names every unreachable target so the
+                // exact flag invocation is copy-pasteable.
+                let skip_flags = failures
+                    .iter()
+                    .map(|f| format!("--skip-target {}", f.target_name))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                writeln!(formatter, "Options:")?;
+                writeln!(
+                    formatter,
+                    "  - Fix the backend (check network, SSH key, hostname), OR"
+                )?;
                 write!(
                     formatter,
-                    "Options:\n  - Fix the backend (check network, SSH key, hostname)"
+                    "  - Skip the target(s) that don't apply to this change: {skip_flags}"
                 )
             }
         }
@@ -360,11 +374,57 @@ mod tests {
     use serde_json::json;
     use toml::Table;
 
-    use super::{ShipPreflightError, daemon_skew_note_from_relation, run_ship_preflight};
+    use super::{
+        ShipPreflightError, TargetPreflightFailure, daemon_skew_note_from_relation,
+        run_ship_preflight,
+    };
     use crate::config::{LoadedConfig, LocalOverlaySource};
     use crate::daemon_version::DaemonVersionRelation;
     use crate::executor::dispatch::{ExecutorDispatcher, resolve_targets_from_table};
     use crate::job::ValidationMode;
+
+    /// Issue #301 (3/3): the unreachable-target Display surface must cite the
+    /// `--skip-target` escape hatch with the exact target names so an agent
+    /// can copy-paste the recovery flag.
+    #[test]
+    fn backend_unreachable_display_names_skip_target_flag() {
+        let err = ShipPreflightError::BackendUnreachable {
+            failures: vec![
+                TargetPreflightFailure {
+                    target_name: "ubuntu".to_owned(),
+                    backend: "ssh".to_owned(),
+                    message: "ssh: connect to host 192.168.64.10 port 22: Operation timed out"
+                        .to_owned(),
+                    failure_category: Some("ssh_unreachable".to_owned()),
+                },
+                TargetPreflightFailure {
+                    target_name: "windows".to_owned(),
+                    backend: "ssh".to_owned(),
+                    message: "ssh: connect to host 192.168.64.20 port 22: Operation timed out"
+                        .to_owned(),
+                    failure_category: Some("ssh_unreachable".to_owned()),
+                },
+            ],
+            skew_note: None,
+        };
+        let rendered = format!("{err}");
+        assert!(
+            rendered.contains("--skip-target ubuntu"),
+            "must name the ubuntu skip flag verbatim; got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("--skip-target windows"),
+            "must name the windows skip flag verbatim; got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("Skip the target(s) that don't apply"),
+            "must explain the choice; got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("Fix the backend"),
+            "must still offer the original 'fix the backend' option; got:\n{rendered}"
+        );
+    }
 
     fn config(data: &str, project_dir: Option<std::path::PathBuf>) -> LoadedConfig {
         LoadedConfig {
