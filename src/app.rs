@@ -495,6 +495,7 @@ fn handle_ship_variant<W: Write>(
             merge_command: None,
             merge_result: None,
             gh_command: None,
+            pr_snapshot_file: None,
             allow_unreachable_targets,
             skip_targets,
         },
@@ -2258,12 +2259,15 @@ mod tests {
         assert_eq!(store.list_archived().len(), 1);
     }
 
-    // FIXME(danielraffel/Shipyard#296): pre-existing deterministic-on-some-hosts
-    // failure on origin/main — same `merge_result: Failure` path issue as
-    // `ship_command_green_merge_failure_keeps_active_state_and_exits_success`
-    // in ship_cmd.rs. Both ignored so unrelated PRs can land. Real fix needs
-    // a separate investigation of execute_auto_merge state-store sequencing.
-    #[ignore = "pre-existing flake — Shipyard issue #296"]
+    // Regression coverage for Shipyard issue #296: without an isolated
+    // `--pr-snapshot-file`, `execute_auto_merge`'s failure path falls
+    // through to `pr_is_merged`, which shells out to `gh pr view <pr>`
+    // against the process CWD's `origin` remote. When that remote happens
+    // to host a real merged PR with the same number (PR #14 in
+    // danielraffel/Shipyard *is* merged), the test would observe
+    // `AutoMergeOutcome::Merged` instead of the synthetic `MergeFailed`.
+    // The snapshot file pins `pr_is_merged` to `state=OPEN` so the
+    // failure-path archive escape hatch stays closed in the test.
     #[test]
     fn auto_merge_failure_preserves_state() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -2271,6 +2275,8 @@ mod tests {
         store
             .save(&auto_merge_state(14, &[("macos", "pass")]))
             .expect("save");
+        let snapshot = temp.path().join("pr.json");
+        std::fs::write(&snapshot, r#"{"state":"OPEN"}"#).expect("write snapshot");
         let cli = Cli::parse_from([
             "shipyard",
             "--json",
@@ -2280,6 +2286,8 @@ mod tests {
             "14",
             "--merge-result",
             "failure",
+            "--pr-snapshot-file",
+            snapshot.to_str().expect("snapshot path"),
         ]);
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();

@@ -114,6 +114,7 @@ pub(super) fn pr_command<W: Write>(
             merge_command: None,
             merge_result: None,
             gh_command: None,
+            pr_snapshot_file: None,
             allow_unreachable_targets: args.allow_unreachable_targets,
             skip_targets: args.skip_targets,
         },
