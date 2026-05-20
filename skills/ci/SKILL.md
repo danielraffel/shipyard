@@ -362,6 +362,41 @@ Run it as a launchd/systemd service for prevention; pair with
 they replace the legacy `runner-watchdog.sh --fix` workflow that today
 masks wedges as required-check failures.
 
+### Reaping stale workflow runs: `runner watch --reap-stale-runs`
+
+`--kill-hung-workers` reaps hung *processes* on the runner host.
+`--reap-stale-runs` is the **run-level** complement: on every tick it
+lists the repo's GitHub Actions runs and cancels genuinely-stale ones
+repo-wide — including runs on **GitHub-hosted** runners, which the
+process-level reaper cannot see.
+
+```sh
+# Auto-cancel stale workflow runs on every tick:
+shipyard runner watch --reap-stale-runs
+
+# Preview only — log what would be cancelled, cancel nothing:
+shipyard runner watch --reap-stale-runs --dry-run --json
+
+# Override thresholds (minutes):
+shipyard runner watch --reap-stale-runs \
+  --reap-in-progress-max-min 240 --reap-queued-max-min 360
+```
+
+What it cancels on every tick:
+
+1. Runs stuck `in_progress` longer than `--reap-in-progress-max-min`
+   (default ~5h) — hung runs squatting until GitHub's 6h timeout.
+2. Runs stuck `queued` longer than `--reap-queued-max-min` (default
+   ~8h) — orphaned runs waiting on a runner label/branch that no longer
+   exists, which never hit any `timeout-minutes`.
+
+Thresholds are deliberately well past any healthy run, so an in-flight
+Shipyard validation run is never touched. Configure persistent defaults
+in `[runner.watchdog]` (`reap_in_progress_max_min` /
+`reap_queued_max_min`). Emits `runner.watch` JSON envelopes with
+`event=reap_stale_run` and `phase` ∈ {`attempt`, `cancelled`, `failed`,
+`skipped`} (`skipped` only under `--dry-run`).
+
 ## Waiting on conditions (`shipyard wait`)
 
 Whenever you'd otherwise write a polling loop around `gh` — wait for a release to upload, wait for a PR's required checks to go green, wait for a dispatched workflow run to finish — reach for `shipyard wait` instead. It opens a daemon subscription first (if one's running), takes one authoritative `gh` snapshot, and either exits 0 immediately or keeps re-evaluating on real webhook events (no extra REST budget). When the daemon isn't running, it falls back to polling transparently — safe to use on headless CI too.
