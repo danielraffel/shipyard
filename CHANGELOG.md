@@ -3,6 +3,11 @@
 All notable changes to Shipyard are documented here. Each entry links
 to its [GitHub Release](https://github.com/danielraffel/Shipyard/releases).
 
+<a id="v0600"></a>
+## [0.60.0]
+
+- feat(runner): `runner watch --reap-stale-runs` — on every watch tick, cancel stale GitHub Actions workflow *runs* repo-wide: runs stuck `in_progress` past `--reap-in-progress-max-min` (default ~5h, hung) and runs stuck `queued` past `--reap-queued-max-min` (default ~8h, orphaned). The run-level complement to `--kill-hung-workers`. Supports `--dry-run` and emits `event=reap_stale_run` JSON envelopes (`phase ∈ {attempt,cancelled,failed,skipped}`). Thresholds are overridable via flag or `[runner.watchdog]` config keys `reap_in_progress_max_min` / `reap_queued_max_min`. Closes #312.
+
 <a id="v0590"></a>
 ## [0.59.0]
 

@@ -122,6 +122,9 @@ max_job_min = 90
 max_queue_age_hours = 2
 watch_interval_seconds = 300
 auto_fix = false
+# Stale-run reaper thresholds (minutes) for `runner watch --reap-stale-runs`:
+reap_in_progress_max_min = 300
+reap_queued_max_min = 480
 ```
 
 ## Supervised Subprocess Marker (issue #266)
