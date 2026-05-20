@@ -386,9 +386,18 @@ What it cancels on every tick:
 
 1. Runs stuck `in_progress` longer than `--reap-in-progress-max-min`
    (default ~5h) — hung runs squatting until GitHub's 6h timeout.
+   Age is measured from `run_started_at` (execution start), **not**
+   `created_at`, so a run that sat queued for hours before starting is
+   not mistaken for hung; when GitHub omits `run_started_at` the
+   computation falls back to `created_at`.
 2. Runs stuck `queued` longer than `--reap-queued-max-min` (default
    ~8h) — orphaned runs waiting on a runner label/branch that no longer
-   exists, which never hit any `timeout-minutes`.
+   exists, which never hit any `timeout-minutes`. A queued run never
+   started, so its age is measured from `created_at`.
+
+Both status queries are paginated (`per_page=100`, up to 5 pages each),
+so busy repos with more than one page of `queued` / `in_progress` runs
+are fully scanned and the oldest entries are never missed.
 
 Thresholds are deliberately well past any healthy run, so an in-flight
 Shipyard validation run is never touched. Configure persistent defaults

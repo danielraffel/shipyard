@@ -30,8 +30,12 @@ use crate::runner_watchdog::{
 };
 
 const QUEUED_RUNS_LIMIT: u32 = 100;
-/// Max API result size for each run-status listing during a reaper tick.
-const REAP_RUNS_LIMIT: u32 = 100;
+/// Cap on the number of paginated `gh api` calls per reaper tick, per status.
+/// Each page is 100 items, so the worst case is 500 `in_progress` + 500
+/// `queued` runs scanned — far beyond any healthy repo. The paginated listers
+/// stop early on the first short page, so a small repo still costs one call
+/// per status.
+const REAP_RUNS_MAX_PAGES: u32 = 5;
 
 /// Entry point dispatched from `src/app.rs`.
 pub(super) fn runner_command<W: Write>(
@@ -865,11 +869,19 @@ fn reap_stale_runs_tick<W: Write>(
     json: bool,
     stdout: &mut W,
 ) -> Result<(), CliFailure> {
+    // Paginate both status queries so repos with more than one page of
+    // `in_progress` / `queued` runs are fully covered — a single 100-item
+    // page would silently miss the oldest (and most likely stale) entries.
     let in_progress = actions
-        .list_runs_with_status(&settings.repo_slug, "in_progress", None, REAP_RUNS_LIMIT)
+        .list_runs_with_status_paginated(
+            &settings.repo_slug,
+            "in_progress",
+            None,
+            REAP_RUNS_MAX_PAGES,
+        )
         .map_err(|error| CliFailure::new(1, error.to_string()))?;
     let queued = actions
-        .list_runs_with_status(&settings.repo_slug, "queued", None, REAP_RUNS_LIMIT)
+        .list_runs_with_status_paginated(&settings.repo_slug, "queued", None, REAP_RUNS_MAX_PAGES)
         .map_err(|error| CliFailure::new(1, error.to_string()))?;
 
     let stale = compute_stale_runs(&in_progress, &queued, thresholds, Utc::now());
